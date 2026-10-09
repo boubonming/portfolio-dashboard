@@ -17,7 +17,7 @@ func TestMigrationsAreIdempotentAndEnforceDecimalText(t *testing.T) {
 	if err := first.DB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 1 {
+	if migrationCount != 2 {
 		t.Fatalf("migration count = %d", migrationCount)
 	}
 	var foreignKeys int
@@ -43,7 +43,7 @@ func TestMigrationsAreIdempotentAndEnforceDecimalText(t *testing.T) {
 	if err := second.DB.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 1 {
+	if migrationCount != 2 {
 		t.Fatalf("repeat migration count = %d", migrationCount)
 	}
 }
