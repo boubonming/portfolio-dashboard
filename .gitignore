@@ -35,6 +35,9 @@ frontend/node_modules/
 internal/web/dist/
 *.sqlite
 portfolio-dashboard
+!cmd/
+!cmd/portfolio-dashboard/
+!cmd/portfolio-dashboard/*.go
 preview.json
 
 # Editor/IDE

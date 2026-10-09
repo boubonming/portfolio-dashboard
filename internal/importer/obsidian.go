@@ -17,6 +17,13 @@ var moneyPattern = regexp.MustCompile(`(?i)\b(USD|SGD|MYR|JPY)\s+([0-9][0-9,]*(?
 var datePattern = regexp.MustCompile(`\b(20[0-9]{2}-[0-9]{2}-[0-9]{2})\b`)
 var decimalPattern = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?$`)
 
+const (
+	ApprovedSourceTableRows = 35
+	ApprovedLots            = 33
+	ApprovedAggregateRows   = 2
+	ApprovedDistinctSymbols = 31
+)
+
 // PreviewFile reads a markdown source and never opens or writes a database.
 func PreviewFile(filename string) (domain.Preview, error) {
 	data, err := os.ReadFile(filename)
@@ -113,6 +120,49 @@ func PreviewMarkdown(markdown, source string) (domain.Preview, error) {
 	sort.Strings(preview.Summary.Anomalies)
 	preview.Summary.AnomalyCount = len(preview.Summary.Anomalies)
 	return preview, nil
+}
+
+// ValidateApproved enforces the reconciliation approved for the initial import.
+// A preview may describe anomalies, while an apply must fail closed on malformed
+// accounting fields.
+func ValidateApproved(preview domain.Preview) error {
+	s := preview.Summary
+	if s.SourceTableRows != ApprovedSourceTableRows || s.LotsIncluded != ApprovedLots ||
+		s.AggregateRows != ApprovedAggregateRows || s.DistinctSymbols != ApprovedDistinctSymbols {
+		return fmt.Errorf("reconciliation counts differ: rows=%d lots=%d aggregates=%d symbols=%d; want %d/%d/%d/%d",
+			s.SourceTableRows, s.LotsIncluded, s.AggregateRows, s.DistinctSymbols,
+			ApprovedSourceTableRows, ApprovedLots, ApprovedAggregateRows, ApprovedDistinctSymbols)
+	}
+	if len(preview.Unsupported) != 0 {
+		return fmt.Errorf("source contains %d unsupported rows", len(preview.Unsupported))
+	}
+	allowedCurrencies := map[string]bool{"USD": true, "SGD": true, "MYR": true, "JPY": true}
+	for _, lot := range preview.Lots {
+		if !lot.Included {
+			continue
+		}
+		if lot.Symbol == "" || !allowedCurrencies[lot.Currency] {
+			return fmt.Errorf("invalid symbol or currency at source row %d", lot.SourceRow)
+		}
+		if !decimalPattern.MatchString(lot.Quantity) {
+			return fmt.Errorf("invalid quantity at source row %d", lot.SourceRow)
+		}
+		if lot.UnitCost == nil && lot.CostBasis == nil {
+			return fmt.Errorf("missing cost at source row %d", lot.SourceRow)
+		}
+		if lot.UnitCost != nil && !decimalPattern.MatchString(*lot.UnitCost) {
+			return fmt.Errorf("invalid unit cost at source row %d", lot.SourceRow)
+		}
+		if lot.CostBasis != nil && !decimalPattern.MatchString(*lot.CostBasis) {
+			return fmt.Errorf("invalid cost basis at source row %d", lot.SourceRow)
+		}
+		for _, issue := range lot.Issues {
+			if strings.Contains(issue, "invalid") {
+				return fmt.Errorf("%s at source row %d", issue, lot.SourceRow)
+			}
+		}
+	}
+	return nil
 }
 
 func isSeparator(line string) bool {
