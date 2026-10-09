@@ -10,12 +10,14 @@ reviewed: 2026-10-09
 
 This record freezes the Phase A defaults and records the market-data decision needed before scaffolding.
 
-No single free provider is fully validated against this portfolio yet. The recommended MVP path is:
+No free operational provider or provider combination is validated against this portfolio yet. In particular, EOD Historical Data (EODHD) is not an approved MVP primary: its official limits page says the free plan's 20 calls/day are “enough to try the endpoints out, not to run an application” ([API limits](https://eodhd.com/financial-apis/api-limits)). Its one-symbol EOD request shape cannot support a coherent refresh of this inventory within one free-plan day without a measured, explicitly accepted staging design.
 
-1. Use EOD Historical Data (EODHD) as the primary candidate for end-of-day equity, ETF, REIT and crypto quotes, subject to the key-gated symbol and plan checks in this record.
-2. Use its exchange-symbol and search endpoints to validate every mapping before importing a quote.
-3. Keep an explicit, sourced, dated manual quote override for any instrument or FX pair that the free account does not cover. An uncovered instrument remains unvalued; it is never assigned a fabricated or zero price.
-4. Do not scaffold ingestion until the provider-key coverage check and the reconciled import preview have both been approved.
+The bounded strategy evaluated below is:
+
+1. Treat EODHD as useful for coverage and key-gated mapping experiments, or for a highly limited staged refresh only if a measured design proves that all required instruments and FX can be refreshed inside one coherent valuation window. It is not selected as the free primary.
+2. Compare a global-equity candidate, a crypto complement and a legitimate FX source using only their official documentation. General claims such as "global" do not prove coverage of the exact SGX, Bursa Malaysia, Japan and LSE holdings.
+3. Keep provider selection as a hard gate. Until exact identity, coverage, quota, timestamp and private display/storage terms are evidenced, use an implementation-neutral provider adapter and, only after scaffolding is authorized, explicitly sourced manual overrides. An uncovered instrument remains unvalued; it is never assigned a fabricated or zero price.
+4. Do not scaffold ingestion until the provider decision, reconciled import preview and measured quota/terms checks have all been approved.
 
 This is a personal, single-user, end-of-day/manual-refresh MVP decision. It does not authorize an account signup, credential access, deployment, or application implementation.
 
@@ -73,7 +75,7 @@ The MVP needs daily or manually refreshed end-of-day prices, explicit quote/fetc
 
 The following claims are limited to the linked official documentation. A provider's general marketing statement is not treated as proof that every holding is available on the free plan.
 
-### EODHD (primary candidate)
+### EODHD (coverage/key-experiment candidate; not an approved primary)
 
 - **Coverage and identity:** EODHD documents 150,000+ tickers across 70+ exchanges and provides exchange lists, per-exchange symbol lists and a search API: [quick start](https://eodhd.com/financial-apis/quick-start-with-our-financial-data-apis), [exchanges and ticker lists](https://eodhd.com/financial-apis/exchanges-api-list-of-tickers-and-trading-hours), and [covered tickers](https://eodhd.com/financial-apis/covered-tickers-eodhd). Its documented ticker form is `SYMBOL.EXCHANGE`, with examples `AAPL.US` and `BP.LSE`; `US` and `LSE` are explicitly shown in the exchange documentation. Its public exchange page documents Bursa Malaysia as `KLSE` and shows `5212.KLSE` in MYR: [KLSE exchange page](https://eodhd.com/exchange/KLSE). The official crypto documentation uses virtual exchange `CC` and pairs such as `BTC-USD.CC`: [crypto coverage](https://eodhd.com/financial-apis/list-supported-crypto-currencies). This supports a credible path for US, London, Malaysia and crypto, but SGX, the exact Japan code and every exact symbol remain key-query gates.
 - **Free quota:** The free EOD plan documents 20 API calls per day and only the past year of history, with one symbol per EOD request: [EOD historical API](https://eodhd.com/financial-apis/api-for-historical-data-and-volumes) and [API limits](https://eodhd.com/financial-apis/api-limits). Exchange-symbol list, search and EOD requests are billed; failed unverified lookups are also billed. The implementation must enumerate and cache the relevant symbol lists before requesting prices and must not probe guesses in a loop.
@@ -84,7 +86,8 @@ The following claims are limited to the linked official documentation. A provide
 
 ### Marketstack (credible alternative, not selected as the primary)
 
-- **Coverage and quota:** Its official documentation describes 70+ exchanges and 170,000+ tickers from more than 50 countries, while the free plan is 100 requests per month, EOD only and one year of history: [API documentation](https://docs.apilayer.com/marketstack/docs/api-endpoints-v1) and [pricing](https://marketstack.com/pricing). This is attractive for global stock/ETF discovery but does not document a crypto feed in the cited stock API material. The free quota is too small for an unverified 31-instrument plus FX workflow unless results are heavily cached.
+- **Coverage and identity:** Its official documentation describes 70+ exchanges and 170,000+ tickers from more than 50 countries, while the free plan is 100 requests per month, EOD only and one year of history: [API documentation](https://docs.apilayer.com/marketstack/docs/api-endpoints-v1) and [pricing](https://marketstack.com/pricing). This is attractive for global stock/ETF discovery but does not document a crypto feed in the cited stock API material. The free quota is too small for an unverified 31-instrument plus FX workflow unless results are heavily cached.
+- **Required-venue check:** The official pages consulted do not explicitly name or prove the exact SGX, Bursa Malaysia, Japan or LSE mappings needed by this portfolio. The 70+ / 2700+ exchange marketing and ticker claims are discovery leads, not validation of those four venues or of the exact ADR, ETF and REIT symbols.
 - **Timestamps and identity:** The official EOD response documents an ISO-8601 UTC `date`, symbol, exchange MIC, raw and adjusted prices, split factor and dividend fields. The same documentation describes exchange and ticker endpoints. This is useful evidence for timestamp and corporate-action fields, but actual symbols for SGX, Bursa, Japan and the ADR/ETF cases still require a real account query.
 - **Licensing/display:** The free plan is explicitly marked non-commercial on the official pricing page. It does not by itself establish permission to redistribute market data; private authenticated display and local retention must be confirmed in the applicable terms. It covers stock data, not the complete crypto requirement. It is therefore a fallback for equities only, not a complete provider.
 
@@ -110,16 +113,45 @@ The following claims are limited to the linked official documentation. A provide
 ### CoinGecko (crypto-only complement, not a complete provider)
 
 - **Coverage and identity:** CoinGecko's official API offers coin IDs, symbols, names and platform/contract addresses, and its price endpoint can return a `last_updated_at` Unix timestamp: [coin list](https://docs.coingecko.com/reference/coins-list) and [simple price](https://docs.coingecko.com/reference/simple-price). This is useful for resolving BTC, ETH and XRP identity, but it has no equity exchange coverage and therefore cannot be the portfolio provider.
-- **Quota and key handling:** The official authentication documentation requires a backend-held key for the Pro API and says successful requests consume monthly credits; the usage endpoint reports the plan's rate and monthly credits: [authentication](https://docs.coingecko.com/reference/authentication) and [usage](https://docs.coingecko.com/reference/api-usage). The public documentation consulted here does not establish a free quota suitable for the complete dashboard, so no free quota is assumed.
+- **Required-venue check:** SGX, Bursa Malaysia, Japan and LSE are not applicable to this crypto-only source; it provides no evidence for any of those equity venues. Exact crypto identity must be established with canonical IDs and, where relevant, platform/contract metadata.
+- **Quota and key handling:** The keyless public API documentation says its rate limits are significantly lower than keyed plans and that it is not suitable for production workloads, scheduled polling or high-frequency updates: [keyless public API](https://docs.coingecko.com/docs/keyless-public-api). The official rate-limit documentation gives the Demo plan 100 calls/minute, while the usage endpoint reports the account's monthly credits: [rate limits](https://docs.coingecko.com/docs/errors-and-rate-limits) and [usage](https://docs.coingecko.com/reference/api-usage). A monthly free-credit entitlement and private display/storage permission are not established by the consulted pages, so CoinGecko is not an approved operational complement until those terms are confirmed.
 - **Corporate-action/licensing caveat:** Token symbol lookups can be ambiguous; use canonical IDs and contract/platform identity, not a bare `ETH`/`XRP` string. CoinGecko's crypto aggregate price is not an equity-style exchange close and must be labeled accordingly. Any attribution, storage and display requirements must be checked against the applicable plan terms before use.
+
+### Open Exchange Rates (FX-only complement, not yet validated)
+
+- **Quota and scope:** The official free-plan documentation states 1,000 requests/month, hourly updates and a USD base currency: [plans and pricing](https://support.openexchangerates.org/article/69-plans-pricing-guide) and [free plan](https://openexchangerates.org/signup/free). A single latest-rates response can return the USD, MYR, SGD and JPY rates needed to derive USD/MYR, SGD/MYR and JPY/MYR, but the derivation direction and source timestamp must be recorded rather than inferred from a symbol. The free plan's USD base restriction means this is not a direct three-pair entitlement.
+- **Timestamps and identity:** The official API documentation describes a Unix `timestamp`, `base` and `rates` response and the `/latest.json` endpoint: [latest rates](https://docs.openexchangerates.org/reference/latest-json). Currency codes are ISO 4217 identifiers in the response; this does not establish that each rate is an exchange close or that all rates share the same market convention.
+- **Required-venue check:** SGX, Bursa Malaysia, Japan and LSE are not equity venues for this FX-only source. It can identify currencies and publish rates, but it cannot validate an instrument listing on any of those exchanges.
+- **Private display/storage terms:** The free-plan pages establish plan limits but do not establish a complete private-dashboard display, retention or redistribution right. Applicable [terms](https://openexchangerates.org/terms/) and any account-specific terms must be checked before use. This source is therefore a legitimate FX candidate, not a validated MVP source.
+
+### Bounded multi-source conclusion
+
+The narrowest plausible free composition is Marketstack for global-equity EOD data, CoinGecko for BTC/ETH/XRP identity and USD prices, and Open Exchange Rates for FX. It is not selected. Marketstack documents 2700+ stock exchanges and ticker metadata, but its official pages do not explicitly prove the exact SGX, Bursa Malaysia, Japan and LSE mappings needed here; its free plan is 100 requests/month, EOD-only, one year of history and non-commercial ([pricing](https://marketstack.com/pricing), [API documentation](https://marketstack.com/documentation)). CoinGecko explicitly supplies canonical coin identity and `last_updated_at` through its coin and simple-price endpoints ([coin list](https://docs.coingecko.com/reference/coins-list), [simple price](https://docs.coingecko.com/reference/simple-price)), but the free operational and display terms remain unvalidated. Open Exchange Rates supplies a documented free FX quota and timestamp, but its private display/storage terms and the derived-pair semantics remain unvalidated. Marketing-wide coverage claims do not substitute for exact symbol queries.
+
+The alternatives are similarly bounded: EODHD has the explicit 20-calls/day limit and one-symbol EOD shape documented above; Twelve Data documents 8 credits/minute, 800/day and internal non-display usage ([pricing](https://twelvedata.com/pricing)), and therefore cannot support this displayed dashboard on the free tier without separate permission; Alpha Vantage documents 25 requests/day and personal/non-commercial terms ([support](https://www.alphavantage.co/support/), [terms](https://www.alphavantage.co/terms_of_service/)), but does not prove the exact multi-market mappings; FMP documents 250 calls/day but places global coverage, crypto/forex and display/licensing behind paid or separately licensed tiers ([pricing](https://site.financialmodelingprep.com/developer/docs/pricing)).
+
+#### One-refresh request budget and cadence
+
+Use a conservative one-request-per-source-symbol/pair budget until endpoint batching is measured. The 31-source-symbol inventory comprises 28 non-crypto equity/ETF/REIT/ADR symbols and three crypto symbols. A strict separated-source refresh is therefore 28 Marketstack equity requests + 3 CoinGecko crypto requests + 3 Open Exchange Rates pair-equivalent FX requests = **34 requests**. To avoid giving a batching or derived-pair optimization the status of evidence, the hard-gate test also records the upper-bound planning budget of **37 calls**: 31 inventory calls + 3 FX calls + 3 separately counted crypto calls. Discovery, retries and failed lookups are additional and cannot be charged against this minimum.
+
+| Candidate design | Documented free limit | Minimum 34-call refresh | Conservative 37-call refresh | Maximum feasible cadence before discovery/retries |
+|---|---|---:|---:|---|
+| EODHD alone (including its crypto/FX candidates) | 20 calls/day; one symbol per EOD request ([limits](https://eodhd.com/financial-apis/api-limits), [EOD API](https://eodhd.com/financial-apis/api-for-historical-data-and-volumes)) | 2 days of calls | 2 days of calls | No coherent same-day refresh; two calendar days is the theoretical minimum and is rejected unless a measured design proves a common valuation window. |
+| Marketstack + CoinGecko + Open Exchange Rates | 100 Marketstack requests/month; CoinGecko Demo 100 calls/minute but monthly credits/terms unconfirmed; Open Exchange Rates 1,000 requests/month ([Marketstack pricing](https://marketstack.com/pricing), [CoinGecko limits](https://docs.coingecko.com/docs/errors-and-rate-limits), [OXR plans](https://support.openexchangerates.org/article/69-plans-pricing-guide)) | 2 complete monthly refreshes under the Marketstack cap (68 calls) | 2 complete monthly refreshes (74 calls) | At most two full refreshes per calendar month on the documented Marketstack cap, approximately 15 days apart; this is not operationally approved because exact coverage and terms are unproven. |
+| CoinGecko crypto complement alone | Demo 100 calls/minute; monthly credits and private display/storage terms unconfirmed ([rate limits](https://docs.coingecko.com/docs/errors-and-rate-limits), [usage](https://docs.coingecko.com/reference/api-usage)) | 3 crypto calls fit in one minute | 3 crypto calls fit in one minute | Theoretical minute-level quota fit only; keyless use is expressly not suitable for scheduled production polling, so no operational cadence is approved. |
+| Open Exchange Rates FX complement alone | 1,000 requests/month, hourly updates; free plan has one base currency and no time-series/conversion requests ([plans](https://support.openexchangerates.org/article/69-plans-pricing-guide), [latest](https://docs.openexchangerates.org/reference/latest-json)) | 3 pair-equivalent calls; 333 refreshes/month theoretical | 3 pair-equivalent calls; 333 refreshes/month theoretical | No more than hourly new-rate cadence; one USD-base latest request could reduce calls, but that optimization and display/storage terms are not yet validated. |
+| Twelve Data free tier | 8 credits/minute, 800/day, internal non-display usage ([pricing](https://twelvedata.com/pricing)) | Within daily quota | Within daily quota | Request count fits, but private dashboard display is expressly not evidenced; reject for this use without separate permission. |
+| Alpha Vantage free tier | 25 requests/day ([support](https://www.alphavantage.co/support/)) | 2 days of calls | 2 days of calls | No coherent same-day refresh; two days is a theoretical minimum and exact venue coverage is unproven. |
+
+The 34/37-call figures exclude exchange-symbol discovery, identity checks, metadata, retries and failed requests. A provider combination is not feasible merely because the arithmetic fits across a billing period: quotes from materially different valuation dates cannot be combined into one portfolio snapshot. Any staged refresh must either prove one coherent valuation window for all holdings and FX or leave the affected valuation incomplete and visibly flagged.
 
 ## 3. Provider decision and quote policy
 
 ### Decision
 
-EODHD is the primary free-provider candidate because its official documentation combines a free EOD endpoint, global exchange-symbol discovery, explicit US/LSE/KLSE evidence, crypto coverage and split/dividend endpoints. This is a candidate decision, not a claim that coverage is complete: the provider-key queries listed below are hard gates.
+No provider or provider combination is selected as the free operational primary. EODHD remains useful for coverage/key experiments and possibly a highly limited staged refresh, but its documented 20-calls/day free quota and one-symbol EOD shape do not support approval for this application without a measured design proving a coherent valuation window. The bounded Marketstack + CoinGecko + Open Exchange Rates composition is also not validated: exact holdings coverage and private display/storage rights remain unproven.
 
-The evidence does not validate one free provider for every exact holding, every FX pair and every required display right. Until those gates pass, the system must treat the portfolio as partially valued. Any uncovered equity, ETF, ADR, REIT, crypto pair or FX pair receives a sourced manual quote override only when all of the following are recorded:
+Provider selection is a hard gate. Until exact identity, coverage, quota, timestamps and display/storage terms pass for every required data class, the system must treat the portfolio as partially valued. After scaffolding is authorized, any uncovered equity, ETF, ADR, REIT, crypto pair or FX pair may receive a sourced manual quote override only when all of the following are recorded:
 
 - provider/source name and direct source URL;
 - exact source symbol or instrument identity;
@@ -138,13 +170,13 @@ The MVP uses completed end-of-day prices and manual refresh. A quote record must
 
 Corporate actions require a reconciliation decision before valuation: match splits, reverse splits, ticker changes, ADR ratio changes, ETF actions and delistings to the source quantity and cost basis. Until reconciled, block the affected valuation rather than silently adjusting the user's supplied lots.
 
-## 4. Symbol mappings requiring a real provider-key query
+## 4. Symbol mappings requiring a real provider query
 
-No provider key was accessed for this decision record. The following queries must be run against the EODHD account before quote ingestion. The source symbol must remain unchanged beside the returned provider mapping.
+No provider key was accessed for this decision record. If a candidate account is authorized, the following identity queries must be run against the selected provider(s) before quote ingestion. The source symbol must remain unchanged beside the returned provider mapping.
 
 ### Equity, ETF and REIT identity queries
 
-Query the relevant exchange-symbol list/search endpoint first; do not spend the 20-call daily allowance guessing individual EOD tickers. Confirm provider code, exchange, name, asset type, quote currency, MIC/venue where returned, active status and any ADR/ETF/REIT metadata.
+Query the relevant exchange-symbol list/search endpoint first; do not spend a free allowance guessing individual tickers. Confirm provider code, exchange, name, asset type, quote currency, MIC/venue where returned, active status and any ADR/ETF/REIT metadata. For EODHD specifically, the 20-call/day allowance makes this sequencing mandatory.
 
 - US composite candidates: `NVDA.US`, `INTC.US`, `MU.US`, `AMD.US`, `GOOG.US`, `ABNB.US`, `IVV.US`, `MSFT.US`, `KO.US`, `ARM.US`, `MCD.US`, `UBER.US`, `DIS.US`, `PTON.US`, `SE.US`, `U.US`, `BABA.US`, and `NIO.US`.
 - Source value requiring literal-form validation: `T.US` (do not silently rewrite it; query the literal source form and the provider's documented US form, then record the accepted identity).
@@ -164,7 +196,7 @@ Resolve the source symbols to provider canonical identities and quote pairs:
 - `ETH` -> provider canonical Ethereum identity and USD pair;
 - `XRP` -> provider canonical XRP identity and USD pair.
 
-For EODHD, the documented candidate form is `BTC-USD.CC`, `ETH-USD.CC` and `XRP-USD.CC`, but each must be confirmed in the current `CC` symbol list. Do not use a token symbol without identity metadata.
+For EODHD, the documented candidate form is `BTC-USD.CC`, `ETH-USD.CC` and `XRP-USD.CC`, but each must be confirmed in the current `CC` symbol list. For CoinGecko, use canonical coin IDs rather than symbols. Do not use a token symbol without identity metadata.
 
 ### FX identity queries
 
@@ -176,9 +208,9 @@ Validate exact direction and timestamp for at least:
 
 If the provider only returns inverse pairs, record the explicit inversion rule and precision. The implementation must not assume that `MYRUSD` is interchangeable with `USDMYR` without an explicit mathematical direction and timestamp.
 
-### Least-privilege account/config requirement
+### Least-privilege candidate-account/config requirement
 
-If the free EODHD account is required, the operator must create only a free individual account and an API token with the provider's ordinary read-only API scope needed for exchange-symbol/search, EOD and permitted FX endpoints. No trading, brokerage, write, webhook or portfolio-upload permission is needed or requested. Store the token only in a server-side runtime secret/environment setting after implementation authorization; never put it in Git, the Obsidian vault, frontend assets, URLs, logs or this record. Do not request or expose the token in chat. The key must not be accessed during this documentation task.
+If a free candidate account is required, the operator must create only the minimum individual account and read-only API access needed for the selected provider's identity, quote and permitted FX endpoints. No trading, brokerage, write, webhook or portfolio-upload permission is needed or requested. Store any token only in a server-side runtime secret/environment setting after implementation authorization; never put it in Git, the Obsidian vault, frontend assets, URLs, logs or this record. Do not request or expose the token in chat. No key was accessed during this documentation task.
 
 Before using any provider data in the dashboard, the operator must confirm that the selected free plan permits the intended private authenticated display and local cache. If it does not, use a permitted provider/plan or retain sourced manual overrides; do not bypass terms.
 
@@ -239,7 +271,7 @@ Scaffolding Go, React, SQLite, Docker or provider ingestion remains blocked unti
 
 1. **Import preview reconciliation:** Produce a preview directly from the authoritative holdings note, preserving every source symbol, quantity, original currency and supplied cost. Reconcile all 33 source rows/lot entries exactly once into 31 distinct instruments, with NVDA and INTC aggregate rows excluded from the import. Resolve or explicitly flag any ambiguous identity, ADR ratio, ETF listing, REIT classification and missing transaction metadata.
 2. **Explicit import approval:** The user reviews and explicitly approves the reconciled preview. Approval must not modify the Obsidian source note.
-3. **Provider-key coverage validation:** Obtain a free provider key only through an operator-controlled account workflow, then query exchange-symbol/search endpoints for every mapping in Section 4 and the required FX pairs. Record the exact returned symbol, exchange, asset type, currency, active status and plan entitlement. Do not place the secret in the repository or decision record.
+3. **Provider coverage validation:** After a provider is selected, obtain any free key only through an operator-controlled account workflow, then query identity endpoints for every mapping in Section 4 and the required FX pairs. Record the exact returned symbol, exchange, asset type, currency, active status and plan entitlement. Do not place a secret in the repository or decision record.
 4. **Free-plan quota test:** Confirm that the chosen refresh design fits the actual free daily/monthly quota after identity discovery, FX calls, retries and manual refresh. Cache metadata and avoid repeated failed lookups.
 5. **Display/storage terms check:** Confirm that the selected plan permits the intended private authenticated display and local cache. If not, select a permitted alternative or use sourced manual overrides for the uncovered data.
 6. **Timestamp and price-basis test:** Demonstrate a real response with a usable market/as-of timestamp, retrieval timestamp, quote currency and documented raw/adjusted basis. Confirm exchange holiday/weekend behavior and reject future or currency-mismatched data.
@@ -260,10 +292,11 @@ Scaffolding Go, React, SQLite, Docker or provider ingestion remains blocked unti
 - EODHD data sources/partners: https://eodhd.com/financial-apis/our-data-sources-and-data-partners
 - EODHD splits/dividends: https://eodhd.com/financial-apis/api-splits-dividends
 - EODHD pricing/register: https://eodhd.com/pricing and https://eodhd.com/register
-- Marketstack docs/pricing: https://docs.apilayer.com/marketstack/docs/api-endpoints-v1 and https://marketstack.com/pricing
+- Marketstack docs/pricing: https://docs.apilayer.com/marketstack/docs/api-endpoints-v1 and https://marketstack.com/documentation and https://marketstack.com/pricing
 - Twelve Data docs/pricing/terms: https://twelvedata.com/docs, https://twelvedata.com/pricing, https://twelvedata.com/terms
 - Alpha Vantage docs/support/terms: https://www.alphavantage.co/documentation/, https://www.alphavantage.co/support/, https://www.alphavantage.co/terms_of_service/
 - Financial Modeling Prep pricing: https://site.financialmodelingprep.com/developer/docs/pricing
-- CoinGecko authentication/usage/identity: https://docs.coingecko.com/reference/authentication, https://docs.coingecko.com/reference/api-usage, https://docs.coingecko.com/reference/coins-list, https://docs.coingecko.com/reference/simple-price
+- CoinGecko authentication/usage/identity/limits: https://docs.coingecko.com/reference/authentication, https://docs.coingecko.com/reference/api-usage, https://docs.coingecko.com/reference/coins-list, https://docs.coingecko.com/reference/simple-price, https://docs.coingecko.com/docs/keyless-public-api, https://docs.coingecko.com/docs/errors-and-rate-limits
+- Open Exchange Rates plans/latest/terms: https://support.openexchangerates.org/article/69-plans-pricing-guide, https://openexchangerates.org/signup/free, https://docs.openexchangerates.org/reference/latest-json, https://openexchangerates.org/terms/
 
 This record is documentation only. It does not create accounts, access credentials, modify the Obsidian vault, deploy infrastructure or begin application implementation.
