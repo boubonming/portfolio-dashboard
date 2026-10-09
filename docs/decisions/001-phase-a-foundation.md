@@ -12,6 +12,12 @@ This record freezes the Phase A defaults and records the market-data decision ne
 
 No free operational provider or provider combination is validated against this portfolio yet. In particular, EOD Historical Data (EODHD) is not an approved MVP primary: its official limits page says the free plan's 20 calls/day are “enough to try the endpoints out, not to run an application” ([API limits](https://eodhd.com/financial-apis/api-limits)). Its one-symbol EOD request shape cannot support a coherent refresh of this inventory within one free-plan day without a measured, explicitly accepted staging design.
 
+### Implementation amendment: approved free daily composition
+
+The user subsequently approved a provider-neutral implementation using this free daily composition: Finnhub for US-listed equities, Alpha Vantage for international end-of-day prices where key-gated exact symbol coverage succeeds, CoinGecko for crypto, and Open Exchange Rates for FX. Instruments not covered by those sources remain explicitly unavailable or use a dated, sourced manual override; the application must never fabricate or zero-fill a price. This approval authorizes the storage, provenance and adapter foundations only; it does not authorize credential access or live provider calls in this slice.
+
+Exact international Alpha Vantage symbol and exchange coverage remains a live-connector validation item. It is not a blocker for provider-neutral foundations, but no quote should be presented as covered until the real key-gated query confirms identity, currency, timestamp, quota and applicable display/storage terms. The same validation requirements apply to the other providers before production ingestion.
+
 The bounded strategy evaluated below is:
 
 1. Treat EODHD as useful for coverage and key-gated mapping experiments, or for a highly limited staged refresh only if a measured design proves that all required instruments and FX can be refreshed inside one coherent valuation window. It is not selected as the free primary.
