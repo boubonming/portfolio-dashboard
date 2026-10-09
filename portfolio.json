@@ -1,0 +1,38 @@
+{
+  "as_of": "2026-10-01",
+  "currency": "SGD",
+  "holdings": [
+    {
+      "symbol": "NOVA",
+      "name": "Nova Foods Co.",
+      "quantity": 120,
+      "average_cost": 18.40,
+      "current_price": 22.15,
+      "category": "Equities"
+    },
+    {
+      "symbol": "HARBOR",
+      "name": "Harbor Infrastructure Fund",
+      "quantity": 80,
+      "average_cost": 31.20,
+      "current_price": 29.85,
+      "category": "Funds"
+    },
+    {
+      "symbol": "SGOV",
+      "name": "Singapore Treasury Notes",
+      "quantity": 25,
+      "average_cost": 100.00,
+      "current_price": 101.10,
+      "category": "Bonds"
+    },
+    {
+      "symbol": "ORCHID",
+      "name": "Orchid Technology Ltd.",
+      "quantity": 45,
+      "average_cost": 12.60,
+      "current_price": 15.40,
+      "category": "Equities"
+    }
+  ]
+}
