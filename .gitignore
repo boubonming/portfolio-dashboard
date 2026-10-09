@@ -28,6 +28,15 @@ go.work.sum
 # env file
 .env
 
+# Dependency directories
+frontend/node_modules/
+
+# Generated application/frontend artifacts
+internal/web/dist/
+*.sqlite
+portfolio-dashboard
+preview.json
+
 # Editor/IDE
 # .idea/
 # .vscode/
