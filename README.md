@@ -75,3 +75,66 @@ go run ./cmd/portfolio-dashboard import-status \
 ```
 
 Status reports portfolio, instrument, lot, import-item and audit-event counts, currencies, source hash and import timestamp. It does not include quantities, cost values or source-row text.
+
+## Phase B: dated observations and immutable snapshots
+
+This slice performs exact accounting with a standard-library `math/big` rational
+decimal implementation. Values are parsed directly from decimal strings, stored
+as canonical SQLite `TEXT`, and serialized as JSON strings; no `float64` path is
+used. Multiplication is exact. FX division uses an explicit 18-decimal,
+half-away-from-zero rounding rule. Display rounding is deliberately outside the
+ledger calculation.
+
+There are no live provider clients or credentials in this phase. The domain
+boundary names the planned Finnhub, Alpha Vantage, CoinGecko and Open Exchange
+Rates providers plus manual overrides, while the administrative commands below
+insert only dated, provenance-bearing observations supplied by an operator.
+
+Add a quote (the symbol/currency pair must already exist in the approved import):
+
+```sh
+go run ./cmd/portfolio-dashboard quote-add -db /path/to/portfolio-dashboard.sqlite \
+  -symbol 1295 -currency MYR -price 4.75 -source manual \
+  -market-at 2026-10-09T08:00:00Z -basis close \
+  -provenance 'broker statement or reviewed source reference'
+```
+
+Add an explicitly directed FX observation:
+
+```sh
+go run ./cmd/portfolio-dashboard fx-add -db /path/to/portfolio-dashboard.sqlite \
+  -base USD -quote MYR -rate 4.20 -source manual \
+  -market-at 2026-10-09T08:00:00Z -basis close \
+  -provenance 'dated source reference'
+```
+
+Both commands reject malformed or non-positive decimals, unknown instruments,
+ambiguous currency pairs, future market timestamps beyond the controlled
+tolerance, and missing source/basis/provenance. Writes are append-only and
+produce audit events. Replacing a historical observation is not supported.
+
+Create and inspect a snapshot without dumping private lot values:
+
+```sh
+go run ./cmd/portfolio-dashboard snapshot-create -db /path/to/portfolio-dashboard.sqlite \
+  -reporting-currency MYR -as-of 2026-10-09T12:00:00Z -max-age 36h
+go run ./cmd/portfolio-dashboard snapshot-status -db /path/to/portfolio-dashboard.sqlite
+go run ./cmd/portfolio-dashboard snapshot-show -db /path/to/portfolio-dashboard.sqlite \
+  -snapshot SNAPSHOT_ID
+```
+
+Use `-include-lots` on `snapshot-show` only when explicitly required. A snapshot
+binds the imported lot/source hashes, selected quote and FX IDs, reporting
+currency, calculation version, UTC creation/as-of timestamps and presentation
+timezone metadata (`Asia/Singapore`). Identical calculation inputs and version
+return the existing immutable snapshot; a new calculation version receives a
+new snapshot ID instead of mutating history.
+
+Fresh observations are classified in UTC as `fresh`, `stale`, `future`,
+`invalid`, or `missing`; SGT is presentation metadata only. Missing or stale
+quotes/rates never become zero. The aggregate status reports original-currency
+subtotals and source timestamps while setting `complete: false` and omitting a
+reporting total whenever any dependency is unavailable. A complete reporting
+total is emitted only when every lot has a valid quote and a unique explicit FX
+path to the selected reporting currency. Inverted FX paths are supported, while
+multiple possible paths are rejected as ambiguous.

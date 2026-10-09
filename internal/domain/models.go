@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 // Lot is a source-traceable opening holding parsed from the authoritative note.
 type Lot struct {
 	Symbol          string   `json:"symbol"`
@@ -67,4 +69,123 @@ type ImportStatus struct {
 	Currencies      []string `json:"currencies"`
 	SourceSHA256    string   `json:"source_sha256,omitempty"`
 	ImportedAt      string   `json:"imported_at,omitempty"`
+}
+
+const (
+	Fresh   = "fresh"
+	Stale   = "stale"
+	Missing = "missing"
+	Future  = "future"
+	Invalid = "invalid"
+)
+
+// Quote and FXRate are provider-neutral observations. Values remain strings
+// at storage/API boundaries and are parsed as Decimal in calculations.
+type Quote struct {
+	ID           string `json:"id"`
+	InstrumentID string `json:"instrument_id"`
+	Symbol       string `json:"symbol,omitempty"`
+	Price        string `json:"price"`
+	Currency     string `json:"currency"`
+	Source       string `json:"source"`
+	MarketAt     string `json:"market_at"`
+	FetchedAt    string `json:"fetched_at"`
+	Basis        string `json:"basis"`
+	Provenance   string `json:"provenance"`
+}
+
+type FXRate struct {
+	ID            string `json:"id"`
+	BaseCurrency  string `json:"base_currency"`
+	QuoteCurrency string `json:"quote_currency"`
+	Rate          string `json:"rate"`
+	Source        string `json:"source"`
+	MarketAt      string `json:"market_at"`
+	FetchedAt     string `json:"fetched_at"`
+	Basis         string `json:"basis,omitempty"`
+	Provenance    string `json:"provenance"`
+}
+
+type Freshness struct {
+	Status   string `json:"status"`
+	MarketAt string `json:"market_at,omitempty"`
+	Age      string `json:"age,omitempty"`
+}
+
+type ValuationLot struct {
+	ID           string  `json:"lot_id"`
+	ImportRunID  string  `json:"import_run_id,omitempty"`
+	SourceSHA256 string  `json:"source_sha256,omitempty"`
+	InstrumentID string  `json:"instrument_id"`
+	Symbol       string  `json:"symbol"`
+	Currency     string  `json:"currency"`
+	Quantity     string  `json:"quantity"`
+	UnitCost     *string `json:"unit_cost,omitempty"`
+	CostBasis    *string `json:"cost_basis,omitempty"`
+}
+
+type LotValuation struct {
+	LotID          string    `json:"lot_id"`
+	Symbol         string    `json:"symbol"`
+	Currency       string    `json:"currency"`
+	Quantity       string    `json:"quantity"`
+	Price          string    `json:"price,omitempty"`
+	MarketValue    string    `json:"market_value,omitempty"`
+	CostBasis      *string   `json:"cost_basis,omitempty"`
+	UnrealisedPnL  *string   `json:"unrealised_pnl,omitempty"`
+	ReportingValue *string   `json:"reporting_value,omitempty"`
+	QuoteID        string    `json:"quote_id,omitempty"`
+	FXIDs          []string  `json:"fx_ids,omitempty"`
+	Freshness      Freshness `json:"freshness"`
+}
+
+type CurrencySubtotal struct {
+	Currency      string `json:"currency"`
+	MarketValue   string `json:"market_value"`
+	CostBasis     string `json:"cost_basis,omitempty"`
+	UnrealisedPnL string `json:"unrealised_pnl,omitempty"`
+}
+
+type ValuationInput struct {
+	Lots              []ValuationLot `json:"lots"`
+	Quotes            []Quote        `json:"quotes"`
+	FXRates           []FXRate       `json:"fx_rates"`
+	ReportingCurrency string         `json:"reporting_currency"`
+	AsOf              time.Time      `json:"as_of"`
+	MaxAge            time.Duration  `json:"-"`
+}
+
+type Valuation struct {
+	Complete             bool               `json:"complete"`
+	ReportingCurrency    string             `json:"reporting_currency"`
+	ReportingTotal       string             `json:"reporting_total,omitempty"`
+	Subtotals            []CurrencySubtotal `json:"subtotals"`
+	Lots                 []LotValuation     `json:"lots,omitempty"`
+	MissingDependencies  []string           `json:"missing_dependencies,omitempty"`
+	StaleDependencies    []string           `json:"stale_dependencies,omitempty"`
+	InvalidDependencies  []string           `json:"invalid_dependencies,omitempty"`
+	QuoteIDs             []string           `json:"quote_ids"`
+	FXIDs                []string           `json:"fx_ids"`
+	SourceTimestamps     []string           `json:"source_timestamps"`
+	PresentationTimezone string             `json:"presentation_timezone"`
+}
+
+type SnapshotStatus struct {
+	SnapshotID           string             `json:"snapshot_id"`
+	PortfolioID          string             `json:"portfolio_id"`
+	CalculationVersion   string             `json:"calculation_version"`
+	CreatedAt            string             `json:"created_at"`
+	AsOf                 string             `json:"as_of"`
+	Complete             bool               `json:"complete"`
+	ReportingCurrency    string             `json:"reporting_currency"`
+	ReportingTotal       string             `json:"reporting_total,omitempty"`
+	Currencies           []string           `json:"currencies"`
+	Subtotals            []CurrencySubtotal `json:"subtotals"`
+	MissingCount         int                `json:"missing_count"`
+	StaleCount           int                `json:"stale_count"`
+	InvalidCount         int                `json:"invalid_count"`
+	QuoteIDs             []string           `json:"quote_ids"`
+	FXIDs                []string           `json:"fx_ids"`
+	SourceTimestamps     []string           `json:"source_timestamps"`
+	PresentationTimezone string             `json:"presentation_timezone"`
 }
