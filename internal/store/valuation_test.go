@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,6 +84,10 @@ func TestSnapshotIsolatesPortfolioLotsAndProvenance(t *testing.T) {
 	if _, err = s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?)`, "lot-second", "portfolio-second", "instrument-second", "7", "USD", "second.md#row=1", secondHash, now); err != nil {
 		t.Fatal(err)
 	}
+	secondQuote, err := s.AddQuote(ctx, QuoteInput{InstrumentID: "instrument-second", Currency: "USD", Price: "3.25", Source: "manual", MarketAt: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano), Basis: "close", Provenance: "second-only fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	asOf := time.Now().UTC()
 	firstStatus, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: defaultPortfolioID, ReportingCurrency: "MYR", CalculationVersion: "isolation.v1", AsOf: asOf})
 	if err != nil {
@@ -112,6 +117,22 @@ func TestSnapshotIsolatesPortfolioLotsAndProvenance(t *testing.T) {
 		if lot.ID == "lot-second" || lot.SourceSHA256 == secondHash {
 			t.Fatalf("second portfolio lot leaked into first snapshot: %+v", lot)
 		}
+	}
+	firstEncoded, err := json.Marshal(firstPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPayloadText := string(firstEncoded)
+	for _, leaked := range []string{secondQuote.ID, secondQuote.Symbol, secondQuote.InstrumentID} {
+		if strings.Contains(firstPayloadText, leaked) {
+			t.Fatalf("second-only quote data leaked into first snapshot payload: %q", leaked)
+		}
+	}
+	if len(firstPayload.Input.Quotes) != 0 {
+		t.Fatalf("first portfolio quote count = %d, want 0", len(firstPayload.Input.Quotes))
+	}
+	if len(secondPayload.Input.Quotes) != 1 || secondPayload.Input.Quotes[0].ID != secondQuote.ID || secondPayload.Input.Quotes[0].Symbol != secondQuote.Symbol || secondPayload.Input.Quotes[0].InstrumentID != secondQuote.InstrumentID {
+		t.Fatalf("second portfolio quote payload = %+v", secondPayload.Input.Quotes)
 	}
 }
 

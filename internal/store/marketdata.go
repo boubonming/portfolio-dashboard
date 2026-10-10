@@ -199,7 +199,7 @@ func (s *Store) loadValuationInput(ctx context.Context, portfolioID, reportingCu
 	if err := rows.Err(); err != nil {
 		return input, err
 	}
-	quoteRows, err := s.DB.QueryContext(ctx, `SELECT q.id,q.instrument_id,i.symbol,q.price,q.currency,q.source,q.market_at,q.fetched_at,q.basis,q.provenance FROM quotes q JOIN instruments i ON i.id=q.instrument_id ORDER BY q.market_at DESC,q.fetched_at DESC`)
+	quoteRows, err := s.DB.QueryContext(ctx, `SELECT q.id,q.instrument_id,i.symbol,q.price,q.currency,q.source,q.market_at,q.fetched_at,q.basis,q.provenance FROM quotes q JOIN instruments i ON i.id=q.instrument_id WHERE EXISTS (SELECT 1 FROM lots l WHERE l.portfolio_id = ? AND l.instrument_id = q.instrument_id) ORDER BY q.market_at DESC,q.fetched_at DESC`, portfolioID)
 	if err != nil {
 		return input, err
 	}
