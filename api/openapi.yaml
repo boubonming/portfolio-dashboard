@@ -1,0 +1,112 @@
+openapi: 3.0.3
+info:
+  title: Portfolio Dashboard API
+  version: 1.0.0
+  description: Read-only, portfolio-scoped holdings and immutable valuation snapshot view.
+servers:
+  - url: /
+paths:
+  /api/v1/portfolios/{portfolioId}/overview:
+    get:
+      summary: Read one portfolio overview
+      description: Returns source-traceable lots and the latest immutable snapshot. Reporting currency changes only this read view.
+      operationId: getPortfolioOverview
+      parameters:
+        - name: portfolioId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: currency
+          in: query
+          required: false
+          description: Three-letter reporting currency; defaults to MYR.
+          schema: { type: string, pattern: '^[A-Za-z]{3}$', default: MYR, example: USD }
+      responses:
+        '200':
+          description: Portfolio overview. A no_snapshot or incomplete state is explicit and does not include a fabricated total.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PortfolioOverview' }
+        '400':
+          description: Invalid reporting currency.
+        '404':
+          description: Portfolio or API route not found.
+        '405':
+          description: Read-only endpoint does not accept mutation methods.
+        '500':
+          description: Internal server error.
+components:
+  schemas:
+    PortfolioOverview:
+      type: object
+      required: [portfolio, reporting_currency, snapshot, holdings]
+      properties:
+        portfolio: { $ref: '#/components/schemas/Portfolio' }
+        reporting_currency: { type: string, example: MYR }
+        snapshot: { $ref: '#/components/schemas/Snapshot' }
+        holdings:
+          type: array
+          items: { $ref: '#/components/schemas/Holding' }
+    Portfolio:
+      type: object
+      required: [id, name, default_reporting_currency]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        default_reporting_currency: { type: string }
+    Snapshot:
+      type: object
+      required: [state, complete, subtotals]
+      properties:
+        state: { type: string, enum: [complete, incomplete, no_snapshot] }
+        snapshot_id: { type: string }
+        calculation_version: { type: string }
+        created_at: { type: string, format: date-time }
+        as_of: { type: string, format: date-time }
+        complete: { type: boolean }
+        reporting_total: { type: string, description: Decimal string; present only when complete. }
+        missing_dependencies: { type: array, items: { type: string } }
+        stale_dependencies: { type: array, items: { type: string } }
+        invalid_dependencies: { type: array, items: { type: string } }
+        source_timestamps: { type: array, items: { type: string, format: date-time } }
+        subtotals:
+          type: array
+          items: { $ref: '#/components/schemas/CurrencySubtotal' }
+    CurrencySubtotal:
+      type: object
+      required: [currency, market_value]
+      properties:
+        currency: { type: string }
+        market_value: { type: string }
+        cost_basis: { type: string }
+        unrealised_pnl: { type: string }
+    Holding:
+      type: object
+      required: [lot_id, symbol, quantity, currency, freshness, data_quality, missing_broker, missing_acquisition_date]
+      properties:
+        lot_id: { type: string }
+        symbol: { type: string }
+        name: { type: string }
+        description: { type: string }
+        quantity: { type: string, description: Decimal string. }
+        currency: { type: string }
+        unit_cost: { type: string, description: Decimal string. }
+        cost_basis: { type: string, description: Decimal string. }
+        latest_price: { type: string, description: Decimal string. }
+        latest_value: { type: string, description: Decimal string. }
+        reporting_value: { type: string, description: Decimal string; only meaningful when the snapshot is complete. }
+        quote_source: { type: string }
+        freshness: { $ref: '#/components/schemas/Freshness' }
+        data_quality: { type: array, items: { type: string } }
+        broker: { type: string }
+        acquisition_date: { type: string }
+        missing_broker: { type: boolean }
+        missing_acquisition_date: { type: boolean }
+        source_row: { type: integer }
+    Freshness:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [fresh, stale, missing, future, invalid] }
+        market_at: { type: string, format: date-time }
+        age: { type: string }
