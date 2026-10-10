@@ -31,6 +31,7 @@ func (f *fakeRefreshClient) Quote(_ context.Context, request marketdata.QuoteReq
 type assignedRefreshClient struct {
 	provider marketdata.Provider
 	calls    []string
+	symbols  []string
 }
 
 func (f *assignedRefreshClient) Name() marketdata.Provider { return f.provider }
@@ -39,6 +40,7 @@ func (f *assignedRefreshClient) FX(context.Context, marketdata.FXRequest) (domai
 }
 func (f *assignedRefreshClient) Quote(_ context.Context, request marketdata.QuoteRequest) (domain.Quote, error) {
 	f.calls = append(f.calls, request.InstrumentID)
+	f.symbols = append(f.symbols, request.ProviderSymbol)
 	return domain.Quote{ID: "assigned-" + request.InstrumentID, InstrumentID: request.InstrumentID, Symbol: request.Symbol, Price: "2.5", Currency: request.Currency, Source: f.provider.String(), MarketAt: "2026-01-02T10:00:00Z", FetchedAt: "2026-01-02T12:00:00Z", Basis: "close", Provenance: "local fixture"}, nil
 }
 
@@ -170,6 +172,92 @@ func TestRefreshDefaultProvidersAssignEachInstrumentOnce(t *testing.T) {
 		if status.MissingMapping != 0 {
 			t.Fatalf("unexpected missing mappings: %+v", result.Providers)
 		}
+	}
+}
+
+func TestRefreshDefaultProvidersUseLatestMappingAcrossProviders(t *testing.T) {
+	ctx := context.Background()
+	s := openRefreshFixture(t)
+	defer s.Close()
+	for _, input := range []ProviderMappingInput{
+		{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "FH:LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"},
+		{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderAlphaVantage, ProviderSymbol: "AV:LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-02T00:00:00Z", Provenance: "fixture"},
+	} {
+		if _, err := s.AddProviderMapping(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finnhub := &assignedRefreshClient{provider: marketdata.ProviderFinnhub}
+	alpha := &assignedRefreshClient{provider: marketdata.ProviderAlphaVantage}
+	result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", Clients: map[marketdata.Provider]marketdata.ProviderClient{
+		marketdata.ProviderFinnhub: finnhub, marketdata.ProviderAlphaVantage: alpha, marketdata.ProviderOpenExchangeRates: marketdata.NoLiveClients{},
+	}, AsOf: time.Date(2026, 1, 3, 12, 0, 0, 0, time.UTC)})
+	if err != nil || result.Status != "complete" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(finnhub.calls) != 0 || len(alpha.calls) != 1 || alpha.calls[0] != "refresh-instrument" {
+		t.Fatalf("latest mapping was not selected: finnhub=%v alpha=%v", finnhub.calls, alpha.calls)
+	}
+}
+
+func TestRefreshRejectsCrossProviderMappingTieWithoutQuoteCall(t *testing.T) {
+	ctx := context.Background()
+	s := openRefreshFixture(t)
+	defer s.Close()
+	for _, input := range []ProviderMappingInput{
+		{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "FH:LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-02T00:00:00Z", Provenance: "fixture"},
+		{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderAlphaVantage, ProviderSymbol: "AV:LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-02T00:00:00Z", Provenance: "fixture"},
+	} {
+		if _, err := s.AddProviderMapping(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finnhub := &assignedRefreshClient{provider: marketdata.ProviderFinnhub}
+	alpha := &assignedRefreshClient{provider: marketdata.ProviderAlphaVantage}
+	result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", Clients: map[marketdata.Provider]marketdata.ProviderClient{
+		marketdata.ProviderFinnhub: finnhub, marketdata.ProviderAlphaVantage: alpha,
+	}, AsOf: time.Date(2026, 1, 3, 12, 0, 0, 0, time.UTC)})
+	if err != nil || result.Status != "incomplete" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(finnhub.calls) != 0 || len(alpha.calls) != 0 {
+		t.Fatalf("ambiguous mapping was quoted: finnhub=%v alpha=%v", finnhub.calls, alpha.calls)
+	}
+	var mappingErrors int
+	for _, status := range result.Providers {
+		for _, refreshError := range status.Errors {
+			if refreshError == "mapping_ambiguous" {
+				mappingErrors++
+			}
+		}
+	}
+	if mappingErrors != 1 {
+		t.Fatalf("expected one explicit mapping error, got %d: %+v", mappingErrors, result.Providers)
+	}
+}
+
+func TestRefreshExplicitProviderSubsetUsesLatestEligibleMapping(t *testing.T) {
+	ctx := context.Background()
+	s := openRefreshFixture(t)
+	defer s.Close()
+	for _, input := range []ProviderMappingInput{
+		{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "FH:LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"},
+		{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "FH:LOCAL-NEW", QuoteCurrency: "USD", ActiveFrom: "2026-01-02T00:00:00Z", Provenance: "fixture"},
+		{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderAlphaVantage, ProviderSymbol: "AV:LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-03T00:00:00Z", Provenance: "fixture"},
+	} {
+		if _, err := s.AddProviderMapping(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finnhub := &assignedRefreshClient{provider: marketdata.ProviderFinnhub}
+	result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", Providers: []marketdata.Provider{marketdata.ProviderFinnhub}, Clients: map[marketdata.Provider]marketdata.ProviderClient{
+		marketdata.ProviderFinnhub: finnhub,
+	}, AsOf: time.Date(2026, 1, 4, 12, 0, 0, 0, time.UTC)})
+	if err != nil || result.Status != "complete" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(finnhub.calls) != 1 || finnhub.calls[0] != "refresh-instrument" || len(finnhub.symbols) != 1 || finnhub.symbols[0] != "FH:LOCAL-NEW" {
+		t.Fatalf("subset did not use eligible Finnhub mapping: calls=%v symbols=%v", finnhub.calls, finnhub.symbols)
 	}
 }
 

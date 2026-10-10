@@ -28,9 +28,10 @@ type refreshTarget struct {
 }
 
 type refreshMappingPlan struct {
-	assignments map[marketdata.Provider]map[string]domain.ProviderMapping
-	missing     map[marketdata.Provider]int
-	lookupError map[marketdata.Provider]int
+	assignments      map[marketdata.Provider]map[string]domain.ProviderMapping
+	missing          map[marketdata.Provider]int
+	lookupError      map[marketdata.Provider]int
+	mappingAmbiguous map[marketdata.Provider]int
 }
 
 func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.RefreshResult, error) {
@@ -119,9 +120,10 @@ func (s *Store) activeMapping(ctx context.Context, target refreshTarget, provide
 
 func (s *Store) planRefreshMappings(ctx context.Context, targets []refreshTarget, providers []marketdata.Provider, asOf time.Time) (refreshMappingPlan, error) {
 	plan := refreshMappingPlan{
-		assignments: map[marketdata.Provider]map[string]domain.ProviderMapping{},
-		missing:     map[marketdata.Provider]int{},
-		lookupError: map[marketdata.Provider]int{},
+		assignments:      map[marketdata.Provider]map[string]domain.ProviderMapping{},
+		missing:          map[marketdata.Provider]int{},
+		lookupError:      map[marketdata.Provider]int{},
+		mappingAmbiguous: map[marketdata.Provider]int{},
 	}
 	quoteProviders := make([]marketdata.Provider, 0, len(providers))
 	seen := map[marketdata.Provider]bool{}
@@ -137,22 +139,48 @@ func (s *Store) planRefreshMappings(ctx context.Context, targets []refreshTarget
 		return plan, nil
 	}
 	for _, target := range targets {
-		assigned := false
+		var latest domain.ProviderMapping
+		var latestProvider marketdata.Provider
+		found := false
+		ambiguous := false
 		for _, provider := range quoteProviders {
 			mapping, err := s.activeMapping(ctx, target, provider, asOf)
 			if err == nil {
-				plan.assignments[provider][target.InstrumentID] = mapping
-				assigned = true
-				break
+				if !found {
+					latest = mapping
+					latestProvider = provider
+					found = true
+					continue
+				}
+				latestActive, parseErr := time.Parse(time.RFC3339Nano, latest.ActiveFrom)
+				mappingActive, mappingParseErr := time.Parse(time.RFC3339Nano, mapping.ActiveFrom)
+				if parseErr != nil || mappingParseErr != nil {
+					return refreshMappingPlan{}, fmt.Errorf("invalid active mapping timestamp for %s: %w", target.InstrumentID, errors.Join(parseErr, mappingParseErr))
+				}
+				switch {
+				case mappingActive.After(latestActive):
+					latest = mapping
+					latestProvider = provider
+					ambiguous = false
+				case mappingActive.Equal(latestActive):
+					ambiguous = true
+				}
+				continue
 			}
 			if !errors.Is(err, sql.ErrNoRows) {
 				plan.lookupError[provider]++
 			}
 		}
-		if !assigned {
+		if !found {
 			// A missing instrument belongs to one status only, rather than being
 			// counted once for every selected provider.
 			plan.missing[quoteProviders[0]]++
+		} else if ambiguous {
+			// A cross-provider tie is an explicit mapping error. Do not assign
+			// the instrument to whichever provider happens to be iterated first.
+			plan.mappingAmbiguous[quoteProviders[0]]++
+		} else {
+			plan.assignments[latestProvider][target.InstrumentID] = latest
 		}
 	}
 	return plan, nil
@@ -161,6 +189,11 @@ func (s *Store) planRefreshMappings(ctx context.Context, targets []refreshTarget
 func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provider, options RefreshOptions, targets []refreshTarget, plan refreshMappingPlan) domain.ProviderRefreshStatus {
 	status := domain.ProviderRefreshStatus{Provider: provider.String(), Status: "complete"}
 	status.MissingMapping = plan.missing[provider]
+	if ambiguousMappings := plan.mappingAmbiguous[provider]; ambiguousMappings > 0 {
+		status.FailedCount += ambiguousMappings
+		status.Status = "incomplete"
+		status.Errors = append(status.Errors, "mapping_ambiguous")
+	}
 	if lookupErrors := plan.lookupError[provider]; lookupErrors > 0 {
 		status.FailedCount += lookupErrors
 		status.Status = "incomplete"

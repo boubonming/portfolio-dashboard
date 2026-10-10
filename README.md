@@ -168,6 +168,14 @@ symbols, and CoinGecko for mapped coin IDs. Open Exchange Rates is used for
 USD-base FX rates and does not need an instrument ticker mapping. Manual quote
 and FX observations remain available through `quote-add` and `fx-add`.
 
+For a default refresh, each instrument uses the active mapping with the latest
+`active-from` timestamp across all selected quote providers, so a newer mapping
+can migrate an instrument to another provider. An explicit provider subset
+applies the same rule within that subset. If two different providers share the
+latest timestamp, the mapping is reported as explicitly ambiguous and the
+instrument is not quoted until the mapping is resolved; provider ordering is
+never used as a tie-breaker.
+
 At process start, credentials are read only from `FINNHUB_API_KEY`,
 `ALPHA_VANTAGE_API_KEY`, and `OPEN_EXCHANGE_RATES_APP_ID`. CoinGecko uses its
 public free endpoint in this slice. Credentials are not persisted, printed,
