@@ -22,14 +22,17 @@ type SnapshotRequest struct {
 }
 
 type snapshotPayload struct {
-	SnapshotID         string                `json:"snapshot_id"`
-	PortfolioID        string                `json:"portfolio_id"`
-	CalculationVersion string                `json:"calculation_version"`
-	CreatedAt          string                `json:"created_at"`
-	AsOf               string                `json:"as_of"`
-	SourceHashes       []string              `json:"source_hashes"`
-	Input              domain.ValuationInput `json:"input"`
-	Valuation          domain.Valuation      `json:"valuation"`
+	SnapshotID         string `json:"snapshot_id"`
+	PortfolioID        string `json:"portfolio_id"`
+	CalculationVersion string `json:"calculation_version"`
+	CreatedAt          string `json:"created_at"`
+	AsOf               string `json:"as_of"`
+	// A pointer distinguishes legacy payloads, which did not persist MaxAge,
+	// from new payloads that intentionally use the default threshold.
+	MaxAge       *time.Duration        `json:"max_age,omitempty"`
+	SourceHashes []string              `json:"source_hashes"`
+	Input        domain.ValuationInput `json:"input"`
+	Valuation    domain.Valuation      `json:"valuation"`
 }
 
 func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (domain.SnapshotStatus, error) {
@@ -46,6 +49,9 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		request.AsOf = time.Now().UTC()
 	} else {
 		request.AsOf = request.AsOf.UTC()
+	}
+	if request.MaxAge <= 0 {
+		request.MaxAge = domain.DefaultFreshness
 	}
 	var exists int
 	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM portfolios WHERE id = ?", request.PortfolioID).Scan(&exists); err != nil {
@@ -64,8 +70,9 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 	}
 	hashInput, err := json.Marshal(struct {
 		Version string                `json:"version"`
+		MaxAge  time.Duration         `json:"max_age"`
 		Input   domain.ValuationInput `json:"input"`
-	}{request.CalculationVersion, input})
+	}{request.CalculationVersion, request.MaxAge, input})
 	if err != nil {
 		return domain.SnapshotStatus{}, err
 	}
@@ -82,7 +89,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		}
 	}
 	sort.Strings(sourceHashes)
-	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: request.AsOf.Format(time.RFC3339Nano), SourceHashes: sourceHashes, Input: input, Valuation: valuation}
+	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: request.AsOf.Format(time.RFC3339Nano), MaxAge: durationPointer(request.MaxAge), SourceHashes: sourceHashes, Input: input, Valuation: valuation}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return domain.SnapshotStatus{}, err
@@ -112,6 +119,9 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 func isUniqueError(err error) bool {
 	return err != nil && (contains(err.Error(), "UNIQUE") || contains(err.Error(), "constraint failed"))
 }
+
+func durationPointer(value time.Duration) *time.Duration { return &value }
+
 func contains(value, needle string) bool {
 	for i := 0; i+len(needle) <= len(value); i++ {
 		if value[i:i+len(needle)] == needle {
