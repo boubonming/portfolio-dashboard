@@ -106,6 +106,42 @@ type FXRate struct {
 	Provenance    string `json:"provenance"`
 }
 
+// ProviderMapping is an explicit, versioned mapping. Provider symbols are
+// never inferred from the instrument's original symbol.
+type ProviderMapping struct {
+	ID             string `json:"id"`
+	InstrumentID   string `json:"instrument_id"`
+	Provider       string `json:"provider"`
+	ProviderSymbol string `json:"provider_symbol"`
+	QuoteCurrency  string `json:"quote_currency"`
+	ActiveFrom     string `json:"active_from"`
+	Provenance     string `json:"provenance"`
+	CreatedAt      string `json:"created_at"`
+}
+
+type ProviderRefreshStatus struct {
+	Provider       string   `json:"provider"`
+	Status         string   `json:"status"`
+	RequestCount   int      `json:"request_count"`
+	SucceededCount int      `json:"succeeded_count"`
+	FailedCount    int      `json:"failed_count"`
+	MissingMapping int      `json:"missing_mapping_count"`
+	ObservationIDs []string `json:"observation_ids,omitempty"`
+	Errors         []string `json:"errors,omitempty"`
+}
+
+// RefreshResult is deliberately aggregate-only. It contains no holdings,
+// symbols, quantities, or provider credentials.
+type RefreshResult struct {
+	RefreshID      string                  `json:"refresh_id"`
+	PortfolioID    string                  `json:"portfolio_id"`
+	Status         string                  `json:"status"`
+	StartedAt      string                  `json:"started_at"`
+	EndedAt        string                  `json:"ended_at"`
+	ObservationIDs []string                `json:"observation_ids,omitempty"`
+	Providers      []ProviderRefreshStatus `json:"providers"`
+}
+
 type Freshness struct {
 	Status   string `json:"status"`
 	MarketAt string `json:"market_at,omitempty"`

@@ -1,9 +1,12 @@
-// Package marketdata defines provider-neutral boundaries for dated market
-// observations. This phase intentionally has no network clients.
+// Package marketdata contains credential-safe, provider-neutral market data
+// boundaries and the free-tier HTTP adapters. Every adapter is injectable with
+// a local HTTP server for tests; no adapter retries automatically.
 package marketdata
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
@@ -19,13 +22,29 @@ const (
 	ProviderManual            Provider = "manual"
 )
 
+func (p Provider) String() string { return string(p) }
+
+func ParseProvider(value string) (Provider, error) {
+	p := Provider(value)
+	switch p {
+	case ProviderFinnhub, ProviderAlphaVantage, ProviderCoinGecko, ProviderOpenExchangeRates, ProviderManual:
+		return p, nil
+	default:
+		return "", errors.New("unsupported provider")
+	}
+}
+
 type QuoteRequest struct {
-	InstrumentID, Symbol, Currency string
-	AsOf                           time.Time
+	InstrumentID   string
+	Symbol         string // Original symbol, retained for identity validation.
+	ProviderSymbol string // Explicit provider mapping; never inferred.
+	Currency       string
+	AsOf           time.Time
 }
 type FXRequest struct {
-	BaseCurrency, QuoteCurrency string
-	AsOf                        time.Time
+	BaseCurrency  string
+	QuoteCurrency string
+	AsOf          time.Time
 }
 
 type ProviderClient interface {
@@ -34,8 +53,30 @@ type ProviderClient interface {
 	FX(context.Context, FXRequest) (domain.FXRate, error)
 }
 
-// NoLiveClients documents that ingestion is administrative/manual until a
-// credential-gated connector task adds implementations.
+// BatchQuoteClient permits providers with a batch endpoint to make one bounded
+// request. The returned errors are keyed by instrument ID.
+type BatchQuoteClient interface {
+	ProviderClient
+	QuoteBatch(context.Context, []QuoteRequest) (map[string]domain.Quote, map[string]error)
+}
+
+type BatchFXClient interface {
+	ProviderClient
+	FXBatch(context.Context, []FXRequest) (map[string]domain.FXRate, map[string]error)
+}
+
+type ClientOptions struct {
+	BaseURL    string
+	HTTPClient HTTPDoer
+	Timeout    time.Duration
+	Now        func() time.Time
+}
+
+type HTTPDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+// NoLiveClients remains useful to callers that intentionally disable refresh.
 type NoLiveClients struct{}
 
 func (NoLiveClients) Name() Provider { return ProviderManual }
@@ -50,4 +91,5 @@ type disabledError string
 
 func (e disabledError) Error() string { return string(e) }
 
-var ErrLiveProviderDisabled error = disabledError("live market-data providers are disabled in this phase")
+var ErrLiveProviderDisabled error = disabledError("live market-data providers are disabled")
+var ErrUnsupportedOperation error = disabledError("provider does not support this observation type")

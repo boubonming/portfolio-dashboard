@@ -85,10 +85,9 @@ used. Multiplication is exact. FX division uses an explicit 18-decimal,
 half-away-from-zero rounding rule. Display rounding is deliberately outside the
 ledger calculation.
 
-There are no live provider clients or credentials in this phase. The domain
-boundary names the planned Finnhub, Alpha Vantage, CoinGecko and Open Exchange
-Rates providers plus manual overrides, while the administrative commands below
-insert only dated, provenance-bearing observations supplied by an operator.
+The provider boundary now includes credential-safe fake-server-tested adapters
+for Finnhub, Alpha Vantage, CoinGecko and Open Exchange Rates. Credentials are
+optional process-start configuration and are never required by tests.
 
 Add a quote (the symbol/currency pair must already exist in the approved import):
 
@@ -145,3 +144,55 @@ reporting total whenever any dependency is unavailable. A complete reporting
 total is emitted only when every lot has a valid quote and a unique explicit FX
 path to the selected reporting currency. Inverted FX paths are supported, while
 multiple possible paths are rejected as ambiguous.
+
+## Free-provider mappings and refresh
+
+The administrative refresh uses only explicitly recorded mappings. It never
+guesses an international ticker, sends holdings to a provider, or falls back to
+an unofficial scraper. Add a mapping only after checking the provider's exact
+symbol/coin ID and record the source and activation time:
+
+```sh
+go run ./cmd/portfolio-dashboard mapping-add -db portfolio.sqlite \
+  -instrument INSTRUMENT_ID -provider finnhub \
+  -provider-symbol AAPL -quote-currency USD \
+  -active-from 2026-10-09T00:00:00Z \
+  -provenance 'provider documentation checked on 2026-10-09'
+go run ./cmd/portfolio-dashboard mapping-list -db portfolio.sqlite
+```
+
+Mappings are append-only and versioned by `active-from`; a new symbol or
+listing is a new mapping row. The accepted quote providers are Finnhub for
+mapped US securities, Alpha Vantage `GLOBAL_QUOTE` for mapped international
+symbols, and CoinGecko for mapped coin IDs. Open Exchange Rates is used for
+USD-base FX rates and does not need an instrument ticker mapping. Manual quote
+and FX observations remain available through `quote-add` and `fx-add`.
+
+At process start, credentials are read only from `FINNHUB_API_KEY`,
+`ALPHA_VANTAGE_API_KEY`, and `OPEN_EXCHANGE_RATES_APP_ID`. CoinGecko uses its
+public free endpoint in this slice. Credentials are not persisted, printed,
+included in error messages, audit payloads, or frontend settings. Optional
+`PORTFOLIO_*_BASE_URL` variables are for local fake-server tests or an
+operator-approved endpoint: `PORTFOLIO_FINNHUB_BASE_URL`,
+`PORTFOLIO_ALPHA_VANTAGE_BASE_URL`, `PORTFOLIO_COINGECKO_BASE_URL`, and
+`PORTFOLIO_OPEN_EXCHANGE_RATES_BASE_URL`; production defaults use the provider
+HTTPS APIs.
+There are no live-key tests in this repository: adapter tests must use local
+`httptest` servers and the refresh command must be exercised with fake
+endpoints only.
+
+Run a bounded, aggregate-only refresh after mappings are reviewed:
+
+```sh
+go run ./cmd/portfolio-dashboard market-refresh -db portfolio.sqlite \
+  -portfolio portfolio-default -providers finnhub,coingecko,open_exchange_rates
+```
+
+Provider quotas are independent. CoinGecko requests are batched by quote
+currency and Open Exchange Rates obtains all required USD-base rates in one
+call; cross-rates use exact decimal division. Refresh runs retain successful
+observations, append a redacted audit/run record, and report `incomplete` with
+missing mappings or classified provider failures rather than fabricating
+values. Repeating an identical provider observation is idempotent. A subsequent
+snapshot remains incomplete when a refresh gap leaves a required quote or FX
+rate missing/stale; it never presents a partial total as complete.
