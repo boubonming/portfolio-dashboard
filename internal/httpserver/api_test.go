@@ -3,12 +3,14 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/boubonming/portfolio-dashboard/internal/domain"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 )
 
@@ -111,5 +113,78 @@ func TestPortfolioOverviewAPINoSnapshotIsExplicit(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview", nil))
 	if response.Code != 200 || !contains(response.Body.String(), `"state":"no_snapshot"`) || contains(response.Body.String(), `"reporting_total"`) {
 		t.Fatalf("no snapshot response=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "dashboard.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, portfolio := range []string{"portfolio-33", "portfolio-other"} {
+		if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, portfolio, portfolio, "MYR", now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.DB.Exec(`INSERT INTO accounts(id,portfolio_id,broker,created_at) VALUES(?,?,?,?)`, "account-other", "portfolio-other", "Foreign Broker", now); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 31; index++ {
+		instrumentID := fmt.Sprintf("instrument-33-%02d", index)
+		if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, instrumentID, fmt.Sprintf("SYM%02d", index), "Synthetic instrument", "MYR", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-leak", "LEAK", "Foreign instrument", "MYR", now); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 33; index++ {
+		instrumentIndex := index
+		if index == 32 {
+			instrumentIndex = 1
+		}
+		if index == 33 {
+			instrumentIndex = 2
+		}
+		accountID := any(nil)
+		if index == 1 {
+			accountID = "account-other"
+		}
+		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,source_row,created_at) VALUES(?,?,?,?,?,?,?,?)`, fmt.Sprintf("lot-33-%02d", index), "portfolio-33", fmt.Sprintf("instrument-33-%02d", instrumentIndex), accountID, "1", "MYR", index, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,source_row,created_at) VALUES(?,?,?,?,?,?,?,?)`, "lot-other", "portfolio-other", "instrument-leak", "account-other", "99", "MYR", 1, now); err != nil {
+		t.Fatal(err)
+	}
+
+	handler, err := NewHandlerWithStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-33/overview", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var overview domain.PortfolioOverview
+	if err := json.Unmarshal(response.Body.Bytes(), &overview); err != nil {
+		t.Fatal(err)
+	}
+	if len(overview.Holdings) != 33 {
+		t.Fatalf("holdings=%d, want 33", len(overview.Holdings))
+	}
+	symbols := map[string]int{}
+	for _, holding := range overview.Holdings {
+		symbols[holding.Symbol]++
+		if holding.Symbol == "LEAK" || holding.Broker != nil || holding.LotID == "lot-other" {
+			t.Fatalf("cross-portfolio data leaked into holding: %+v", holding)
+		}
+	}
+	if len(symbols) != 31 || symbols["SYM01"] != 2 || symbols["SYM02"] != 2 {
+		t.Fatalf("symbols=%d duplicate counts SYM01=%d SYM02=%d", len(symbols), symbols["SYM01"], symbols["SYM02"])
 	}
 }

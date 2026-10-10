@@ -67,13 +67,9 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 	}
 	input := payload.Input
 	input.ReportingCurrency = currency
-	// Legacy snapshots omitted MaxAge and therefore used the calculation
-	// default. Preserve that behavior rather than changing their completeness
-	// when an alternate reporting currency is requested.
+	legacyFreshnessMetadata := payload.MaxAge == nil
 	if payload.MaxAge != nil {
 		input.MaxAge = *payload.MaxAge
-	} else {
-		input.MaxAge = domain.DefaultFreshness
 	}
 	asOf, err := time.Parse(time.RFC3339Nano, payload.AsOf)
 	if err == nil {
@@ -81,9 +77,24 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 	}
 	valuation := payload.Valuation
 	if currency != payload.Valuation.ReportingCurrency {
-		valuation, err = domain.Calculate(input)
-		if err != nil {
-			return domain.PortfolioOverview{}, err
+		if legacyFreshnessMetadata {
+			// Legacy payloads do not say which freshness threshold was used when
+			// the immutable valuation was created. Recalculating an alternate
+			// currency with a guessed threshold could turn stale data complete.
+			// Keep the persisted valuation for same-currency reads, but explicitly
+			// withhold alternate reporting values and the aggregate.
+			valuation.Complete = false
+			valuation.ReportingTotal = ""
+			valuation.MissingDependencies = appendUnique(valuation.MissingDependencies, "snapshot:max_age")
+			for i := range valuation.Lots {
+				valuation.Lots[i].ReportingValue = nil
+				valuation.Lots[i].FXIDs = nil
+			}
+		} else {
+			valuation, err = domain.Calculate(input)
+			if err != nil {
+				return domain.PortfolioOverview{}, err
+			}
 		}
 	}
 	view.Snapshot = snapshotView(payload, valuation)

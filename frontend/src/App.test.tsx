@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App, { compareDecimalStrings, type PortfolioOverview } from './App'
 
@@ -9,6 +9,16 @@ const completeOverview: PortfolioOverview = {
   holdings: [
     { lot_id: 'lot-a', symbol: 'AAA', name: 'AAA Fund', description: 'Distinct AAA instrument description', quantity: '2', currency: 'USD', unit_cost: '5', cost_basis: '10', latest_price: '50.5', latest_value: '101', reporting_value: '100.5', quote_source: 'fixture', freshness: { status: 'fresh' }, data_quality: [], missing_broker: false, missing_acquisition_date: false },
     { lot_id: 'lot-b', symbol: 'BBB', name: 'BBB Fund', quantity: '10', currency: 'SGD', unit_cost: '1', latest_price: '2', latest_value: '20', reporting_value: '20', freshness: { status: 'stale' }, data_quality: ['stale_dependency'], missing_broker: true, missing_acquisition_date: true },
+  ],
+}
+
+const decimalSortOverview: PortfolioOverview = {
+  ...completeOverview,
+  holdings: [
+    { ...completeOverview.holdings[0], lot_id: 'lot-two', symbol: 'TWO', latest_price: '2', reporting_value: '10.1' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-ten', symbol: 'TEN', latest_price: '10', reporting_value: '10.02' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-ten02', symbol: 'TEN02', latest_price: '10.02', reporting_value: '10' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-ten1', symbol: 'TEN1', latest_price: '10.1', reporting_value: '2' },
   ],
 }
 
@@ -66,6 +76,30 @@ describe('Portfolio Dashboard', () => {
     expect(priceHeader.getAttribute('aria-sort')).toBe('descending')
     expect(screen.getByRole('columnheader', { name: /reporting value/i }).getAttribute('aria-sort')).toBe('none')
     expect(screen.getByRole('columnheader', { name: /freshness/i })).toBeTruthy()
+  })
+
+  it('renders exact decimal row ordering for latest price and reporting value', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => decimalSortOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const rowSymbols = () => screen.getAllByRole('row').slice(1).map((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent)
+    const latestPriceHeader = screen.getByRole('columnheader', { name: /latest price/i })
+    const reportingValueHeader = screen.getByRole('columnheader', { name: /reporting value/i })
+
+    fireEvent.click(screen.getByRole('button', { name: /sort by latest price/i }))
+    expect(latestPriceHeader.getAttribute('aria-sort')).toBe('ascending')
+    expect(rowSymbols()).toEqual(['TWO', 'TEN', 'TEN02', 'TEN1'])
+    fireEvent.click(screen.getByRole('button', { name: /sort by latest price/i }))
+    expect(latestPriceHeader.getAttribute('aria-sort')).toBe('descending')
+    expect(rowSymbols()).toEqual(['TEN1', 'TEN02', 'TEN', 'TWO'])
+
+    fireEvent.click(screen.getByRole('button', { name: /sort by reporting value/i }))
+    expect(reportingValueHeader.getAttribute('aria-sort')).toBe('ascending')
+    expect(latestPriceHeader.getAttribute('aria-sort')).toBe('none')
+    expect(rowSymbols()).toEqual(['TEN1', 'TEN02', 'TEN', 'TWO'])
+    fireEvent.click(screen.getByRole('button', { name: /sort by reporting value/i }))
+    expect(reportingValueHeader.getAttribute('aria-sort')).toBe('descending')
+    expect(rowSymbols()).toEqual(['TWO', 'TEN', 'TEN02', 'TEN1'])
   })
 
   it('keeps the latest currency selection when requests resolve out of order', async () => {

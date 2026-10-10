@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,7 +10,7 @@ import (
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 )
 
-func TestPortfolioOverviewPreservesSnapshotMaxAgeForAlternateCurrency(t *testing.T) {
+func TestPortfolioOverviewFailsSafeForLegacySnapshotWithoutMaxAge(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "portfolio.sqlite"))
 	if err != nil {
@@ -40,6 +41,22 @@ func TestPortfolioOverviewPreservesSnapshotMaxAgeForAlternateCurrency(t *testing
 	if status.Complete {
 		t.Fatalf("stale source unexpectedly complete: %+v", status)
 	}
+	var storedPayload []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT payload FROM snapshots WHERE id = ?`, status.SnapshotID).Scan(&storedPayload); err != nil {
+		t.Fatal(err)
+	}
+	var encoded map[string]any
+	if err := json.Unmarshal(storedPayload, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	delete(encoded, "max_age")
+	legacyPayload, err := json.Marshal(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE snapshots SET payload = ? WHERE id = ?`, legacyPayload, status.SnapshotID); err != nil {
+		t.Fatal(err)
+	}
 	myr, err := s.PortfolioOverview(ctx, "portfolio-freshness", "MYR")
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +68,10 @@ func TestPortfolioOverviewPreservesSnapshotMaxAgeForAlternateCurrency(t *testing
 	if myr.Snapshot.SnapshotID != usd.Snapshot.SnapshotID || myr.Snapshot.Complete || usd.Snapshot.Complete || usd.Snapshot.State != "incomplete" {
 		t.Fatalf("alternate read changed snapshot semantics: MYR=%+v USD=%+v", myr.Snapshot, usd.Snapshot)
 	}
-	if len(usd.Holdings) != 1 || !containsString(usd.Holdings[0].DataQuality, "stale_dependency") {
+	if myr.Snapshot.ReportingTotal != status.ReportingTotal || len(myr.Holdings) != 1 || myr.Holdings[0].Freshness.Status != domain.Stale {
+		t.Fatalf("same-currency read did not preserve stored valuation: status=%+v holdings=%+v", myr.Snapshot, myr.Holdings)
+	}
+	if usd.Snapshot.ReportingTotal != "" || !containsString(usd.Snapshot.MissingDependencies, "snapshot:max_age") || len(usd.Holdings) != 1 || usd.Holdings[0].ReportingValue != nil {
 		t.Fatalf("alternate holding quality = %+v", usd.Holdings)
 	}
 }
