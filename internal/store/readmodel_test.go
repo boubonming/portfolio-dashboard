@@ -50,11 +50,14 @@ func TestPortfolioOverviewFailsSafeForLegacySnapshotWithoutMaxAge(t *testing.T) 
 		t.Fatal(err)
 	}
 	delete(encoded, "max_age")
+	legacySnapshotID := "snapshot-legacy-freshness"
+	encoded["snapshot_id"] = legacySnapshotID
+	encoded["calculation_version"] = "freshness.legacy.v1"
 	legacyPayload, err := json.Marshal(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE snapshots SET payload = ? WHERE id = ?`, legacyPayload, status.SnapshotID); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO snapshots(id,portfolio_id,calculation_version,payload,created_at,input_hash) VALUES(?,?,?,?,?,?)`, legacySnapshotID, "portfolio-freshness", "freshness.legacy.v1", legacyPayload, now.Add(time.Minute).Format(time.RFC3339Nano), "legacy-freshness-input"); err != nil {
 		t.Fatal(err)
 	}
 	myr, err := s.PortfolioOverview(ctx, "portfolio-freshness", "MYR")
