@@ -39,11 +39,12 @@ components:
   schemas:
     PortfolioOverview:
       type: object
-      required: [portfolio, reporting_currency, snapshot, holdings]
+      required: [portfolio, reporting_currency, snapshot, allocation, holdings]
       properties:
         portfolio: { $ref: '#/components/schemas/Portfolio' }
         reporting_currency: { type: string, example: MYR }
         snapshot: { $ref: '#/components/schemas/Snapshot' }
+        allocation: { $ref: '#/components/schemas/Allocation' }
         holdings:
           type: array
           items: { $ref: '#/components/schemas/Holding' }
@@ -80,6 +81,44 @@ components:
         market_value: { type: string }
         cost_basis: { type: string }
         unrealised_pnl: { type: string }
+    Allocation:
+      type: object
+      required: [state, coverage]
+      description: Complete distributions are emitted only when every lot has a reporting value. Partial and unavailable states omit distribution slices.
+      properties:
+        state: { type: string, enum: [complete, partial, unavailable] }
+        coverage: { $ref: '#/components/schemas/AllocationCoverage' }
+        by_instrument:
+          type: array
+          items: { $ref: '#/components/schemas/InstrumentAllocation' }
+        by_source_currency:
+          type: array
+          items: { $ref: '#/components/schemas/CurrencyAllocation' }
+    AllocationCoverage:
+      type: object
+      required: [total_lots, valued_lots, missing_dependencies, stale_dependencies, invalid_dependencies]
+      properties:
+        total_lots: { type: integer, minimum: 0 }
+        valued_lots: { type: integer, minimum: 0 }
+        missing_dependencies: { type: integer, minimum: 0 }
+        stale_dependencies: { type: integer, minimum: 0 }
+        invalid_dependencies: { type: integer, minimum: 0 }
+    InstrumentAllocation:
+      type: object
+      required: [symbol, source_currency, value, percentage]
+      properties:
+        instrument_id: { type: string }
+        symbol: { type: string }
+        source_currency: { type: string, description: Original holding currency, included to distinguish same-symbol instruments. }
+        value: { type: string, description: Exact decimal reporting-currency value. }
+        percentage: { type: string, description: Exact two-decimal percentage apportioned by largest remainder; displayed percentages reconcile to 100. }
+    CurrencyAllocation:
+      type: object
+      required: [currency, value, percentage]
+      properties:
+        currency: { type: string }
+        value: { type: string, description: Exact decimal reporting-currency value grouped by original source currency. }
+        percentage: { type: string, description: Exact two-decimal percentage apportioned by largest remainder; displayed percentages reconcile to 100. }
     Holding:
       type: object
       required: [lot_id, symbol, quantity, currency, freshness, data_quality, missing_broker, missing_acquisition_date]

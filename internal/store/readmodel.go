@@ -48,6 +48,10 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 		return domain.PortfolioOverview{}, err
 	}
 	view.Snapshot = domain.SnapshotView{State: "no_snapshot", Subtotals: []domain.CurrencySubtotal{}}
+	view.Allocation = domain.AllocationView{
+		State:    "unavailable",
+		Coverage: domain.AllocationCoverage{TotalLots: len(view.Holdings)},
+	}
 
 	var encoded []byte
 	if err := s.DB.QueryRowContext(ctx, `SELECT payload FROM snapshots WHERE portfolio_id = ? ORDER BY created_at DESC LIMIT 1`, portfolioID).Scan(&encoded); err != nil {
@@ -98,6 +102,15 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 		}
 	}
 	view.Snapshot = snapshotView(payload, valuation)
+	view.Allocation = domain.BuildAllocation(input, valuation)
+	if legacyFreshnessMetadata {
+		// The persisted valuation remains available for the existing table, but
+		// its freshness threshold is not reproducible. Never turn that legacy
+		// payload into a normalized allocation distribution.
+		view.Allocation.State = "partial"
+		view.Allocation.ByInstrument = nil
+		view.Allocation.BySourceCurrency = nil
+	}
 
 	values := make(map[string]domain.LotValuation, len(valuation.Lots))
 	for _, lot := range valuation.Lots {

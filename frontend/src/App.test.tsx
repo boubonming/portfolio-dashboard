@@ -22,6 +22,22 @@ const decimalSortOverview: PortfolioOverview = {
   ],
 }
 
+const allocationOverview: PortfolioOverview = {
+  ...completeOverview,
+  allocation: {
+    state: 'complete',
+    coverage: { total_lots: 2, valued_lots: 2, missing_dependencies: 0, stale_dependencies: 0, invalid_dependencies: 0 },
+    by_instrument: [
+      { instrument_id: 'instrument-a', symbol: 'AAA', value: '80.25', percentage: '80.25' },
+      { instrument_id: 'instrument-b', symbol: 'BBB', value: '20.25', percentage: '19.75' },
+    ],
+    by_source_currency: [
+      { currency: 'MYR', value: '80.25', percentage: '80.25' },
+      { currency: 'USD', value: '20.25', percentage: '19.75' },
+    ],
+  },
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -82,7 +98,8 @@ describe('Portfolio Dashboard', () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => decimalSortOverview } as Response)))
     render(<App />)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
-    const rowSymbols = () => screen.getAllByRole('row').slice(1).map((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent)
+    const holdingsTable = () => screen.getByRole('table', { name: 'Holdings' })
+    const rowSymbols = () => within(holdingsTable()).getAllByRole('row').slice(1).map((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent)
     const latestPriceHeader = screen.getByRole('columnheader', { name: /latest price/i })
     const reportingValueHeader = screen.getByRole('columnheader', { name: /reporting value/i })
 
@@ -130,6 +147,98 @@ describe('Portfolio Dashboard', () => {
     cleanup()
     render(<App />)
     await waitFor(() => expect(screen.getByText(/no immutable snapshot yet/i)).toBeTruthy())
+  })
+
+  it('renders accessible complete instrument and source-currency allocation detail', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => allocationOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Allocation' })).toBeTruthy())
+    expect(screen.getByRole('list', { name: 'Allocation by instrument' })).toBeTruthy()
+    expect(screen.getByRole('list', { name: 'Allocation by original source currency' })).toBeTruthy()
+    expect(within(screen.getByRole('list', { name: 'Allocation by instrument' })).getByText('AAA allocation')).toBeTruthy()
+    expect(within(screen.getByRole('list', { name: 'Allocation by instrument' })).getByText('80.25 · 80.25%')).toBeTruthy()
+    expect(screen.getByRole('table', { name: 'Allocation detail, also available without color' })).toBeTruthy()
+    expect(screen.getByRole('table', { name: /source currency allocation detail/i })).toBeTruthy()
+  })
+
+  it('distinguishes same-symbol instruments and exposes a keyboard allocation region', async () => {
+    const sameSymbol = {
+      ...allocationOverview,
+      allocation: {
+        ...allocationOverview.allocation!,
+        by_instrument: [
+          { instrument_id: 'instrument-usd', symbol: 'SAME', source_currency: 'USD', value: '0', percentage: '0' },
+          { instrument_id: 'instrument-sgd', symbol: 'SAME', source_currency: 'SGD', value: '100', percentage: '100' },
+        ],
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => sameSymbol } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getAllByText('SAME (USD) allocation').length).toBeGreaterThan(0))
+    expect(screen.getAllByText('SAME (SGD) allocation').length).toBeGreaterThan(0)
+    const region = screen.getByRole('region', { name: 'Allocation detail tables' })
+    expect(region.getAttribute('tabindex')).toBe('0')
+    expect(screen.getByRole('list', { name: 'Allocation by instrument' }).querySelector('.allocation-track span')?.getAttribute('style')).toContain('width: 0%')
+  })
+
+  it('suppresses allocation visuals and reports coverage for partial snapshots', async () => {
+    const incomplete = { ...allocationOverview, snapshot: { ...allocationOverview.snapshot, state: 'incomplete' as const, complete: false, reporting_total: undefined }, allocation: { ...allocationOverview.allocation!, state: 'partial' as const, coverage: { total_lots: 33, valued_lots: 31, missing_dependencies: 1, stale_dependencies: 1, invalid_dependencies: 0 }, by_instrument: [], by_source_currency: [] } }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => incomplete } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /allocation percentages withheld/i })).toBeTruthy())
+    expect(screen.getByText('31 / 33')).toBeTruthy()
+    expect(screen.getByText(/partial values are not presented/i)).toBeTruthy()
+    expect(screen.queryByRole('list', { name: /allocation by instrument/i })).toBeNull()
+  })
+
+  it('fails closed when allocation is complete but the immutable snapshot is not complete', async () => {
+    const inconsistent = {
+      ...allocationOverview,
+      snapshot: { ...allocationOverview.snapshot, state: 'incomplete' as const, complete: false, reporting_total: undefined },
+    }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => inconsistent } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /allocation percentages withheld/i })).toBeTruthy())
+    expect(screen.queryByRole('list', { name: /allocation by instrument/i })).toBeNull()
+    expect(screen.queryByRole('table', { name: /allocation detail/i })).toBeNull()
+  })
+
+  it('uses distinct unavailable copy for a portfolio without an immutable snapshot', async () => {
+    const noSnapshot = {
+      ...allocationOverview,
+      snapshot: { state: 'no_snapshot' as const, complete: false, subtotals: [] },
+      allocation: { ...allocationOverview.allocation!, state: 'unavailable' as const, coverage: { total_lots: 0, valued_lots: 0, missing_dependencies: 0, stale_dependencies: 0, invalid_dependencies: 0 }, by_instrument: undefined, by_source_currency: undefined },
+      holdings: [],
+    }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => noSnapshot } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /allocation unavailable/i })).toBeTruthy())
+    expect(screen.getByText(/no immutable valuation exists yet/i)).toBeTruthy()
+    expect(screen.queryByText('0 / 0')).toBeNull()
+    expect(screen.queryByRole('list', { name: /allocation by instrument/i })).toBeNull()
+  })
+
+  it('renders reporting-currency allocation values from each response currency', async () => {
+    const usdAllocation = {
+      ...allocationOverview,
+      reporting_currency: 'USD',
+      snapshot: { ...allocationOverview.snapshot, reporting_total: '50.25' },
+      allocation: {
+        ...allocationOverview.allocation!,
+        by_instrument: [{ instrument_id: 'instrument-a', symbol: 'AAA', value: '40.25', percentage: '80.10' }, { instrument_id: 'instrument-b', symbol: 'BBB', value: '10', percentage: '19.90' }],
+        by_source_currency: [{ currency: 'MYR', value: '40.25', percentage: '80.10' }, { currency: 'USD', value: '10', percentage: '19.90' }],
+      },
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, json: async () => String(input).includes('currency=USD') ? usdAllocation : allocationOverview } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Allocation' })).toBeTruthy())
+    expect(screen.getAllByText('80.25 · 80.25%').length).toBeGreaterThan(0)
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(screen.getAllByText('40.25 · 80.10%').length).toBeGreaterThan(0))
+    expect(screen.getAllByText('Value (USD)').length).toBe(2)
+    expect(screen.queryByText('80.25 · 80.25%')).toBeNull()
+    expect(screen.getAllByText('MYR').length).toBeGreaterThan(0)
   })
 
   it('renders a clear API error state', async () => {

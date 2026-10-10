@@ -163,6 +163,7 @@ type ValuationLot struct {
 type LotValuation struct {
 	LotID          string    `json:"lot_id"`
 	Symbol         string    `json:"symbol"`
+	InstrumentID   string    `json:"instrument_id,omitempty"`
 	Currency       string    `json:"currency"`
 	Quantity       string    `json:"quantity"`
 	Price          string    `json:"price,omitempty"`

@@ -6,6 +6,7 @@ type PortfolioOverview struct {
 	Portfolio         PortfolioSummary `json:"portfolio"`
 	ReportingCurrency string           `json:"reporting_currency"`
 	Snapshot          SnapshotView     `json:"snapshot"`
+	Allocation        AllocationView   `json:"allocation"`
 	Holdings          []HoldingView    `json:"holdings"`
 }
 
@@ -28,6 +29,38 @@ type SnapshotView struct {
 	InvalidDependencies []string           `json:"invalid_dependencies,omitempty"`
 	SourceTimestamps    []string           `json:"source_timestamps,omitempty"`
 	Subtotals           []CurrencySubtotal `json:"subtotals"`
+}
+
+// AllocationView is deliberately empty of slices unless every lot has a
+// reporting value. A partial valuation must never be presented as a complete
+// portfolio distribution.
+type AllocationView struct {
+	State            string                 `json:"state"`
+	Coverage         AllocationCoverage     `json:"coverage"`
+	ByInstrument     []InstrumentAllocation `json:"by_instrument,omitempty"`
+	BySourceCurrency []CurrencyAllocation   `json:"by_source_currency,omitempty"`
+}
+
+type AllocationCoverage struct {
+	TotalLots           int `json:"total_lots"`
+	ValuedLots          int `json:"valued_lots"`
+	MissingDependencies int `json:"missing_dependencies"`
+	StaleDependencies   int `json:"stale_dependencies"`
+	InvalidDependencies int `json:"invalid_dependencies"`
+}
+
+type InstrumentAllocation struct {
+	InstrumentID   string `json:"instrument_id,omitempty"`
+	Symbol         string `json:"symbol"`
+	SourceCurrency string `json:"source_currency"`
+	Value          string `json:"value"`
+	Percentage     string `json:"percentage"`
+}
+
+type CurrencyAllocation struct {
+	Currency   string `json:"currency"`
+	Value      string `json:"value"`
+	Percentage string `json:"percentage"`
 }
 
 type HoldingView struct {

@@ -74,8 +74,14 @@ func TestPortfolioOverviewFailsSafeForLegacySnapshotWithoutMaxAge(t *testing.T) 
 	if myr.Snapshot.ReportingTotal != status.ReportingTotal || len(myr.Holdings) != 1 || myr.Holdings[0].Freshness.Status != domain.Stale {
 		t.Fatalf("same-currency read did not preserve stored valuation: status=%+v holdings=%+v", myr.Snapshot, myr.Holdings)
 	}
-	if usd.Snapshot.ReportingTotal != "" || !containsString(usd.Snapshot.MissingDependencies, "snapshot:max_age") || len(usd.Holdings) != 1 || usd.Holdings[0].ReportingValue != nil {
+	if usd.Snapshot.ReportingTotal != "" || !containsString(usd.Snapshot.MissingDependencies, "snapshot:max_age") || len(usd.Snapshot.MissingDependencies) != 1 || len(usd.Holdings) != 1 || usd.Holdings[0].ReportingValue != nil {
 		t.Fatalf("alternate holding quality = %+v", usd.Holdings)
+	}
+	if usd.Allocation.Coverage.MissingDependencies != len(usd.Snapshot.MissingDependencies) {
+		t.Fatalf("legacy allocation dependency count = %+v", usd.Allocation.Coverage)
+	}
+	if myr.Allocation.State == "complete" || usd.Allocation.State == "complete" || len(myr.Allocation.ByInstrument) != 0 || len(usd.Allocation.BySourceCurrency) != 0 {
+		t.Fatalf("legacy allocation should be withheld: MYR=%+v USD=%+v", myr.Allocation, usd.Allocation)
 	}
 }
 
