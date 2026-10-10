@@ -70,9 +70,9 @@ func TestCalculateMissingAndStaleDependenciesNeverBecomeZero(t *testing.T) {
 func TestCalculateFutureQuoteBeyondToleranceIsIncomplete(t *testing.T) {
 	asOf := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 	result, err := Calculate(ValuationInput{
-		Lots: []ValuationLot{{ID: "future", InstrumentID: "future", Currency: "USD", Quantity: "1"}},
+		Lots:   []ValuationLot{{ID: "future", InstrumentID: "future", Currency: "USD", Quantity: "1"}},
 		Quotes: []Quote{{ID: "future-quote", InstrumentID: "future", Price: "2", Currency: "USD", MarketAt: asOf.Add(DefaultFutureTolerance + time.Second).Format(time.RFC3339Nano)}},
-		AsOf: asOf, MaxAge: time.Hour, ReportingCurrency: "MYR",
+		AsOf:   asOf, MaxAge: time.Hour, ReportingCurrency: "MYR",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -85,10 +85,10 @@ func TestCalculateFutureQuoteBeyondToleranceIsIncomplete(t *testing.T) {
 func TestCalculateStaleFXIsIncomplete(t *testing.T) {
 	asOf := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 	result, err := Calculate(ValuationInput{
-		Lots: []ValuationLot{{ID: "stale-fx", InstrumentID: "stale-fx", Currency: "USD", Quantity: "1"}},
-		Quotes: []Quote{{ID: "fresh-quote", InstrumentID: "stale-fx", Price: "2", Currency: "USD", MarketAt: asOf.Format(time.RFC3339Nano)}},
+		Lots:    []ValuationLot{{ID: "stale-fx", InstrumentID: "stale-fx", Currency: "USD", Quantity: "1"}},
+		Quotes:  []Quote{{ID: "fresh-quote", InstrumentID: "stale-fx", Price: "2", Currency: "USD", MarketAt: asOf.Format(time.RFC3339Nano)}},
 		FXRates: []FXRate{{ID: "old-fx", BaseCurrency: "USD", QuoteCurrency: "MYR", Rate: "4", MarketAt: asOf.Add(-2 * time.Hour).Format(time.RFC3339Nano)}},
-		AsOf: asOf, MaxAge: time.Hour, ReportingCurrency: "MYR",
+		AsOf:    asOf, MaxAge: time.Hour, ReportingCurrency: "MYR",
 	})
 	if err != nil {
 		t.Fatal(err)
