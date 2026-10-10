@@ -44,7 +44,7 @@ func FromEnv() Config {
 		},
 		Auth: auth.Config{
 			Username: os.Getenv("PORTFOLIO_AUTH_USERNAME"), PasswordHash: os.Getenv("PORTFOLIO_AUTH_PASSWORD_HASH"),
-			SessionSecret: os.Getenv("PORTFOLIO_SESSION_SECRET"), PublicOrigin: os.Getenv("PORTFOLIO_PUBLIC_ORIGIN"), CookieSecure: cookieSecure, SessionTTL: ttl,
+			SessionSecret: os.Getenv("PORTFOLIO_SESSION_SECRET"), PublicOrigin: os.Getenv("PORTFOLIO_PUBLIC_ORIGIN"), Environment: os.Getenv("PORTFOLIO_ENV"), CookieSecure: cookieSecure, SessionTTL: ttl,
 		},
 	}
 }

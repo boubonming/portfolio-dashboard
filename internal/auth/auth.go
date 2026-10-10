@@ -39,6 +39,7 @@ type Config struct {
 	PasswordHash  string
 	SessionSecret string
 	PublicOrigin  string
+	Environment   string
 	CookieSecure  bool
 	SessionTTL    time.Duration
 	Now           func() time.Time
@@ -57,8 +58,12 @@ func (c Config) Validate() error {
 	if c.SessionTTL < time.Second || c.SessionTTL > 24*time.Hour {
 		return fmt.Errorf("%w: session lifetime must be between 1 second and 24 hours", ErrInvalidConfig)
 	}
-	if _, err := parseOrigin(c.PublicOrigin); err != nil {
+	origin, err := parseOrigin(c.PublicOrigin)
+	if err != nil {
 		return fmt.Errorf("%w: public origin: %v", ErrInvalidConfig, err)
+	}
+	if strings.EqualFold(origin.Scheme, "http") && !strings.EqualFold(c.Environment, "development") && !strings.EqualFold(c.Environment, "test") {
+		return fmt.Errorf("%w: HTTP public origins require development or test environment", ErrInvalidConfig)
 	}
 	return nil
 }
