@@ -161,6 +161,26 @@ describe('Portfolio Dashboard', () => {
     expect(screen.getByRole('table', { name: /source currency allocation detail/i })).toBeTruthy()
   })
 
+  it('distinguishes same-symbol instruments and exposes a keyboard allocation region', async () => {
+    const sameSymbol = {
+      ...allocationOverview,
+      allocation: {
+        ...allocationOverview.allocation!,
+        by_instrument: [
+          { instrument_id: 'instrument-usd', symbol: 'SAME', source_currency: 'USD', value: '0', percentage: '0' },
+          { instrument_id: 'instrument-sgd', symbol: 'SAME', source_currency: 'SGD', value: '100', percentage: '100' },
+        ],
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => sameSymbol } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getAllByText('SAME (USD) allocation').length).toBeGreaterThan(0))
+    expect(screen.getAllByText('SAME (SGD) allocation').length).toBeGreaterThan(0)
+    const region = screen.getByRole('region', { name: 'Allocation detail tables' })
+    expect(region.getAttribute('tabindex')).toBe('0')
+    expect(screen.getByRole('list', { name: 'Allocation by instrument' }).querySelector('.allocation-track span')?.getAttribute('style')).toContain('width: 0%')
+  })
+
   it('suppresses allocation visuals and reports coverage for partial snapshots', async () => {
     const incomplete = { ...allocationOverview, snapshot: { ...allocationOverview.snapshot, state: 'incomplete' as const, complete: false, reporting_total: undefined }, allocation: { ...allocationOverview.allocation!, state: 'partial' as const, coverage: { total_lots: 33, valued_lots: 31, missing_dependencies: 1, stale_dependencies: 1, invalid_dependencies: 0 }, by_instrument: [], by_source_currency: [] } }
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => incomplete } as Response)))

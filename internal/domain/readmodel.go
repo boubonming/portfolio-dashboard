@@ -50,10 +50,11 @@ type AllocationCoverage struct {
 }
 
 type InstrumentAllocation struct {
-	InstrumentID string `json:"instrument_id,omitempty"`
-	Symbol       string `json:"symbol"`
-	Value        string `json:"value"`
-	Percentage   string `json:"percentage"`
+	InstrumentID   string `json:"instrument_id,omitempty"`
+	Symbol         string `json:"symbol"`
+	SourceCurrency string `json:"source_currency"`
+	Value          string `json:"value"`
+	Percentage     string `json:"percentage"`
 }
 
 type CurrencyAllocation struct {

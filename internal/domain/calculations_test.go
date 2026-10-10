@@ -102,6 +102,89 @@ func TestBuildAllocationWithholdsPartialDistribution(t *testing.T) {
 	}
 }
 
+func TestAllocationPercentagesUseLargestRemainderWithZeroSlices(t *testing.T) {
+	percentages := allocationPercentages([]Decimal{ZeroDecimal(), MustDecimal("1"), MustDecimal("1"), MustDecimal("1")}, "3")
+	got := strings.Join(percentages, ",")
+	if got != "0,33.34,33.33,33.33" {
+		t.Fatalf("percentages = %s", got)
+	}
+	sum := ZeroDecimal()
+	for _, percentage := range percentages {
+		sum = sum.Add(MustDecimal(percentage))
+		if MustDecimal(percentage).Sign() < 0 {
+			t.Fatalf("negative percentage %q", percentage)
+		}
+	}
+	if sum.String() != "100" {
+		t.Fatalf("percentage sum = %s", sum.String())
+	}
+
+	// Each slice rounds to 0.99 without apportionment; the extra hundredth
+	// must go to the largest remainder rather than an arbitrary final slice.
+	values := make([]Decimal, 101)
+	for index := range values {
+		values[index] = MustDecimal("1")
+	}
+	percentages = allocationPercentages(values, "101")
+	countOne, countNinetyNine := 0, 0
+	for _, percentage := range percentages {
+		switch percentage {
+		case "1":
+			countOne++
+		case "0.99":
+			countNinetyNine++
+		default:
+			t.Fatalf("unexpected rounded percentage %q", percentage)
+		}
+	}
+	if countOne != 1 || countNinetyNine != 100 {
+		t.Fatalf("largest remainder counts = %d one, %d ninety-nine", countOne, countNinetyNine)
+	}
+	if got := strings.Join(allocationPercentages([]Decimal{MustDecimal("1"), MustDecimal("9999")}, "10000"), ","); got != "0.01,99.99" {
+		t.Fatalf("small slice percentages = %s", got)
+	}
+}
+
+func TestBuildAllocationResolvesLegacyIdentityByLotID(t *testing.T) {
+	input := ValuationInput{Lots: []ValuationLot{
+		{ID: "usd-lot", InstrumentID: "instrument-usd", Symbol: "SAME", Currency: "USD"},
+		{ID: "sgd-lot", InstrumentID: "instrument-sgd", Symbol: "SAME", Currency: "SGD"},
+	}}
+	allocation := BuildAllocation(input, Valuation{Complete: true, ReportingTotal: "30", Lots: []LotValuation{
+		{LotID: "usd-lot", Symbol: "SAME", Currency: "USD", ReportingValue: ptrTest("10")},
+		{LotID: "sgd-lot", Symbol: "SAME", Currency: "SGD", ReportingValue: ptrTest("20")},
+	}})
+	if allocation.State != "complete" || len(allocation.ByInstrument) != 2 {
+		t.Fatalf("legacy allocation = %+v", allocation)
+	}
+	if allocation.ByInstrument[0].InstrumentID != "instrument-sgd" || allocation.ByInstrument[1].InstrumentID != "instrument-usd" {
+		t.Fatalf("instrument identity = %+v", allocation.ByInstrument)
+	}
+	if allocation.ByInstrument[0].SourceCurrency != "SGD" || allocation.ByInstrument[1].SourceCurrency != "USD" {
+		t.Fatalf("source currency identity = %+v", allocation.ByInstrument)
+	}
+}
+
+func TestBuildAllocationFailsClosedForMalformedCompletePayload(t *testing.T) {
+	input := ValuationInput{Lots: []ValuationLot{{ID: "one", InstrumentID: "instrument-one", Symbol: "ONE", Currency: "USD"}, {ID: "two", InstrumentID: "instrument-two", Symbol: "TWO", Currency: "USD"}}}
+	cases := []struct {
+		name      string
+		valuation Valuation
+	}{
+		{name: "missing lot", valuation: Valuation{Complete: true, ReportingTotal: "3", Lots: []LotValuation{{LotID: "one", InstrumentID: "instrument-one", Currency: "USD", ReportingValue: ptrTest("1")}}}},
+		{name: "malformed value", valuation: Valuation{Complete: true, ReportingTotal: "3", Lots: []LotValuation{{LotID: "one", InstrumentID: "instrument-one", Currency: "USD", ReportingValue: ptrTest("1.2.3")}, {LotID: "two", InstrumentID: "instrument-two", Currency: "USD", ReportingValue: ptrTest("2")}}}},
+		{name: "inconsistent total", valuation: Valuation{Complete: true, ReportingTotal: "4", Lots: []LotValuation{{LotID: "one", InstrumentID: "instrument-one", Currency: "USD", ReportingValue: ptrTest("1")}, {LotID: "two", InstrumentID: "instrument-two", Currency: "USD", ReportingValue: ptrTest("2")}}}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			allocation := BuildAllocation(input, test.valuation)
+			if allocation.State != "partial" || len(allocation.ByInstrument) != 0 || len(allocation.BySourceCurrency) != 0 {
+				t.Fatalf("malformed allocation = %+v", allocation)
+			}
+		})
+	}
+}
+
 func TestCalculateFutureQuoteBeyondToleranceIsIncomplete(t *testing.T) {
 	asOf := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 	result, err := Calculate(ValuationInput{

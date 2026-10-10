@@ -105,19 +105,20 @@ components:
         invalid_dependencies: { type: integer, minimum: 0 }
     InstrumentAllocation:
       type: object
-      required: [symbol, value, percentage]
+      required: [symbol, source_currency, value, percentage]
       properties:
         instrument_id: { type: string }
         symbol: { type: string }
+        source_currency: { type: string, description: Original holding currency, included to distinguish same-symbol instruments. }
         value: { type: string, description: Exact decimal reporting-currency value. }
-        percentage: { type: string, description: Percentage rounded half away from zero to two decimal places; the final slice reconciles the displayed percentages to 100. }
+        percentage: { type: string, description: Exact two-decimal percentage apportioned by largest remainder; displayed percentages reconcile to 100. }
     CurrencyAllocation:
       type: object
       required: [currency, value, percentage]
       properties:
         currency: { type: string }
         value: { type: string, description: Exact decimal reporting-currency value grouped by original source currency. }
-        percentage: { type: string, description: Percentage rounded half away from zero to two decimal places; the final slice reconciles the displayed percentages to 100. }
+        percentage: { type: string, description: Exact two-decimal percentage apportioned by largest remainder; displayed percentages reconcile to 100. }
     Holding:
       type: object
       required: [lot_id, symbol, quantity, currency, freshness, data_quality, missing_broker, missing_acquisition_date]

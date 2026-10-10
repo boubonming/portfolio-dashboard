@@ -110,7 +110,6 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 		view.Allocation.State = "partial"
 		view.Allocation.ByInstrument = nil
 		view.Allocation.BySourceCurrency = nil
-		view.Allocation.Coverage.MissingDependencies++
 	}
 
 	values := make(map[string]domain.LotValuation, len(valuation.Lots))

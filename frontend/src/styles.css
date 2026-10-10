@@ -42,12 +42,13 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .allocation-group h3 { font-size: 1rem; margin: 0 0 .75rem; }
 .allocation-bars { list-style-position: inside; margin: 0; padding: 0; }
 .allocation-bars li { border-bottom: 1px solid #2d4441; padding: .65rem 0; }
-.allocation-row { align-items: baseline; display: flex; gap: 1rem; justify-content: space-between; }
-.allocation-label { font-weight: 700; }
-.allocation-value { color: #d8e8e5; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.allocation-row { align-items: baseline; display: flex; gap: 1rem; justify-content: space-between; min-width: 0; }
+.allocation-label { font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
+.allocation-value { color: #d8e8e5; font-variant-numeric: tabular-nums; max-width: 100%; overflow-wrap: anywhere; text-align: right; }
 .allocation-track { background: #293b39; border-radius: 999px; height: .65rem; margin-top: .45rem; overflow: hidden; }
-.allocation-track span { background: #52c7b8; border-radius: inherit; display: block; height: 100%; min-width: .15rem; }
-.allocation-table-scroll { display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 1.25rem; }
+.allocation-track span { background: #52c7b8; border-radius: inherit; display: block; height: 100%; }
+.allocation-table-scroll { display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 1.25rem; max-width: 100%; min-width: 0; }
+.allocation-table-scroll:focus-visible { border-radius: 8px; outline: 2px solid #75d5c7; outline-offset: 3px; }
 .allocation-table { min-width: 0; }
 .allocation-table caption { color: #a9c1bd; font-weight: 700; padding: .5rem; text-align: left; }
 .visually-hidden { clip: rect(0 0 0 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
@@ -55,7 +56,7 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .coverage-grid { display: grid; gap: .75rem; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 1rem 0 0; }
 .coverage-grid dt { color: #a9c1bd; font-size: .8rem; }
 .coverage-grid dd { font-size: 1.15rem; font-variant-numeric: tabular-nums; font-weight: 700; margin: .25rem 0 0; }
-.table-scroll { overflow-x: auto; }
+.table-scroll { max-width: 100%; min-width: 0; overflow-x: auto; }
 table { border-collapse: collapse; min-width: 1050px; width: 100%; }
 th, td { border-bottom: 1px solid #2d4441; padding: .8rem .65rem; text-align: left; vertical-align: top; }
 thead th { background: #1a2524; position: sticky; top: 0; z-index: 1; }

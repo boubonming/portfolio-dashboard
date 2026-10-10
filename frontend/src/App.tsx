@@ -39,6 +39,7 @@ export type AllocationCoverage = {
 export type InstrumentAllocation = {
   instrument_id?: string
   symbol: string
+  source_currency?: string
   value: string
   percentage: string
 }
@@ -145,18 +146,18 @@ function CoveragePanel({ allocation }: { allocation: Allocation }) {
   )
 }
 
-function AllocationBars({ title, items, label }: { title: string; items: Array<{ value: string; percentage: string; label: string }>; label: string }) {
+function AllocationBars({ title, items, label }: { title: string; items: Array<{ id: string; value: string; percentage: string; label: string }>; label: string }) {
   return (
     <div className="allocation-group">
       <h3>{title}</h3>
       <ol className="allocation-bars" aria-label={label}>
         {items.map((item) => (
-          <li key={`${item.label}-${item.value}`}>
+          <li key={item.id}>
             <div className="allocation-row">
               <span className="allocation-label">{item.label} allocation</span>
               <span className="allocation-value">{item.value} · {item.percentage}%</span>
             </div>
-            <div className="allocation-track" aria-hidden="true"><span style={{ width: `${item.percentage}%` }} /></div>
+            <div className="allocation-track" aria-hidden="true"><span style={{ width: item.percentage === '0' ? '0%' : `${item.percentage}%` }} /></div>
           </li>
         ))}
       </ol>
@@ -181,14 +182,14 @@ function AllocationSection({ data }: { data: PortfolioOverview }) {
         <span className="muted">Exact values in {data.reporting_currency} · percentages rounded to 2 decimals</span>
       </div>
       <div className="allocation-visuals">
-        <AllocationBars title="By instrument" label="Allocation by instrument" items={instruments.map((item) => ({ label: item.symbol, value: item.value, percentage: item.percentage }))} />
-        <AllocationBars title="By source currency" label="Allocation by original source currency" items={currencies.map((item) => ({ label: item.currency, value: item.value, percentage: item.percentage }))} />
+        <AllocationBars title="By instrument" label="Allocation by instrument" items={instruments.map((item, index) => ({ id: item.instrument_id || `instrument-${index}`, label: item.source_currency ? `${item.symbol} (${item.source_currency})` : item.symbol, value: item.value, percentage: item.percentage }))} />
+        <AllocationBars title="By source currency" label="Allocation by original source currency" items={currencies.map((item) => ({ id: `currency-${item.currency}`, label: item.currency, value: item.value, percentage: item.percentage }))} />
       </div>
-      <div className="table-scroll allocation-table-scroll">
+      <div className="table-scroll allocation-table-scroll" tabIndex={0} role="region" aria-label="Allocation detail tables">
         <table className="allocation-table">
           <caption>Allocation detail, also available without color</caption>
           <thead><tr><th scope="col">Instrument</th><th scope="col">Value ({data.reporting_currency})</th><th scope="col">Percentage</th></tr></thead>
-          <tbody>{instruments.map((item) => <tr key={`instrument-${item.instrument_id || item.symbol}`}><th scope="row">{item.symbol} allocation</th><td className="numeric">{item.value}</td><td className="numeric">{item.percentage}%</td></tr>)}</tbody>
+          <tbody>{instruments.map((item, index) => <tr key={`instrument-${item.instrument_id || index}`}><th scope="row">{item.source_currency ? `${item.symbol} (${item.source_currency})` : item.symbol} allocation</th><td className="numeric">{item.value}</td><td className="numeric">{item.percentage}%</td></tr>)}</tbody>
         </table>
         <table className="allocation-table">
           <caption>Source currency allocation detail</caption>
