@@ -48,16 +48,17 @@ func apiNotFound(w http.ResponseWriter, _ *http.Request) {
 
 func portfolioOverview(database *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if len(parts) != 5 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "portfolios" || parts[4] != "overview" || parts[3] == "" || r.URL.Path != "/api/v1/portfolios/"+parts[3]+"/overview" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
 		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 			return
 		}
 		if database == nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
-			return
-		}
-		parts := strings.Split(strings.Trim(path.Clean(r.URL.Path), "/"), "/")
-		if len(parts) != 5 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "portfolios" || parts[4] != "overview" || parts[3] == "" {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 			return
 		}

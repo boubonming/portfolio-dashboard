@@ -7,7 +7,7 @@ const completeOverview: PortfolioOverview = {
   reporting_currency: 'MYR',
   snapshot: { state: 'complete', complete: true, as_of: '2026-01-02T12:00:00Z', calculation_version: 'test.v1', reporting_total: '100.5', subtotals: [] },
   holdings: [
-    { lot_id: 'lot-a', symbol: 'AAA', name: 'AAA Fund', quantity: '2', currency: 'USD', unit_cost: '5', latest_price: '50.5', latest_value: '101', reporting_value: '100.5', quote_source: 'fixture', freshness: { status: 'fresh' }, data_quality: [], missing_broker: false, missing_acquisition_date: false },
+    { lot_id: 'lot-a', symbol: 'AAA', name: 'AAA Fund', description: 'Distinct AAA instrument description', quantity: '2', currency: 'USD', unit_cost: '5', cost_basis: '10', latest_price: '50.5', latest_value: '101', reporting_value: '100.5', quote_source: 'fixture', freshness: { status: 'fresh' }, data_quality: [], missing_broker: false, missing_acquisition_date: false },
     { lot_id: 'lot-b', symbol: 'BBB', name: 'BBB Fund', quantity: '10', currency: 'SGD', unit_cost: '1', latest_price: '2', latest_value: '20', reporting_value: '20', freshness: { status: 'stale' }, data_quality: ['stale_dependency'], missing_broker: true, missing_acquisition_date: true },
   ],
 }
@@ -34,6 +34,10 @@ describe('Portfolio Dashboard', () => {
     render(<App />)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
     expect(screen.getByText('100.5 MYR')).toBeTruthy()
+    expect(screen.getByText(/Distinct AAA instrument description/)).toBeTruthy()
+    expect(screen.getByText('Source unit cost')).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: /cost basis/i })).toBeTruthy()
+    expect(screen.getAllByText('10').length).toBeGreaterThan(0)
     expect(screen.getByText(/stale_dependency/i)).toBeTruthy()
     expect(screen.getAllByText('Missing').length).toBeGreaterThan(0)
     fireEvent.change(screen.getByLabelText(/filter holdings/i), { target: { value: 'AAA' } })
@@ -48,6 +52,37 @@ describe('Portfolio Dashboard', () => {
     expect(compareDecimalStrings('10.02', '10.1')).toBeLessThan(0)
     expect(compareDecimalStrings('-2', '-10')).toBeGreaterThan(0)
     expect(compareDecimalStrings('1.000', '1')).toBe(0)
+  })
+
+  it('exposes accessible active sort state for value columns', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const priceHeader = screen.getByRole('columnheader', { name: /latest price/i })
+    expect(priceHeader.getAttribute('aria-sort')).toBe('none')
+    fireEvent.click(screen.getByRole('button', { name: /sort by latest price/i }))
+    expect(priceHeader.getAttribute('aria-sort')).toBe('ascending')
+    fireEvent.click(screen.getByRole('button', { name: /sort by latest price/i }))
+    expect(priceHeader.getAttribute('aria-sort')).toBe('descending')
+    expect(screen.getByRole('columnheader', { name: /reporting value/i }).getAttribute('aria-sort')).toBe('none')
+    expect(screen.getByRole('columnheader', { name: /freshness/i })).toBeTruthy()
+  })
+
+  it('keeps the latest currency selection when requests resolve out of order', async () => {
+    let resolveMYR: ((response: Response) => void) | undefined
+    let resolveUSD: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => new Promise<Response>((resolve) => {
+      if (String(input).includes('currency=USD')) resolveUSD = resolve
+      else resolveMYR = resolve
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('currency=USD'), expect.anything()))
+    resolveUSD?.({ ok: true, json: async () => ({ ...completeOverview, reporting_currency: 'USD' }) } as Response)
+    await waitFor(() => expect(screen.getByText(/Reporting in USD/i)).toBeTruthy())
+    resolveMYR?.({ ok: true, json: async () => completeOverview } as Response)
+    await waitFor(() => expect(screen.getByText(/Reporting in USD/i)).toBeTruthy())
   })
 
   it('renders explicit incomplete and no-snapshot states without a fabricated total', async () => {

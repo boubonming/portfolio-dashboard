@@ -110,6 +110,15 @@ func TestSnapshotIsolatesPortfolioLotsAndProvenance(t *testing.T) {
 	if len(firstPayload.Input.Lots) != 33 || len(secondPayload.Input.Lots) != 1 {
 		t.Fatalf("portfolio lot counts = %d and %d", len(firstPayload.Input.Lots), len(secondPayload.Input.Lots))
 	}
+	firstSymbols := map[string]bool{}
+	firstSymbolCounts := map[string]int{}
+	for _, lot := range firstPayload.Input.Lots {
+		firstSymbols[lot.Symbol] = true
+		firstSymbolCounts[lot.Symbol]++
+	}
+	if len(firstSymbols) != 31 || firstSymbolCounts["SYMA"] != 2 || firstSymbolCounts["SYMB"] != 2 {
+		t.Fatalf("first portfolio symbol fixture = %d symbols, counts=%v", len(firstSymbols), firstSymbolCounts)
+	}
 	if firstPayload.Input.Lots[0].SourceSHA256 != firstHash || secondPayload.Input.Lots[0].ID != "lot-second" || secondPayload.Input.Lots[0].SourceSHA256 != secondHash {
 		t.Fatalf("portfolio payloads leaked or lost provenance: first=%+v second=%+v", firstPayload.Input.Lots[0], secondPayload.Input.Lots[0])
 	}

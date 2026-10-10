@@ -43,6 +43,23 @@ func TestRoutesPrioritizeAPIHealthAndSPA(t *testing.T) {
 	}
 }
 
+func TestOverviewRouteValidatesPathBeforeMethod(t *testing.T) {
+	handler, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown := httptest.NewRecorder()
+	handler.ServeHTTP(unknown, httptest.NewRequest(http.MethodPost, "/api/v1/portfolios/fixture/not-overview", nil))
+	if unknown.Code != http.StatusNotFound || unknown.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("unknown route = %d %s %q", unknown.Code, unknown.Body.String(), unknown.Header().Get("Content-Type"))
+	}
+	valid := httptest.NewRecorder()
+	handler.ServeHTTP(valid, httptest.NewRequest(http.MethodPost, "/api/v1/portfolios/fixture/overview", nil))
+	if valid.Code != http.StatusMethodNotAllowed || valid.Header().Get("Allow") != http.MethodGet {
+		t.Fatalf("valid non-GET route = %d allow=%q body=%s", valid.Code, valid.Header().Get("Allow"), valid.Body.String())
+	}
+}
+
 func contains(value, needle string) bool {
 	for i := 0; i+len(needle) <= len(value); i++ {
 		if value[i:i+len(needle)] == needle {

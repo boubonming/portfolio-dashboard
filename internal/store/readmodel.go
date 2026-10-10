@@ -67,6 +67,14 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 	}
 	input := payload.Input
 	input.ReportingCurrency = currency
+	// Legacy snapshots omitted MaxAge and therefore used the calculation
+	// default. Preserve that behavior rather than changing their completeness
+	// when an alternate reporting currency is requested.
+	if payload.MaxAge != nil {
+		input.MaxAge = *payload.MaxAge
+	} else {
+		input.MaxAge = domain.DefaultFreshness
+	}
 	asOf, err := time.Parse(time.RFC3339Nano, payload.AsOf)
 	if err == nil {
 		input.AsOf = asOf
@@ -106,11 +114,14 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 			}
 			holding.ReportingValue = value.ReportingValue
 			holding.Freshness = value.Freshness
+			if value.CostBasis != nil {
+				holding.CostBasis = value.CostBasis
+			}
 		}
 		if quote, ok := quotes[lot.InstrumentID]; ok {
 			holding.QuoteSource = quote.Source
 		}
-		appendDependencyFlags(holding, valuation, lot.InstrumentID)
+		appendDependencyFlags(holding, valuation, lot, input, currency)
 		addSourceFlags(holding)
 	}
 	return view, nil
@@ -133,7 +144,7 @@ func normalizeReportingCurrency(value string) (string, error) {
 }
 
 func (s *Store) loadSourceHoldings(ctx context.Context, portfolioID string) ([]domain.HoldingView, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT l.id,i.symbol,COALESCE(i.description,''),l.quantity,l.currency,l.unit_cost,l.cost_basis,a.broker,l.acquisition_date,COALESCE(l.source_row,0) FROM lots l JOIN instruments i ON i.id = l.instrument_id LEFT JOIN accounts a ON a.id = l.account_id WHERE l.portfolio_id = ? ORDER BY l.source_row,l.id`, portfolioID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT l.id,i.symbol,COALESCE(i.description,''),l.quantity,l.currency,l.unit_cost,l.cost_basis,a.broker,l.acquisition_date,COALESCE(l.source_row,0) FROM lots l JOIN instruments i ON i.id = l.instrument_id LEFT JOIN accounts a ON a.id = l.account_id AND a.portfolio_id = l.portfolio_id WHERE l.portfolio_id = ? ORDER BY l.source_row,l.id`, portfolioID)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +155,7 @@ func (s *Store) loadSourceHoldings(ctx context.Context, portfolioID string) ([]d
 		if err := rows.Scan(&source.lotID, &source.symbol, &source.description, &source.quantity, &source.currency, &source.unitCost, &source.costBasis, &source.broker, &source.acquisitionDate, &source.sourceRow); err != nil {
 			return nil, err
 		}
-		holding := domain.HoldingView{LotID: source.lotID, Symbol: source.symbol, Name: source.symbol, Description: source.description, Quantity: source.quantity, Currency: source.currency, Freshness: domain.Freshness{Status: domain.Missing}, DataQuality: []string{}}
+		holding := domain.HoldingView{LotID: source.lotID, Symbol: source.symbol, Description: source.description, Quantity: source.quantity, Currency: source.currency, Freshness: domain.Freshness{Status: domain.Missing}, DataQuality: []string{}}
 		if source.unitCost.Valid {
 			holding.UnitCost = stringPointer(source.unitCost.String)
 		}
@@ -184,22 +195,62 @@ func latestQuoteByInstrument(quotes []domain.Quote) map[string]domain.Quote {
 	return latest
 }
 
-func appendDependencyFlags(holding *domain.HoldingView, valuation domain.Valuation, instrumentID string) {
+func appendDependencyFlags(holding *domain.HoldingView, valuation domain.Valuation, lot domain.ValuationLot, input domain.ValuationInput, reportingCurrency string) {
 	for _, dependency := range valuation.MissingDependencies {
-		if strings.Contains(dependency, instrumentID) || strings.HasPrefix(dependency, "missing fx:") {
+		if dependencyAppliesToLot(dependency, lot, input, reportingCurrency) {
 			holding.DataQuality = appendUnique(holding.DataQuality, "missing_dependency")
 		}
 	}
 	for _, dependency := range valuation.StaleDependencies {
-		if strings.Contains(dependency, instrumentID) || strings.HasPrefix(dependency, "stale fx:") {
+		if dependencyAppliesToLot(dependency, lot, input, reportingCurrency) {
 			holding.DataQuality = appendUnique(holding.DataQuality, "stale_dependency")
 		}
 	}
 	for _, dependency := range valuation.InvalidDependencies {
-		if strings.Contains(dependency, instrumentID) || strings.HasPrefix(dependency, "invalid fx:") {
+		if dependencyAppliesToLot(dependency, lot, input, reportingCurrency) {
 			holding.DataQuality = appendUnique(holding.DataQuality, "invalid_dependency")
 		}
 	}
+}
+
+func dependencyAppliesToLot(dependency string, lot domain.ValuationLot, input domain.ValuationInput, reportingCurrency string) bool {
+	if strings.HasPrefix(dependency, "lot:") || strings.HasPrefix(dependency, "cost:") {
+		return strings.HasPrefix(dependency, "lot:"+lot.ID+":") || dependency == "cost:"+lot.ID
+	}
+	if strings.HasPrefix(dependency, "quote:") {
+		identifier := strings.TrimPrefix(dependency, "quote:")
+		if identifier == lot.InstrumentID {
+			return true
+		}
+		for _, quote := range input.Quotes {
+			if quote.ID == identifier {
+				return quote.InstrumentID == lot.InstrumentID
+			}
+		}
+		return false
+	}
+	if strings.Contains(dependency, " fx:") {
+		pair := strings.SplitN(dependency, " fx:", 2)[1]
+		if strings.Contains(pair, "/") {
+			return fxPairApplies(pair, lot.Currency, reportingCurrency)
+		}
+		for _, fx := range input.FXRates {
+			if fx.ID == pair {
+				return fxPairApplies(fx.BaseCurrency+"/"+fx.QuoteCurrency, lot.Currency, reportingCurrency)
+			}
+		}
+	}
+	return false
+}
+
+func fxPairApplies(pair, lotCurrency, reportingCurrency string) bool {
+	parts := strings.Split(pair, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	from, to := strings.ToUpper(strings.TrimSpace(parts[0])), strings.ToUpper(strings.TrimSpace(parts[1]))
+	lotCurrency, reportingCurrency = strings.ToUpper(strings.TrimSpace(lotCurrency)), strings.ToUpper(strings.TrimSpace(reportingCurrency))
+	return (from == lotCurrency && to == reportingCurrency) || (from == reportingCurrency && to == lotCurrency)
 }
 
 func addSourceFlags(holding *domain.HoldingView) {

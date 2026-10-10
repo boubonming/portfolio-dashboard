@@ -23,8 +23,9 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .toolbar input { min-width: 15rem; }
 .overview { display: grid; gap: 1rem; grid-template-columns: 2fr 1fr 1fr; align-items: center; }
 .state-pill, .flag { border-radius: 999px; display: inline-block; font-size: .78rem; font-weight: 700; padding: .4rem .7rem; }
-.state-complete, .flag-fresh, .flag-ok { background: #164d43; color: #a8f0df; }
-.state-incomplete, .flag-stale, .flag-invalid, .flag-future, .flag-missing { background: #5b421e; color: #ffdc9a; }
+.state-complete, .flag-fresh, .flag-ok, .quality-ok { background: #164d43; color: #a8f0df; }
+.state-incomplete, .flag-stale, .flag-invalid, .flag-future, .flag-missing, .quality-warning { background: #5b421e; color: #ffdc9a; }
+.quality-error { background: #652c35; color: #ffd2d8; }
 .state-no_snapshot, .flag-no_snapshot { background: #3d3e46; color: #d9d9e4; }
 .total { display: flex; flex-direction: column; gap: .35rem; }
 .total strong { font-size: 1.5rem; }

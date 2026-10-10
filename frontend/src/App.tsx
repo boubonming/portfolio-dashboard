@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 export type Freshness = {
   status: 'fresh' | 'stale' | 'missing' | 'future' | 'invalid' | string
@@ -51,7 +51,7 @@ export type PortfolioOverview = {
   holdings: Holding[]
 }
 
-type SortKey = 'symbol' | 'quantity' | 'currency' | 'latest_price' | 'reporting_value' | 'freshness'
+type SortKey = 'symbol' | 'quantity' | 'currency' | 'cost_basis' | 'latest_price' | 'reporting_value' | 'freshness'
 type SortDirection = 'ascending' | 'descending'
 
 // Compare canonical decimal strings without Number, parseFloat, or lexical
@@ -94,6 +94,12 @@ function qualityLabel(holding: Holding) {
   return flags.length ? flags.join(', ') : 'ok'
 }
 
+function qualityClass(holding: Holding) {
+  if (holding.data_quality.some((flag) => flag.startsWith('invalid') || flag === 'future')) return 'quality-error'
+  if (holding.data_quality.length || holding.freshness.status !== 'fresh') return 'quality-warning'
+  return 'quality-ok'
+}
+
 export default function App() {
   const [currency, setCurrency] = useState('MYR')
   const [data, setData] = useState<PortfolioOverview | null>(null)
@@ -102,27 +108,42 @@ export default function App() {
   const [filter, setFilter] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('symbol')
   const [sortDirection, setSortDirection] = useState<SortDirection>('ascending')
+  const controllerRef = useRef<AbortController | null>(null)
+  const requestGeneration = useRef(0)
 
-  const load = () => {
+  const load = useCallback(() => {
+    const generation = ++requestGeneration.current
+    controllerRef.current?.abort()
+    const controller = new AbortController()
+    controllerRef.current = controller
     setState('loading')
     setError('')
     const url = `/api/v1/portfolios/portfolio-default/overview?currency=${encodeURIComponent(currency)}`
-    fetch(url, { headers: { Accept: 'application/json' } })
+    fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Request failed (${response.status})`)
         return response.json() as Promise<PortfolioOverview>
       })
       .then((overview) => {
+        if (controller.signal.aborted || generation !== requestGeneration.current) return
         setData(overview)
         setState('ready')
       })
       .catch((reason: unknown) => {
+        if (controller.signal.aborted || generation !== requestGeneration.current) return
         setError(reason instanceof Error ? reason.message : 'Unable to load the portfolio')
         setState('error')
       })
-  }
+  }, [currency])
 
-  useEffect(load, [currency])
+  useEffect(() => {
+    load()
+    return () => {
+      requestGeneration.current += 1
+      controllerRef.current?.abort()
+      controllerRef.current = null
+    }
+  }, [load])
 
   const visibleHoldings = useMemo(() => {
     if (!data) return []
@@ -152,6 +173,10 @@ export default function App() {
     <button className="sort-button" type="button" onClick={() => selectSort(key)} aria-label={`Sort by ${label}`}>
       {label} {sortKey === key ? (sortDirection === 'ascending' ? '↑' : '↓') : '↕'}
     </button>
+  )
+
+  const sortHeader = (label: string, key: SortKey) => (
+    <th scope="col" aria-sort={sortKey === key ? sortDirection : 'none'}>{sortButton(label, key)}</th>
   )
 
   return (
@@ -205,24 +230,26 @@ export default function App() {
             <div className="table-scroll">
               <table>
                 <thead><tr>
-                  <th scope="col">{sortButton('Instrument', 'symbol')}</th>
-                  <th scope="col">{sortButton('Quantity', 'quantity')}</th>
-                  <th scope="col">{sortButton('Currency', 'currency')}</th>
-                  <th scope="col">Original cost</th>
-                  <th scope="col">Latest price / value</th>
-                  <th scope="col">Reporting value</th>
-                  <th scope="col">Freshness / data quality</th>
+                  {sortHeader('Instrument', 'symbol')}
+                  {sortHeader('Quantity', 'quantity')}
+                  {sortHeader('Currency', 'currency')}
+                  <th scope="col">Source unit cost</th>
+                  {sortHeader('Cost basis', 'cost_basis')}
+                  {sortHeader('Latest price', 'latest_price')}
+                  {sortHeader('Reporting value', 'reporting_value')}
+                  {sortHeader('Freshness', 'freshness')}
                   <th scope="col">Broker / date</th>
                 </tr></thead>
                 <tbody>
                   {visibleHoldings.map((holding) => <tr key={holding.lot_id}>
-                    <th scope="row"><strong>{holding.symbol}</strong><span className="subline">{holding.name || holding.description || 'Unnamed instrument'} · lot {holding.lot_id.slice(-8)}</span></th>
+                    <th scope="row"><strong>{holding.symbol}</strong><span className="subline">{holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'} · lot {holding.lot_id.slice(-8)}</span></th>
                     <td className="numeric">{holding.quantity}</td>
                     <td>{holding.currency}</td>
-                    <td className="numeric">{holding.cost_basis || holding.unit_cost || '—'}</td>
+                    <td className="numeric">{holding.unit_cost || '—'}</td>
+                    <td className="numeric">{holding.cost_basis || '—'}</td>
                     <td className="numeric">{holding.latest_price || '—'}<span className="subline">{holding.latest_value || 'value unavailable'}</span></td>
                     <td className="numeric">{data.snapshot.complete ? (holding.reporting_value || '—') : 'Withheld'}</td>
-                    <td><span className={`flag flag-${holding.freshness.status}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
+                    <td><span className={`flag ${qualityClass(holding)}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
                     <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span></td>
                   </tr>)}
                 </tbody>
