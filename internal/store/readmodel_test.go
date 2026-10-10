@@ -77,6 +77,9 @@ func TestPortfolioOverviewFailsSafeForLegacySnapshotWithoutMaxAge(t *testing.T) 
 	if usd.Snapshot.ReportingTotal != "" || !containsString(usd.Snapshot.MissingDependencies, "snapshot:max_age") || len(usd.Holdings) != 1 || usd.Holdings[0].ReportingValue != nil {
 		t.Fatalf("alternate holding quality = %+v", usd.Holdings)
 	}
+	if myr.Allocation.State == "complete" || usd.Allocation.State == "complete" || len(myr.Allocation.ByInstrument) != 0 || len(usd.Allocation.BySourceCurrency) != 0 {
+		t.Fatalf("legacy allocation should be withheld: MYR=%+v USD=%+v", myr.Allocation, usd.Allocation)
+	}
 }
 
 func TestPortfolioOverviewDoesNotLeakCrossPortfolioAccount(t *testing.T) {

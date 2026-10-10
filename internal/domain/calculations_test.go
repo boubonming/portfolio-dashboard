@@ -67,6 +67,41 @@ func TestCalculateMissingAndStaleDependenciesNeverBecomeZero(t *testing.T) {
 	}
 }
 
+func TestBuildAllocationAggregatesDuplicateLotsAndReconcilesPercentages(t *testing.T) {
+	input := ValuationInput{Lots: []ValuationLot{
+		{ID: "a-1", InstrumentID: "instrument-a", Symbol: "AAA", Currency: "USD"},
+		{ID: "a-2", InstrumentID: "instrument-a", Symbol: "AAA", Currency: "USD"},
+		{ID: "b-1", InstrumentID: "instrument-b", Symbol: "BBB", Currency: "SGD"},
+	}}
+	valuation := Valuation{Complete: true, ReportingCurrency: "MYR", ReportingTotal: "100", Lots: []LotValuation{
+		{LotID: "a-1", InstrumentID: "instrument-a", Symbol: "AAA", Currency: "USD", ReportingValue: ptrTest("20")},
+		{LotID: "a-2", InstrumentID: "instrument-a", Symbol: "AAA", Currency: "USD", ReportingValue: ptrTest("30")},
+		{LotID: "b-1", InstrumentID: "instrument-b", Symbol: "BBB", Currency: "SGD", ReportingValue: ptrTest("50")},
+	}}
+	allocation := BuildAllocation(input, valuation)
+	if allocation.State != "complete" || allocation.Coverage.TotalLots != 3 || allocation.Coverage.ValuedLots != 3 {
+		t.Fatalf("coverage = %+v", allocation)
+	}
+	if len(allocation.ByInstrument) != 2 || allocation.ByInstrument[0].Symbol != "AAA" || allocation.ByInstrument[0].Value != "50" || allocation.ByInstrument[0].Percentage != "50" {
+		t.Fatalf("instrument allocation = %+v", allocation.ByInstrument)
+	}
+	if len(allocation.BySourceCurrency) != 2 || allocation.BySourceCurrency[0].Currency != "SGD" || allocation.BySourceCurrency[0].Value != "50" || allocation.BySourceCurrency[1].Percentage != "50" {
+		t.Fatalf("currency allocation = %+v", allocation.BySourceCurrency)
+	}
+}
+
+func TestBuildAllocationWithholdsPartialDistribution(t *testing.T) {
+	missing := BuildAllocation(ValuationInput{Lots: []ValuationLot{{ID: "missing"}, {ID: "stale"}}}, Valuation{
+		Complete:            false,
+		Lots:                []LotValuation{{LotID: "missing"}},
+		MissingDependencies: []string{"quote:missing"},
+		StaleDependencies:   []string{"quote:stale"},
+	})
+	if missing.State != "partial" || missing.Coverage.TotalLots != 2 || missing.Coverage.ValuedLots != 0 || missing.Coverage.MissingDependencies != 1 || missing.Coverage.StaleDependencies != 1 || len(missing.ByInstrument) != 0 || len(missing.BySourceCurrency) != 0 {
+		t.Fatalf("partial allocation = %+v", missing)
+	}
+}
+
 func TestCalculateFutureQuoteBeyondToleranceIsIncomplete(t *testing.T) {
 	asOf := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 	result, err := Calculate(ValuationInput{

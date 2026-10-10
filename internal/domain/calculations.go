@@ -56,7 +56,7 @@ func Calculate(input ValuationInput) (Valuation, error) {
 	subtotals := map[string]*subtotal{}
 	total := ZeroDecimal()
 	for _, lot := range input.Lots {
-		lv := LotValuation{LotID: lot.ID, Symbol: lot.Symbol, Currency: lot.Currency, Quantity: lot.Quantity}
+		lv := LotValuation{LotID: lot.ID, Symbol: lot.Symbol, InstrumentID: lot.InstrumentID, Currency: lot.Currency, Quantity: lot.Quantity}
 		qty, err := ParseDecimal(lot.Quantity)
 		if err != nil || qty.Sign() < 0 {
 			out.Complete = false

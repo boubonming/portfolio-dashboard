@@ -28,6 +28,34 @@ export type Holding = {
   source_row?: number
 }
 
+export type AllocationCoverage = {
+  total_lots: number
+  valued_lots: number
+  missing_dependencies: number
+  stale_dependencies: number
+  invalid_dependencies: number
+}
+
+export type InstrumentAllocation = {
+  instrument_id?: string
+  symbol: string
+  value: string
+  percentage: string
+}
+
+export type CurrencyAllocation = {
+  currency: string
+  value: string
+  percentage: string
+}
+
+export type Allocation = {
+  state: 'complete' | 'partial' | 'unavailable' | string
+  coverage: AllocationCoverage
+  by_instrument?: InstrumentAllocation[]
+  by_source_currency?: CurrencyAllocation[]
+}
+
 export type PortfolioOverview = {
   portfolio: {
     id: string
@@ -48,6 +76,7 @@ export type PortfolioOverview = {
     invalid_dependencies?: string[]
     subtotals: Array<{ currency: string; market_value: string; cost_basis?: string; unrealised_pnl?: string }>
   }
+  allocation?: Allocation
   holdings: Holding[]
 }
 
@@ -98,6 +127,77 @@ function qualityClass(holding: Holding) {
   if (holding.data_quality.some((flag) => flag.startsWith('invalid') || flag === 'future')) return 'quality-error'
   if (holding.data_quality.length || holding.freshness.status !== 'fresh') return 'quality-warning'
   return 'quality-ok'
+}
+
+function CoveragePanel({ allocation }: { allocation: Allocation }) {
+  const coverage = allocation.coverage
+  return (
+    <section className="notice warning coverage-panel" aria-labelledby="allocation-coverage-title">
+      <h2 id="allocation-coverage-title">Allocation percentages withheld</h2>
+      <p>Allocation visuals are unavailable until every holding has a valid reporting value. Partial values are not presented as the whole portfolio.</p>
+      <dl className="coverage-grid">
+        <div><dt>Valued lots</dt><dd>{coverage.valued_lots} / {coverage.total_lots}</dd></div>
+        <div><dt>Missing dependencies</dt><dd>{coverage.missing_dependencies}</dd></div>
+        <div><dt>Stale dependencies</dt><dd>{coverage.stale_dependencies}</dd></div>
+        <div><dt>Invalid dependencies</dt><dd>{coverage.invalid_dependencies}</dd></div>
+      </dl>
+    </section>
+  )
+}
+
+function AllocationBars({ title, items, label }: { title: string; items: Array<{ value: string; percentage: string; label: string }>; label: string }) {
+  return (
+    <div className="allocation-group">
+      <h3>{title}</h3>
+      <ol className="allocation-bars" aria-label={label}>
+        {items.map((item) => (
+          <li key={`${item.label}-${item.value}`}>
+            <div className="allocation-row">
+              <span className="allocation-label">{item.label} allocation</span>
+              <span className="allocation-value">{item.value} · {item.percentage}%</span>
+            </div>
+            <div className="allocation-track" aria-hidden="true"><span style={{ width: `${item.percentage}%` }} /></div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
+
+function AllocationSection({ data }: { data: PortfolioOverview }) {
+  const allocation: Allocation = data.allocation || {
+    state: data.snapshot.complete ? 'complete' : data.snapshot.state === 'no_snapshot' ? 'unavailable' : 'partial',
+    coverage: { total_lots: data.holdings.length, valued_lots: data.holdings.filter((holding) => holding.reporting_value !== undefined).length, missing_dependencies: 0, stale_dependencies: 0, invalid_dependencies: 0 },
+    by_instrument: [],
+    by_source_currency: [],
+  }
+  if (allocation.state !== 'complete') return <CoveragePanel allocation={allocation} />
+  const instruments = allocation.by_instrument || []
+  const currencies = allocation.by_source_currency || []
+  return (
+    <section className="allocation-card" aria-labelledby="allocation-title">
+      <div className="section-heading">
+        <div><span className="eyebrow">Reporting-currency allocation</span><h2 id="allocation-title">Allocation</h2></div>
+        <span className="muted">Exact values in {data.reporting_currency} · percentages rounded to 2 decimals</span>
+      </div>
+      <div className="allocation-visuals">
+        <AllocationBars title="By instrument" label="Allocation by instrument" items={instruments.map((item) => ({ label: item.symbol, value: item.value, percentage: item.percentage }))} />
+        <AllocationBars title="By source currency" label="Allocation by original source currency" items={currencies.map((item) => ({ label: item.currency, value: item.value, percentage: item.percentage }))} />
+      </div>
+      <div className="table-scroll allocation-table-scroll">
+        <table className="allocation-table">
+          <caption>Allocation detail, also available without color</caption>
+          <thead><tr><th scope="col">Instrument</th><th scope="col">Value ({data.reporting_currency})</th><th scope="col">Percentage</th></tr></thead>
+          <tbody>{instruments.map((item) => <tr key={`instrument-${item.instrument_id || item.symbol}`}><th scope="row">{item.symbol} allocation</th><td className="numeric">{item.value}</td><td className="numeric">{item.percentage}%</td></tr>)}</tbody>
+        </table>
+        <table className="allocation-table">
+          <caption>Source currency allocation detail</caption>
+          <thead><tr><th scope="col">Source currency</th><th scope="col">Value ({data.reporting_currency})</th><th scope="col">Percentage</th></tr></thead>
+          <tbody>{currencies.map((item) => <tr key={`currency-${item.currency}`}><th scope="row">{item.currency} allocation</th><td className="numeric">{item.value}</td><td className="numeric">{item.percentage}%</td></tr>)}</tbody>
+        </table>
+      </div>
+    </section>
+  )
 }
 
 export default function App() {
@@ -225,10 +325,13 @@ export default function App() {
           {data.snapshot.state === 'no_snapshot' && <section className="notice"><h2>No immutable snapshot yet</h2><p>Holdings are shown from the approved import, but prices and reporting values are withheld until a snapshot is created.</p></section>}
           {data.snapshot.state === 'incomplete' && <section className="notice warning"><h2>Valuation is incomplete</h2><p>Reporting total is intentionally withheld. Missing, stale or invalid market dependencies must be resolved before this view can be complete.</p></section>}
 
+          <AllocationSection data={data} />
+
           <section className="table-card" aria-labelledby="holdings-title">
             <div className="section-heading"><div><span className="eyebrow">Source-traceable lots</span><h2 id="holdings-title">Holdings</h2></div><span className="muted">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</span></div>
             <div className="table-scroll">
               <table>
+                <caption className="visually-hidden">Holdings</caption>
                 <thead><tr>
                   {sortHeader('Instrument', 'symbol')}
                   {sortHeader('Quantity', 'quantity')}
