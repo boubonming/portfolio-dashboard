@@ -102,6 +102,19 @@ func TestBuildAllocationWithholdsPartialDistribution(t *testing.T) {
 	}
 }
 
+func TestBuildAllocationWithholdsNonEmptyZeroTotal(t *testing.T) {
+	input := ValuationInput{Lots: []ValuationLot{{ID: "zero", InstrumentID: "instrument-zero", Symbol: "ZERO", Currency: "MYR"}}}
+	allocation := BuildAllocation(input, Valuation{Complete: true, ReportingTotal: "0", Lots: []LotValuation{{LotID: "zero", InstrumentID: "instrument-zero", Symbol: "ZERO", Currency: "MYR", ReportingValue: ptrTest("0")}}})
+	if allocation.State != "partial" || allocation.Coverage.TotalLots != 1 || allocation.Coverage.ValuedLots != 1 || len(allocation.ByInstrument) != 0 || len(allocation.BySourceCurrency) != 0 {
+		t.Fatalf("zero-total allocation = %+v", allocation)
+	}
+
+	empty := BuildAllocation(ValuationInput{}, Valuation{Complete: true, ReportingTotal: "0"})
+	if empty.State != "complete" || empty.ByInstrument == nil || empty.BySourceCurrency == nil {
+		t.Fatalf("empty allocation = %+v", empty)
+	}
+}
+
 func TestAllocationPercentagesUseLargestRemainderWithZeroSlices(t *testing.T) {
 	percentages := allocationPercentages([]Decimal{ZeroDecimal(), MustDecimal("1"), MustDecimal("1"), MustDecimal("1")}, "3")
 	got := strings.Join(percentages, ",")
@@ -145,6 +158,34 @@ func TestAllocationPercentagesUseLargestRemainderWithZeroSlices(t *testing.T) {
 	}
 }
 
+func TestAllocationPercentagesUseExactAdversarialRounding(t *testing.T) {
+	values := make([]Decimal, 32)
+	for index := range values {
+		values[index] = MustDecimal("1290")
+	}
+	values[len(values)-1] = MustDecimal("10")
+
+	first := allocationPercentages(values, "40000")
+	second := allocationPercentages(values, "40000")
+	if got := strings.Join(first, ","); got != strings.Join(second, ",") {
+		t.Fatalf("rounding is not deterministic: first=%s second=%s", got, strings.Join(second, ","))
+	}
+	sum := ZeroDecimal()
+	for index, percentage := range first {
+		value := MustDecimal(percentage)
+		if value.Sign() < 0 {
+			t.Fatalf("percentage %d is negative: %q", index, percentage)
+		}
+		sum = sum.Add(value)
+	}
+	if sum.String() != "100" {
+		t.Fatalf("percentage sum = %s", sum.String())
+	}
+	if first[0] != "3.23" || first[15] != "3.23" || first[16] != "3.22" || first[30] != "3.22" || first[31] != "0.02" {
+		t.Fatalf("adversarial percentages = %v", first)
+	}
+}
+
 func TestBuildAllocationResolvesLegacyIdentityByLotID(t *testing.T) {
 	input := ValuationInput{Lots: []ValuationLot{
 		{ID: "usd-lot", InstrumentID: "instrument-usd", Symbol: "SAME", Currency: "USD"},
@@ -174,6 +215,8 @@ func TestBuildAllocationFailsClosedForMalformedCompletePayload(t *testing.T) {
 		{name: "missing lot", valuation: Valuation{Complete: true, ReportingTotal: "3", Lots: []LotValuation{{LotID: "one", InstrumentID: "instrument-one", Currency: "USD", ReportingValue: ptrTest("1")}}}},
 		{name: "malformed value", valuation: Valuation{Complete: true, ReportingTotal: "3", Lots: []LotValuation{{LotID: "one", InstrumentID: "instrument-one", Currency: "USD", ReportingValue: ptrTest("1.2.3")}, {LotID: "two", InstrumentID: "instrument-two", Currency: "USD", ReportingValue: ptrTest("2")}}}},
 		{name: "inconsistent total", valuation: Valuation{Complete: true, ReportingTotal: "4", Lots: []LotValuation{{LotID: "one", InstrumentID: "instrument-one", Currency: "USD", ReportingValue: ptrTest("1")}, {LotID: "two", InstrumentID: "instrument-two", Currency: "USD", ReportingValue: ptrTest("2")}}}},
+		{name: "duplicate valuation lot", valuation: Valuation{Complete: true, ReportingTotal: "3", Lots: []LotValuation{{LotID: "one", InstrumentID: "instrument-one", Currency: "USD", ReportingValue: ptrTest("1")}, {LotID: "one", InstrumentID: "instrument-one", Currency: "USD", ReportingValue: ptrTest("2")}}}},
+		{name: "identity-mismatched valuation lot", valuation: Valuation{Complete: true, ReportingTotal: "3", Lots: []LotValuation{{LotID: "one", InstrumentID: "instrument-two", Currency: "USD", ReportingValue: ptrTest("1")}, {LotID: "two", InstrumentID: "instrument-two", Currency: "USD", ReportingValue: ptrTest("2")}}}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

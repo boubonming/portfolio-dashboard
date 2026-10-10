@@ -125,6 +125,12 @@ func BuildAllocation(input ValuationInput, valuation Valuation) AllocationView {
 	if len(seenLots) != len(input.Lots) || calculatedTotal.Rat().Cmp(total.Rat()) != 0 {
 		return allocation
 	}
+	// A non-empty portfolio with an exact zero total has no meaningful
+	// denominator. Keep the exact coverage, but never present zero-valued
+	// slices as a normalized complete distribution.
+	if total.Sign() == 0 {
+		return allocation
+	}
 	allocation.State = "complete"
 
 	instrumentKeys := make([]string, 0, len(instruments))

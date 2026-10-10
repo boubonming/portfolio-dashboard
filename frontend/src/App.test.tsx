@@ -191,6 +191,56 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('list', { name: /allocation by instrument/i })).toBeNull()
   })
 
+  it('fails closed when allocation is complete but the immutable snapshot is not complete', async () => {
+    const inconsistent = {
+      ...allocationOverview,
+      snapshot: { ...allocationOverview.snapshot, state: 'incomplete' as const, complete: false, reporting_total: undefined },
+    }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => inconsistent } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /allocation percentages withheld/i })).toBeTruthy())
+    expect(screen.queryByRole('list', { name: /allocation by instrument/i })).toBeNull()
+    expect(screen.queryByRole('table', { name: /allocation detail/i })).toBeNull()
+  })
+
+  it('uses distinct unavailable copy for a portfolio without an immutable snapshot', async () => {
+    const noSnapshot = {
+      ...allocationOverview,
+      snapshot: { state: 'no_snapshot' as const, complete: false, subtotals: [] },
+      allocation: { ...allocationOverview.allocation!, state: 'unavailable' as const, coverage: { total_lots: 0, valued_lots: 0, missing_dependencies: 0, stale_dependencies: 0, invalid_dependencies: 0 }, by_instrument: undefined, by_source_currency: undefined },
+      holdings: [],
+    }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => noSnapshot } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /allocation unavailable/i })).toBeTruthy())
+    expect(screen.getByText(/no immutable valuation exists yet/i)).toBeTruthy()
+    expect(screen.queryByText('0 / 0')).toBeNull()
+    expect(screen.queryByRole('list', { name: /allocation by instrument/i })).toBeNull()
+  })
+
+  it('renders reporting-currency allocation values from each response currency', async () => {
+    const usdAllocation = {
+      ...allocationOverview,
+      reporting_currency: 'USD',
+      snapshot: { ...allocationOverview.snapshot, reporting_total: '50.25' },
+      allocation: {
+        ...allocationOverview.allocation!,
+        by_instrument: [{ instrument_id: 'instrument-a', symbol: 'AAA', value: '40.25', percentage: '80.10' }, { instrument_id: 'instrument-b', symbol: 'BBB', value: '10', percentage: '19.90' }],
+        by_source_currency: [{ currency: 'MYR', value: '40.25', percentage: '80.10' }, { currency: 'USD', value: '10', percentage: '19.90' }],
+      },
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, json: async () => String(input).includes('currency=USD') ? usdAllocation : allocationOverview } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Allocation' })).toBeTruthy())
+    expect(screen.getAllByText('80.25 · 80.25%').length).toBeGreaterThan(0)
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(screen.getAllByText('40.25 · 80.10%').length).toBeGreaterThan(0))
+    expect(screen.getAllByText('Value (USD)').length).toBe(2)
+    expect(screen.queryByText('80.25 · 80.25%')).toBeNull()
+    expect(screen.getAllByText('MYR').length).toBeGreaterThan(0)
+  })
+
   it('renders a clear API error state', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('fixture unavailable'))))
     render(<App />)

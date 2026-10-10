@@ -130,18 +130,27 @@ function qualityClass(holding: Holding) {
   return 'quality-ok'
 }
 
-function CoveragePanel({ allocation }: { allocation: Allocation }) {
+function CoveragePanel({ allocation, unavailable }: { allocation: Allocation; unavailable: boolean }) {
   const coverage = allocation.coverage
   return (
     <section className="notice warning coverage-panel" aria-labelledby="allocation-coverage-title">
-      <h2 id="allocation-coverage-title">Allocation percentages withheld</h2>
-      <p>Allocation visuals are unavailable until every holding has a valid reporting value. Partial values are not presented as the whole portfolio.</p>
-      <dl className="coverage-grid">
-        <div><dt>Valued lots</dt><dd>{coverage.valued_lots} / {coverage.total_lots}</dd></div>
-        <div><dt>Missing dependencies</dt><dd>{coverage.missing_dependencies}</dd></div>
-        <div><dt>Stale dependencies</dt><dd>{coverage.stale_dependencies}</dd></div>
-        <div><dt>Invalid dependencies</dt><dd>{coverage.invalid_dependencies}</dd></div>
-      </dl>
+      {unavailable ? (
+        <>
+          <h2 id="allocation-coverage-title">Allocation unavailable</h2>
+          <p>No immutable valuation exists yet, so allocation percentages cannot be calculated.</p>
+        </>
+      ) : (
+        <>
+          <h2 id="allocation-coverage-title">Allocation percentages withheld</h2>
+          <p>Allocation visuals are unavailable until every holding has a valid reporting value. Partial values are not presented as the whole portfolio.</p>
+          <dl className="coverage-grid">
+            <div><dt>Valued lots</dt><dd>{coverage.valued_lots} / {coverage.total_lots}</dd></div>
+            <div><dt>Missing dependencies</dt><dd>{coverage.missing_dependencies}</dd></div>
+            <div><dt>Stale dependencies</dt><dd>{coverage.stale_dependencies}</dd></div>
+            <div><dt>Invalid dependencies</dt><dd>{coverage.invalid_dependencies}</dd></div>
+          </dl>
+        </>
+      )}
     </section>
   )
 }
@@ -167,12 +176,14 @@ function AllocationBars({ title, items, label }: { title: string; items: Array<{
 
 function AllocationSection({ data }: { data: PortfolioOverview }) {
   const allocation: Allocation = data.allocation || {
-    state: data.snapshot.complete ? 'complete' : data.snapshot.state === 'no_snapshot' ? 'unavailable' : 'partial',
+    state: data.snapshot.state === 'no_snapshot' ? 'unavailable' : 'partial',
     coverage: { total_lots: data.holdings.length, valued_lots: data.holdings.filter((holding) => holding.reporting_value !== undefined).length, missing_dependencies: 0, stale_dependencies: 0, invalid_dependencies: 0 },
     by_instrument: [],
     by_source_currency: [],
   }
-  if (allocation.state !== 'complete') return <CoveragePanel allocation={allocation} />
+  const snapshotComplete = data.snapshot.complete && data.snapshot.state === 'complete'
+  const allocationComplete = snapshotComplete && allocation.state === 'complete' && Array.isArray(allocation.by_instrument) && Array.isArray(allocation.by_source_currency)
+  if (!allocationComplete) return <CoveragePanel allocation={allocation} unavailable={data.snapshot.state === 'no_snapshot' || allocation.state === 'unavailable'} />
   const instruments = allocation.by_instrument || []
   const currencies = allocation.by_source_currency || []
   return (
