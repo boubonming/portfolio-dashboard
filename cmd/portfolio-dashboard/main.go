@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/config"
 	"github.com/boubonming/portfolio-dashboard/internal/httpserver"
 	"github.com/boubonming/portfolio-dashboard/internal/importer"
+	"github.com/boubonming/portfolio-dashboard/internal/marketdata"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 )
 
@@ -51,8 +53,14 @@ func runCommand(command string, args []string) error {
 		return runSnapshotStatus(args)
 	case "snapshot-show":
 		return runSnapshotShow(args)
+	case "mapping-add":
+		return runMappingAdd(args)
+	case "mapping-list":
+		return runMappingList(args)
+	case "market-refresh":
+		return runMarketRefresh(args)
 	default:
-		return fmt.Errorf("unknown command %q (use import-preview, import-apply, import-status, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
+		return fmt.Errorf("unknown command %q (use import-preview, import-apply, import-status, mapping-add, mapping-list, market-refresh, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
 	}
 }
 
@@ -276,6 +284,119 @@ func runSnapshotShow(args []string) error {
 		return err
 	}
 	return writeJSON(result)
+}
+
+func runMappingAdd(args []string) error {
+	flags := flag.NewFlagSet("mapping-add", flag.ContinueOnError)
+	database := flags.String("db", "", "SQLite database path")
+	instrument := flags.String("instrument", "", "instrument ID")
+	providerName := flags.String("provider", "", "provider: finnhub, alpha_vantage, or coingecko")
+	providerSymbol := flags.String("provider-symbol", "", "exact provider symbol or coin ID")
+	currency := flags.String("quote-currency", "", "quote currency")
+	activeFrom := flags.String("active-from", "", "UTC RFC3339 activation time; defaults to now")
+	provenance := flags.String("provenance", "", "mapping provenance note")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	provider, err := marketdata.ParseProvider(*providerName)
+	if err != nil {
+		return err
+	}
+	db, ctx, err := openDatabase(*database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	mapping, err := db.AddProviderMapping(ctx, store.ProviderMappingInput{InstrumentID: *instrument, Provider: provider, ProviderSymbol: *providerSymbol, QuoteCurrency: *currency, ActiveFrom: *activeFrom, Provenance: *provenance})
+	if err != nil {
+		return err
+	}
+	return writeJSON(mapping)
+}
+
+func runMappingList(args []string) error {
+	flags := flag.NewFlagSet("mapping-list", flag.ContinueOnError)
+	database := flags.String("db", "", "SQLite database path")
+	instrument := flags.String("instrument", "", "optional instrument ID")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	db, ctx, err := openDatabase(*database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	mappings, err := db.ListProviderMappings(ctx, *instrument)
+	if err != nil {
+		return err
+	}
+	return writeJSON(mappings)
+}
+
+func runMarketRefresh(args []string) error {
+	flags := flag.NewFlagSet("market-refresh", flag.ContinueOnError)
+	database := flags.String("db", "", "SQLite database path")
+	portfolioID := flags.String("portfolio", "portfolio-default", "portfolio ID")
+	reportingCurrency := flags.String("reporting-currency", "", "reporting currency; defaults to portfolio setting")
+	providerList := flags.String("providers", "", "optional comma-separated provider subset")
+	asOf := flags.String("as-of", "", "UTC refresh timestamp in RFC3339; defaults to now")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	when, err := parseOptionalTime(*asOf)
+	if err != nil {
+		return err
+	}
+	providers, err := parseProviderList(*providerList)
+	if err != nil {
+		return err
+	}
+	cfg := config.FromEnv()
+	clients := map[marketdata.Provider]marketdata.ProviderClient{
+		marketdata.ProviderFinnhub:           NewFinnhubFromConfig(cfg),
+		marketdata.ProviderAlphaVantage:      NewAlphaFromConfig(cfg),
+		marketdata.ProviderCoinGecko:         marketdata.NewCoinGeckoClient(marketdata.ClientOptions{BaseURL: os.Getenv("PORTFOLIO_COINGECKO_BASE_URL")}),
+		marketdata.ProviderOpenExchangeRates: NewOXRFromConfig(cfg),
+	}
+	db, ctx, err := openDatabase(*database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	result, err := db.Refresh(ctx, store.RefreshOptions{PortfolioID: *portfolioID, ReportingCurrency: *reportingCurrency, Providers: providers, Clients: clients, AsOf: when})
+	if err != nil {
+		return err
+	}
+	return writeJSON(result)
+}
+
+func NewFinnhubFromConfig(cfg config.Config) marketdata.ProviderClient {
+	return marketdata.NewFinnhubClient(cfg.ProviderKeys.Finnhub, marketdata.ClientOptions{BaseURL: os.Getenv("PORTFOLIO_FINNHUB_BASE_URL")})
+}
+func NewAlphaFromConfig(cfg config.Config) marketdata.ProviderClient {
+	return marketdata.NewAlphaVantageClient(cfg.ProviderKeys.AlphaVantage, marketdata.ClientOptions{BaseURL: os.Getenv("PORTFOLIO_ALPHA_VANTAGE_BASE_URL")})
+}
+func NewOXRFromConfig(cfg config.Config) marketdata.ProviderClient {
+	return marketdata.NewOpenExchangeRatesClient(cfg.ProviderKeys.OpenExchangeRates, marketdata.ClientOptions{BaseURL: os.Getenv("PORTFOLIO_OPEN_EXCHANGE_RATES_BASE_URL")})
+}
+
+func parseProviderList(value string) ([]marketdata.Provider, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	var providers []marketdata.Provider
+	seen := map[marketdata.Provider]bool{}
+	for _, part := range strings.Split(value, ",") {
+		provider, err := marketdata.ParseProvider(strings.TrimSpace(part))
+		if err != nil || provider == marketdata.ProviderManual {
+			return nil, fmt.Errorf("invalid refresh provider %q", part)
+		}
+		if !seen[provider] {
+			providers = append(providers, provider)
+			seen[provider] = true
+		}
+	}
+	return providers, nil
 }
 
 func writeJSON(value any) error {

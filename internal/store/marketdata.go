@@ -14,6 +14,7 @@ import (
 const futureTimestampTolerance = domain.DefaultFutureTolerance
 
 type QuoteInput struct {
+	ID           string
 	InstrumentID string
 	Symbol       string
 	Currency     string
@@ -26,6 +27,7 @@ type QuoteInput struct {
 }
 
 type FXInput struct {
+	ID            string
 	BaseCurrency  string
 	QuoteCurrency string
 	Rate          string
@@ -102,15 +104,29 @@ func (s *Store) AddQuote(ctx context.Context, input QuoteInput) (domain.Quote, e
 	if instrumentCurrency != currency {
 		return domain.Quote{}, fmt.Errorf("quote currency %s does not match instrument currency %s", currency, instrumentCurrency)
 	}
-	id := deterministicID("quote", instrumentID, price.String(), currency, input.Source, marketAt, fetchedAt, input.Basis, input.Provenance)
+	id := strings.TrimSpace(input.ID)
+	if id == "" {
+		id = deterministicID("quote", instrumentID, price.String(), currency, input.Source, marketAt, fetchedAt, input.Basis, input.Provenance)
+	}
 	quote := domain.Quote{ID: id, InstrumentID: instrumentID, Symbol: symbol, Price: price.String(), Currency: currency, Source: strings.TrimSpace(input.Source), MarketAt: marketAt, FetchedAt: fetchedAt, Basis: strings.TrimSpace(input.Basis), Provenance: strings.TrimSpace(input.Provenance)}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Quote{}, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO quotes(id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?)`, quote.ID, quote.InstrumentID, quote.Price, quote.Currency, quote.Source, quote.MarketAt, quote.FetchedAt, quote.Basis, quote.Provenance); err != nil {
-		return domain.Quote{}, fmt.Errorf("persist quote: %w", err)
+	result, insertErr := tx.ExecContext(ctx, `INSERT INTO quotes(id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, quote.ID, quote.InstrumentID, quote.Price, quote.Currency, quote.Source, quote.MarketAt, quote.FetchedAt, quote.Basis, quote.Provenance)
+	if insertErr != nil {
+		return domain.Quote{}, fmt.Errorf("persist quote: %w", insertErr)
+	}
+	inserted, _ := result.RowsAffected()
+	if inserted == 0 {
+		if err = tx.QueryRowContext(ctx, `SELECT id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance FROM quotes WHERE id = ?`, quote.ID).Scan(&quote.ID, &quote.InstrumentID, &quote.Price, &quote.Currency, &quote.Source, &quote.MarketAt, &quote.FetchedAt, &quote.Basis, &quote.Provenance); err != nil {
+			return domain.Quote{}, fmt.Errorf("read existing quote: %w", err)
+		}
+		if err = tx.Commit(); err != nil {
+			return domain.Quote{}, err
+		}
+		return quote, nil
 	}
 	payload, _ := json.Marshal(quote)
 	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, deterministicID("audit", "quote", quote.ID), "administrative-quote", "market.quote.added", "quote", quote.ID, payload, fetchedAt); err != nil {
@@ -148,7 +164,10 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	if err != nil {
 		return domain.FXRate{}, err
 	}
-	id := deterministicID("fx", base, quote, rate.String(), input.Source, marketAt, fetchedAt, input.Basis, input.Provenance)
+	id := strings.TrimSpace(input.ID)
+	if id == "" {
+		id = deterministicID("fx", base, quote, rate.String(), input.Source, marketAt, fetchedAt, input.Basis, input.Provenance)
+	}
 	fx := domain.FXRate{ID: id, BaseCurrency: base, QuoteCurrency: quote, Rate: rate.String(), Source: strings.TrimSpace(input.Source), MarketAt: marketAt, FetchedAt: fetchedAt, Basis: strings.TrimSpace(input.Basis), Provenance: strings.TrimSpace(input.Provenance)}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -162,8 +181,19 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	if reverseCount != 0 {
 		return domain.FXRate{}, fmt.Errorf("FX pair orientation is already established as %s/%s", fx.QuoteCurrency, fx.BaseCurrency)
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO fx_rates(id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?)`, fx.ID, fx.BaseCurrency, fx.QuoteCurrency, fx.Rate, fx.Source, fx.MarketAt, fx.FetchedAt, fx.Basis, fx.Provenance); err != nil {
-		return domain.FXRate{}, fmt.Errorf("persist FX rate: %w", err)
+	result, insertErr := tx.ExecContext(ctx, `INSERT INTO fx_rates(id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, fx.ID, fx.BaseCurrency, fx.QuoteCurrency, fx.Rate, fx.Source, fx.MarketAt, fx.FetchedAt, fx.Basis, fx.Provenance)
+	if insertErr != nil {
+		return domain.FXRate{}, fmt.Errorf("persist FX rate: %w", insertErr)
+	}
+	inserted, _ := result.RowsAffected()
+	if inserted == 0 {
+		if err = tx.QueryRowContext(ctx, `SELECT id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance FROM fx_rates WHERE id = ?`, fx.ID).Scan(&fx.ID, &fx.BaseCurrency, &fx.QuoteCurrency, &fx.Rate, &fx.Source, &fx.MarketAt, &fx.FetchedAt, &fx.Basis, &fx.Provenance); err != nil {
+			return domain.FXRate{}, fmt.Errorf("read existing FX rate: %w", err)
+		}
+		if err = tx.Commit(); err != nil {
+			return domain.FXRate{}, err
+		}
+		return fx, nil
 	}
 	payload, _ := json.Marshal(fx)
 	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, deterministicID("audit", "fx", fx.ID), "administrative-fx", "market.fx.added", "fx_rate", fx.ID, payload, fetchedAt); err != nil {
