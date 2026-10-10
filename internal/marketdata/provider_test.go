@@ -91,12 +91,15 @@ func TestCoinGeckoBatchesMappedIDs(t *testing.T) {
 		if query.Get("vs_currencies") != "usd" {
 			t.Errorf("currency query = %q", query.Get("vs_currencies"))
 		}
+		if query.Get("include_last_updated_at") != "true" {
+			t.Errorf("include_last_updated_at = %q", query.Get("include_last_updated_at"))
+		}
 		ids, _ := url.QueryUnescape(query.Get("ids"))
 		if ids != "bitcoin,ethereum,xrp" {
 			t.Errorf("ids query = %q", ids)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"bitcoin":{"usd":"100.00"},"ethereum":{"usd":200},"xrp":{"usd":0.50}}`))
+		_, _ = w.Write([]byte(`{"bitcoin":{"usd":"100.00","last_updated_at":1767351600},"ethereum":{"usd":200,"last_updated_at":1767351600},"xrp":{"usd":0.50,"last_updated_at":1767351600}}`))
 	}))
 	defer server.Close()
 	client := NewCoinGeckoClient(ClientOptions{BaseURL: server.URL, Now: fixtureNow})
@@ -111,6 +114,37 @@ func TestCoinGeckoBatchesMappedIDs(t *testing.T) {
 	}
 	if quotes["xrp"].Price != "0.5" {
 		t.Fatalf("xrp quote = %+v", quotes["xrp"])
+	}
+	if quotes["xrp"].MarketAt != "2026-01-02T11:00:00Z" {
+		t.Fatalf("xrp market time = %q", quotes["xrp"].MarketAt)
+	}
+}
+
+func TestCoinGeckoBatchesEachQuoteCurrencyAndRejectsMissingTimestamp(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("include_last_updated_at") != "true" {
+			t.Errorf("timestamp query = %q", r.URL.Query().Get("include_last_updated_at"))
+		}
+		if r.URL.Query().Get("vs_currencies") == "eur" {
+			_, _ = w.Write([]byte(`{"bitcoin":{"eur":90,"last_updated_at":1767351600}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ethereum":{"usd":200}}`))
+	}))
+	defer server.Close()
+	client := NewCoinGeckoClient(ClientOptions{BaseURL: server.URL, Now: fixtureNow})
+	quotes, failures := client.QuoteBatch(context.Background(), []QuoteRequest{
+		{InstrumentID: "btc", Symbol: "BTC", ProviderSymbol: "bitcoin", Currency: "EUR"},
+		{InstrumentID: "eth", Symbol: "ETH", ProviderSymbol: "ethereum", Currency: "USD"},
+	})
+	if calls.Load() != 2 || len(quotes) != 1 || len(failures) != 1 {
+		t.Fatalf("quotes=%d failures=%d calls=%d", len(quotes), len(failures), calls.Load())
+	}
+	if !strings.Contains(failures["eth"].Error(), "invalid_timestamp") {
+		t.Fatalf("missing timestamp error = %v", failures["eth"])
 	}
 }
 
@@ -133,5 +167,105 @@ func TestOpenExchangeRatesOneCallAndExactCrossRate(t *testing.T) {
 	}
 	if rates["EUR/MYR"].Rate != "2.5" || rates["USD/MYR"].Rate != "5" {
 		t.Fatalf("rates = %+v", rates)
+	}
+}
+
+func TestProviderHTTPFailuresAreBoundedAndRedacted(t *testing.T) {
+	type adapter struct {
+		name string
+		call func(context.Context, string) error
+	}
+	adapters := []adapter{
+		{name: "finnhub", call: func(ctx context.Context, baseURL string) error {
+			_, err := NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: baseURL, Now: fixtureNow}).Quote(ctx, QuoteRequest{InstrumentID: "fixture", ProviderSymbol: "NYSE:FIX", Currency: "USD"})
+			return err
+		}},
+		{name: "alpha_vantage", call: func(ctx context.Context, baseURL string) error {
+			_, err := NewAlphaVantageClient("fixture-secret", ClientOptions{BaseURL: baseURL, Now: fixtureNow}).Quote(ctx, QuoteRequest{InstrumentID: "fixture", ProviderSymbol: "LSE:FIX", Currency: "GBP"})
+			return err
+		}},
+		{name: "coingecko", call: func(ctx context.Context, baseURL string) error {
+			_, err := NewCoinGeckoClient(ClientOptions{BaseURL: baseURL, Now: fixtureNow}).Quote(ctx, QuoteRequest{InstrumentID: "fixture", ProviderSymbol: "bitcoin", Currency: "USD"})
+			return err
+		}},
+		{name: "open_exchange_rates", call: func(ctx context.Context, baseURL string) error {
+			_, failures := NewOpenExchangeRatesClient("fixture-secret", ClientOptions{BaseURL: baseURL, Now: fixtureNow}).FXBatch(ctx, []FXRequest{{BaseCurrency: "EUR", QuoteCurrency: "MYR"}})
+			return failures["EUR/MYR"]
+		}},
+	}
+	cases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		class       string
+	}{
+		{name: "malformed_json", status: http.StatusOK, contentType: "application/json", body: "{", class: "malformed_json"},
+		{name: "non_json", status: http.StatusOK, contentType: "text/plain", body: "provider failure", class: "content_type"},
+		{name: "unauthorized", status: http.StatusUnauthorized, contentType: "application/json", body: `{}`, class: "auth"},
+		{name: "forbidden", status: http.StatusForbidden, contentType: "application/json", body: `{}`, class: "auth"},
+		{name: "rate_limited", status: http.StatusTooManyRequests, contentType: "application/json", body: `{}`, class: "rate_limit"},
+		{name: "oversized_body", status: http.StatusOK, contentType: "application/json", body: strings.Repeat("x", maxProviderBody+1), class: "body_too_large"},
+	}
+	for _, provider := range adapters {
+		for _, testCase := range cases {
+			t.Run(provider.name+"/"+testCase.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", testCase.contentType)
+					w.WriteHeader(testCase.status)
+					_, _ = w.Write([]byte(testCase.body))
+				}))
+				defer server.Close()
+				err := provider.call(context.Background(), server.URL)
+				if err == nil || !strings.Contains(err.Error(), testCase.class) || strings.Contains(err.Error(), "fixture-secret") {
+					t.Fatalf("error = %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestProviderPayloadValidation(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  func() string
+		call  func(context.Context, string) error
+		class string
+	}{
+		{name: "finnhub_timestamp", body: func() string { return `{"c":12,"t":0}` }, call: func(ctx context.Context, baseURL string) error {
+			_, err := NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: baseURL, Now: fixtureNow}).Quote(ctx, QuoteRequest{InstrumentID: "fixture", ProviderSymbol: "NYSE:FIX", Currency: "USD"})
+			return err
+		}, class: "invalid_timestamp"},
+		{name: "alpha_symbol", body: func() string {
+			return `{"Global Quote":{"01. symbol":"LSE:OTHER","05. price":"4.2","07. latest trading day":"2026-01-02"}}`
+		}, call: func(ctx context.Context, baseURL string) error {
+			_, err := NewAlphaVantageClient("fixture-secret", ClientOptions{BaseURL: baseURL, Now: fixtureNow}).Quote(ctx, QuoteRequest{InstrumentID: "fixture", ProviderSymbol: "LSE:FIX", Currency: "GBP"})
+			return err
+		}, class: "symbol_mismatch"},
+		{name: "coingecko_future_timestamp", body: func() string {
+			return fmt.Sprintf(`{"bitcoin":{"usd":1,"last_updated_at":%d}}`, fixtureNow().Add(10*time.Minute).Unix())
+		}, call: func(ctx context.Context, baseURL string) error {
+			_, err := NewCoinGeckoClient(ClientOptions{BaseURL: baseURL, Now: fixtureNow}).Quote(ctx, QuoteRequest{InstrumentID: "fixture", ProviderSymbol: "bitcoin", Currency: "USD"})
+			return err
+		}, class: "invalid_timestamp"},
+		{name: "oxr_currency", body: func() string {
+			return fmt.Sprintf(`{"timestamp":%d,"base":"EUR","rates":{"MYR":5}}`, fixtureNow().Add(-time.Hour).Unix())
+		}, call: func(ctx context.Context, baseURL string) error {
+			_, failures := NewOpenExchangeRatesClient("fixture-secret", ClientOptions{BaseURL: baseURL, Now: fixtureNow}).FXBatch(ctx, []FXRequest{{BaseCurrency: "EUR", QuoteCurrency: "MYR"}})
+			return failures["EUR/MYR"]
+		}, class: "currency_mismatch"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(testCase.body()))
+			}))
+			defer server.Close()
+			err := testCase.call(context.Background(), server.URL)
+			if err == nil || !strings.Contains(err.Error(), testCase.class) || strings.Contains(err.Error(), "fixture-secret") {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }

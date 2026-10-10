@@ -32,6 +32,17 @@ func (c *CoinGeckoClient) FX(context.Context, FXRequest) (domain.FXRate, error) 
 	return domain.FXRate{}, ErrUnsupportedOperation
 }
 
+func (c *CoinGeckoClient) QuoteBatchRequestCount(requests []QuoteRequest) int {
+	currencies := map[string]struct{}{}
+	for _, request := range requests {
+		if validateQuoteRequest(request) != nil {
+			continue
+		}
+		currencies[strings.ToLower(strings.TrimSpace(request.Currency))] = struct{}{}
+	}
+	return len(currencies)
+}
+
 func (c *CoinGeckoClient) Quote(ctx context.Context, request QuoteRequest) (domain.Quote, error) {
 	quotes, failures := c.QuoteBatch(ctx, []QuoteRequest{request})
 	if quote, ok := quotes[request.InstrumentID]; ok {
@@ -73,7 +84,7 @@ func (c *CoinGeckoClient) QuoteBatch(ctx context.Context, requests []QuoteReques
 			byID[id] = request
 		}
 		sort.Strings(ids)
-		query := url.Values{"ids": {strings.Join(ids, ",")}, "vs_currencies": {currency}}
+		query := url.Values{"ids": {strings.Join(ids, ",")}, "vs_currencies": {currency}, "include_last_updated_at": {"true"}}
 		httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, buildURL(c.baseURL, "/api/v3/simple/price", query), nil)
 		if err != nil {
 			for _, request := range group {
@@ -96,18 +107,26 @@ func (c *CoinGeckoClient) QuoteBatch(ctx context.Context, requests []QuoteReques
 			continue
 		}
 		fetched := c.now().UTC()
-		marketAt, timestampErr := parseProviderTimestamp(c.Name(), fetched, fetched)
-		if timestampErr != nil {
-			for _, request := range group {
-				failures[request.InstrumentID] = timestampErr
-			}
-			continue
-		}
 		for _, id := range ids {
 			request := byID[id]
 			values, ok := payload[id]
 			if !ok {
 				failures[request.InstrumentID] = providerErr(c.Name(), "symbol_mismatch", "mapped coin ID was absent from response")
+				continue
+			}
+			rawTimestamp, timestampPresent := values["last_updated_at"]
+			if !timestampPresent || strings.TrimSpace(string(rawTimestamp)) == "null" {
+				failures[request.InstrumentID] = providerErr(c.Name(), "invalid_timestamp", "mapped coin timestamp was missing")
+				continue
+			}
+			var unixTimestamp int64
+			if err := json.Unmarshal(rawTimestamp, &unixTimestamp); err != nil || unixTimestamp <= 0 {
+				failures[request.InstrumentID] = providerErr(c.Name(), "invalid_timestamp", "mapped coin timestamp was invalid")
+				continue
+			}
+			marketAt, timestampErr := parseProviderTimestamp(c.Name(), time.Unix(unixTimestamp, 0), fetched)
+			if timestampErr != nil {
+				failures[request.InstrumentID] = timestampErr
 				continue
 			}
 			price, ok := values[currency]

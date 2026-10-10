@@ -55,19 +55,33 @@ func (s *Store) AddProviderMapping(ctx context.Context, input ProviderMappingInp
 	id := deterministicID("mapping", instrumentID, provider.String(), providerSymbol, currency, active)
 	mapping := domain.ProviderMapping{ID: id, InstrumentID: instrumentID, Provider: provider.String(), ProviderSymbol: providerSymbol, QuoteCurrency: currency, ActiveFrom: active, Provenance: provenance, CreatedAt: now}
 	payload, _ := json.Marshal(mapping)
-	result, err := s.DB.ExecContext(ctx, `INSERT INTO instrument_provider_mappings(id,instrument_id,provider,provider_symbol,quote_currency,active_from,provenance,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, instrumentID, provider.String(), providerSymbol, currency, active, provenance, now)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ProviderMapping{}, fmt.Errorf("begin provider mapping: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `INSERT INTO instrument_provider_mappings(id,instrument_id,provider,provider_symbol,quote_currency,active_from,provenance,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, instrumentID, provider.String(), providerSymbol, currency, active, provenance, now)
 	if err != nil {
 		return domain.ProviderMapping{}, fmt.Errorf("persist provider mapping: %w", err)
 	}
-	inserted, _ := result.RowsAffected()
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return domain.ProviderMapping{}, fmt.Errorf("inspect provider mapping: %w", err)
+	}
 	if inserted == 0 {
-		if err := s.DB.QueryRowContext(ctx, `SELECT id,instrument_id,provider,provider_symbol,quote_currency,active_from,provenance,created_at FROM instrument_provider_mappings WHERE id = ?`, id).Scan(&mapping.ID, &mapping.InstrumentID, &mapping.Provider, &mapping.ProviderSymbol, &mapping.QuoteCurrency, &mapping.ActiveFrom, &mapping.Provenance, &mapping.CreatedAt); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id,instrument_id,provider,provider_symbol,quote_currency,active_from,provenance,created_at FROM instrument_provider_mappings WHERE id = ?`, id).Scan(&mapping.ID, &mapping.InstrumentID, &mapping.Provider, &mapping.ProviderSymbol, &mapping.QuoteCurrency, &mapping.ActiveFrom, &mapping.Provenance, &mapping.CreatedAt); err != nil {
+			return domain.ProviderMapping{}, err
+		}
+		if err := tx.Commit(); err != nil {
 			return domain.ProviderMapping{}, err
 		}
 		return mapping, nil
 	}
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, deterministicID("audit", "mapping", id), "administrative-mapping", "market.mapping.added", "provider_mapping", id, payload, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, deterministicID("audit", "mapping", id), "administrative-mapping", "market.mapping.added", "provider_mapping", id, payload, now); err != nil {
 		return domain.ProviderMapping{}, fmt.Errorf("audit provider mapping: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ProviderMapping{}, err
 	}
 	return mapping, nil
 }

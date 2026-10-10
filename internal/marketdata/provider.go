@@ -60,6 +60,14 @@ type BatchQuoteClient interface {
 	QuoteBatch(context.Context, []QuoteRequest) (map[string]domain.Quote, map[string]error)
 }
 
+// BatchQuoteRequestCounter reports the number of HTTP requests made by a
+// provider for a batch. Providers with one request per batch need not
+// implement it; providers that split a batch by currency can report their
+// actual request count.
+type BatchQuoteRequestCounter interface {
+	QuoteBatchRequestCount([]QuoteRequest) int
+}
+
 type BatchFXClient interface {
 	ProviderClient
 	FXBatch(context.Context, []FXRequest) (map[string]domain.FXRate, map[string]error)

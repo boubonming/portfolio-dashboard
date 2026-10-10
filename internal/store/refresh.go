@@ -27,6 +27,12 @@ type refreshTarget struct {
 	Currency     string
 }
 
+type refreshMappingPlan struct {
+	assignments map[marketdata.Provider]map[string]domain.ProviderMapping
+	missing     map[marketdata.Provider]int
+	lookupError map[marketdata.Provider]int
+}
+
 func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.RefreshResult, error) {
 	if options.PortfolioID == "" {
 		options.PortfolioID = defaultPortfolioID
@@ -59,10 +65,14 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 	if len(providers) == 0 {
 		providers = []marketdata.Provider{marketdata.ProviderFinnhub, marketdata.ProviderAlphaVantage, marketdata.ProviderCoinGecko, marketdata.ProviderOpenExchangeRates}
 	}
+	plan, err := s.planRefreshMappings(ctx, targets, providers, options.AsOf)
+	if err != nil {
+		return domain.RefreshResult{}, err
+	}
 	started := time.Now().UTC()
 	result := domain.RefreshResult{RefreshID: deterministicID("refresh", options.PortfolioID, started.Format(time.RFC3339Nano)), PortfolioID: options.PortfolioID, Status: "complete", StartedAt: started.Format(time.RFC3339Nano)}
 	for _, provider := range providers {
-		status := s.refreshProvider(ctx, provider, options, targets)
+		status := s.refreshProvider(ctx, provider, options, targets, plan)
 		result.Providers = append(result.Providers, status)
 		result.ObservationIDs = append(result.ObservationIDs, status.ObservationIDs...)
 		if status.Status != "complete" {
@@ -107,15 +117,56 @@ func (s *Store) activeMapping(ctx context.Context, target refreshTarget, provide
 	return mapping, err
 }
 
-func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provider, options RefreshOptions, targets []refreshTarget) domain.ProviderRefreshStatus {
-	status := domain.ProviderRefreshStatus{Provider: provider.String(), Status: "complete"}
-	client := options.Clients[provider]
-	if client == nil {
-		status.Status = "incomplete"
-		status.FailedCount = 1
-		status.Errors = []string{"configuration"}
-		return status
+func (s *Store) planRefreshMappings(ctx context.Context, targets []refreshTarget, providers []marketdata.Provider, asOf time.Time) (refreshMappingPlan, error) {
+	plan := refreshMappingPlan{
+		assignments: map[marketdata.Provider]map[string]domain.ProviderMapping{},
+		missing:     map[marketdata.Provider]int{},
+		lookupError: map[marketdata.Provider]int{},
 	}
+	quoteProviders := make([]marketdata.Provider, 0, len(providers))
+	seen := map[marketdata.Provider]bool{}
+	for _, provider := range providers {
+		if provider == marketdata.ProviderOpenExchangeRates || seen[provider] {
+			continue
+		}
+		seen[provider] = true
+		quoteProviders = append(quoteProviders, provider)
+		plan.assignments[provider] = map[string]domain.ProviderMapping{}
+	}
+	if len(quoteProviders) == 0 {
+		return plan, nil
+	}
+	for _, target := range targets {
+		assigned := false
+		for _, provider := range quoteProviders {
+			mapping, err := s.activeMapping(ctx, target, provider, asOf)
+			if err == nil {
+				plan.assignments[provider][target.InstrumentID] = mapping
+				assigned = true
+				break
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				plan.lookupError[provider]++
+			}
+		}
+		if !assigned {
+			// A missing instrument belongs to one status only, rather than being
+			// counted once for every selected provider.
+			plan.missing[quoteProviders[0]]++
+		}
+	}
+	return plan, nil
+}
+
+func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provider, options RefreshOptions, targets []refreshTarget, plan refreshMappingPlan) domain.ProviderRefreshStatus {
+	status := domain.ProviderRefreshStatus{Provider: provider.String(), Status: "complete"}
+	status.MissingMapping = plan.missing[provider]
+	if lookupErrors := plan.lookupError[provider]; lookupErrors > 0 {
+		status.FailedCount += lookupErrors
+		status.Status = "incomplete"
+		status.Errors = append(status.Errors, "mapping_lookup")
+	}
+	client := options.Clients[provider]
 	quoteRequests := []marketdata.QuoteRequest{}
 	fxRequests := []marketdata.FXRequest{}
 	for _, target := range targets {
@@ -126,15 +177,8 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 			fxRequests = appendUniqueFX(fxRequests, marketdata.FXRequest{BaseCurrency: target.Currency, QuoteCurrency: options.ReportingCurrency, AsOf: options.AsOf})
 			continue
 		}
-		mapping, err := s.activeMapping(ctx, target, provider, options.AsOf)
-		if errors.Is(err, sql.ErrNoRows) {
-			status.MissingMapping++
-			continue
-		}
-		if err != nil {
-			status.FailedCount++
-			status.Status = "incomplete"
-			status.Errors = append(status.Errors, "mapping_lookup")
+		mapping, assigned := plan.assignments[provider][target.InstrumentID]
+		if !assigned {
 			continue
 		}
 		if !strings.EqualFold(mapping.QuoteCurrency, target.Currency) {
@@ -147,6 +191,15 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 	}
 	if status.MissingMapping > 0 {
 		status.Status = "incomplete"
+	}
+	if client == nil {
+		if (provider == marketdata.ProviderOpenExchangeRates && len(fxRequests) == 0) || (provider != marketdata.ProviderOpenExchangeRates && len(quoteRequests) == 0) {
+			return status
+		}
+		status.Status = "incomplete"
+		status.FailedCount++
+		status.Errors = append(status.Errors, "configuration")
+		return status
 	}
 	if provider == marketdata.ProviderOpenExchangeRates {
 		if len(fxRequests) == 0 {
@@ -208,6 +261,9 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 	}
 	if batch, ok := client.(marketdata.BatchQuoteClient); ok {
 		status.RequestCount = 1
+		if counter, ok := client.(marketdata.BatchQuoteRequestCounter); ok {
+			status.RequestCount = counter.QuoteBatchRequestCount(quoteRequests)
+		}
 		quotes, failures := batch.QuoteBatch(ctx, quoteRequests)
 		for _, request := range quoteRequests {
 			if failure, exists := failures[request.InstrumentID]; exists {

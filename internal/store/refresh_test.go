@@ -28,6 +28,20 @@ func (f *fakeRefreshClient) Quote(_ context.Context, request marketdata.QuoteReq
 	return domain.Quote{ID: "fixture-" + request.InstrumentID, InstrumentID: request.InstrumentID, Symbol: request.Symbol, Price: "2.5", Currency: request.Currency, Source: "finnhub", MarketAt: "2026-01-02T10:00:00Z", FetchedAt: "2026-01-02T12:00:00Z", Basis: "close", Provenance: "local fixture"}, nil
 }
 
+type assignedRefreshClient struct {
+	provider marketdata.Provider
+	calls    []string
+}
+
+func (f *assignedRefreshClient) Name() marketdata.Provider { return f.provider }
+func (f *assignedRefreshClient) FX(context.Context, marketdata.FXRequest) (domain.FXRate, error) {
+	return domain.FXRate{}, marketdata.ErrUnsupportedOperation
+}
+func (f *assignedRefreshClient) Quote(_ context.Context, request marketdata.QuoteRequest) (domain.Quote, error) {
+	f.calls = append(f.calls, request.InstrumentID)
+	return domain.Quote{ID: "assigned-" + request.InstrumentID, InstrumentID: request.InstrumentID, Symbol: request.Symbol, Price: "2.5", Currency: request.Currency, Source: f.provider.String(), MarketAt: "2026-01-02T10:00:00Z", FetchedAt: "2026-01-02T12:00:00Z", Basis: "close", Provenance: "local fixture"}, nil
+}
+
 func openRefreshFixture(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "refresh.sqlite"))
@@ -115,5 +129,76 @@ func TestRefreshPartialFailureKeepsSuccessfulObservation(t *testing.T) {
 	}
 	if quotes != 1 {
 		t.Fatalf("successful quotes were not retained: %d", quotes)
+	}
+}
+
+func TestRefreshDefaultProvidersAssignEachInstrumentOnce(t *testing.T) {
+	ctx := context.Background()
+	s := openRefreshFixture(t)
+	defer s.Close()
+	now := "2026-01-02T12:00:00Z"
+	for _, id := range []string{"refresh-instrument-alpha", "refresh-instrument-coin"} {
+		if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, id, id, "USD", now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?)`, "lot-"+id, "refresh-portfolio", id, "1", "USD", "fixture", "sha-"+id, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, input := range []ProviderMappingInput{
+		{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "FH:LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"},
+		{InstrumentID: "refresh-instrument-alpha", Provider: marketdata.ProviderAlphaVantage, ProviderSymbol: "AV:ALPHA", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"},
+		{InstrumentID: "refresh-instrument-coin", Provider: marketdata.ProviderCoinGecko, ProviderSymbol: "coin", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"},
+	} {
+		if _, err := s.AddProviderMapping(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finnhub := &assignedRefreshClient{provider: marketdata.ProviderFinnhub}
+	alpha := &assignedRefreshClient{provider: marketdata.ProviderAlphaVantage}
+	coin := &assignedRefreshClient{provider: marketdata.ProviderCoinGecko}
+	result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", Clients: map[marketdata.Provider]marketdata.ProviderClient{
+		marketdata.ProviderFinnhub: finnhub, marketdata.ProviderAlphaVantage: alpha, marketdata.ProviderCoinGecko: coin, marketdata.ProviderOpenExchangeRates: marketdata.NoLiveClients{},
+	}, AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)})
+	if err != nil || result.Status != "complete" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(finnhub.calls) != 1 || finnhub.calls[0] != "refresh-instrument" || len(alpha.calls) != 1 || alpha.calls[0] != "refresh-instrument-alpha" || len(coin.calls) != 1 || coin.calls[0] != "refresh-instrument-coin" {
+		t.Fatalf("assigned calls finnhub=%v alpha=%v coin=%v", finnhub.calls, alpha.calls, coin.calls)
+	}
+	for _, status := range result.Providers {
+		if status.MissingMapping != 0 {
+			t.Fatalf("unexpected missing mappings: %+v", result.Providers)
+		}
+	}
+}
+
+func TestRefreshUnmappedInstrumentCountedOnceAndNotRequested(t *testing.T) {
+	ctx := context.Background()
+	s := openRefreshFixture(t)
+	defer s.Close()
+	now := "2026-01-02T12:00:00Z"
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-unmapped','UNMAPPED','USD',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,source_ref,source_sha256,created_at) VALUES('lot-unmapped','refresh-portfolio','refresh-unmapped','1','USD','fixture','sha-unmapped',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddProviderMapping(ctx, ProviderMappingInput{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "FH:LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	client := &assignedRefreshClient{provider: marketdata.ProviderFinnhub}
+	result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", Providers: []marketdata.Provider{marketdata.ProviderFinnhub, marketdata.ProviderAlphaVantage, marketdata.ProviderCoinGecko}, Clients: map[marketdata.Provider]marketdata.ProviderClient{
+		marketdata.ProviderFinnhub: client, marketdata.ProviderAlphaVantage: &assignedRefreshClient{provider: marketdata.ProviderAlphaVantage}, marketdata.ProviderCoinGecko: &assignedRefreshClient{provider: marketdata.ProviderCoinGecko},
+	}, AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)})
+	if err != nil || result.Status != "incomplete" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	missing := 0
+	for _, status := range result.Providers {
+		missing += status.MissingMapping
+	}
+	if missing != 1 || len(client.calls) != 1 || client.calls[0] != "refresh-instrument" {
+		t.Fatalf("missing=%d calls=%v statuses=%+v", missing, client.calls, result.Providers)
 	}
 }
