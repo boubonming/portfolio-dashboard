@@ -26,14 +26,17 @@ func main() {
 		}
 		return
 	}
-	cfg := config.FromEnv()
+	cfg, err := config.Load()
+	if err != nil {
+		fatal(err)
+	}
 	ctx := context.Background()
 	database, err := store.Open(ctx, cfg.DataPath)
 	if err != nil {
 		fatal(err)
 	}
 	defer database.Close()
-	handler, err := httpserver.NewHandlerWithStore(database)
+	handler, err := httpserver.NewHandlerWithAuth(database, cfg.Auth)
 	if err != nil {
 		fatal(err)
 	}

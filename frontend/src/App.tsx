@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
+import { apiFetch, APIError, jsonResponse } from './api'
 
 export type Freshness = {
   status: 'fresh' | 'stale' | 'missing' | 'future' | 'invalid' | string
@@ -212,18 +214,56 @@ function AllocationSection({ data }: { data: PortfolioOverview }) {
   )
 }
 
+type AuthSession = { authenticated: boolean; csrf_token?: string; expires_at?: string }
+
+function Login({ onLogin, initialError = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; initialError?: string }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [state, setState] = useState<'idle' | 'submitting'>('idle')
+  const [error, setError] = useState(initialError)
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setState('submitting'); setError('')
+    try {
+      const message = await onLogin(username, password)
+      if (message) setError(message)
+      else setPassword('')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to sign in')
+    } finally { setPassword(''); setState('idle') }
+  }
+  return <main className="shell login-shell">
+    <header className="brand"><span className="eyebrow">Private workspace</span><h1>Portfolio Dashboard</h1><p className="muted">Sign in to view your private portfolio.</p></header>
+    <form className="login-card" onSubmit={submit} aria-labelledby="login-title">
+      <h2 id="login-title">Sign in</h2>
+      <label htmlFor="username">Username</label><input id="username" name="username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required />
+      <label htmlFor="password">Password</label><input id="password" name="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
+      {error && <p className="notice error" role="alert">{error}</p>}
+      <button type="submit" disabled={state === 'submitting'}>{state === 'submitting' ? 'Signing in…' : 'Sign in'}</button>
+    </form>
+  </main>
+}
+
 export default function App() {
   const [currency, setCurrency] = useState('MYR')
   const [data, setData] = useState<PortfolioOverview | null>(null)
+  const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState('')
+  const [authError, setAuthError] = useState('')
+  const csrfToken = useRef<string | undefined>(undefined)
   const [filter, setFilter] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('symbol')
   const [sortDirection, setSortDirection] = useState<SortDirection>('ascending')
   const controllerRef = useRef<AbortController | null>(null)
   const requestGeneration = useRef(0)
 
+  const clearPrivateState = useCallback(() => {
+    setData(null); setError(''); setState('loading'); csrfToken.current = undefined
+  }, [])
+
   const load = useCallback(() => {
+    if (authState !== 'authenticated') return
     const generation = ++requestGeneration.current
     controllerRef.current?.abort()
     const controller = new AbortController()
@@ -231,11 +271,8 @@ export default function App() {
     setState('loading')
     setError('')
     const url = `/api/v1/portfolios/portfolio-default/overview?currency=${encodeURIComponent(currency)}`
-    fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`Request failed (${response.status})`)
-        return response.json() as Promise<PortfolioOverview>
-      })
+    apiFetch(url, { signal: controller.signal })
+      .then((response) => jsonResponse<PortfolioOverview>(response))
       .then((overview) => {
         if (controller.signal.aborted || generation !== requestGeneration.current) return
         setData(overview)
@@ -243,19 +280,58 @@ export default function App() {
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted || generation !== requestGeneration.current) return
+        if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
         setError(reason instanceof Error ? reason.message : 'Unable to load the portfolio')
         setState('error')
       })
-  }, [currency])
+  }, [authState, clearPrivateState, currency])
 
   useEffect(() => {
-    load()
+    let active = true
+    apiFetch('/api/v1/auth/session')
+      .then(async (response) => {
+        if (response.status === 401) throw new APIError(401)
+        const session = await jsonResponse<AuthSession>(response)
+        if (session.authenticated !== true || !session.csrf_token) throw new APIError(401)
+        csrfToken.current = session.csrf_token
+        if (active) setAuthState('authenticated')
+      })
+      .catch((reason: unknown) => {
+        if (!active) return
+        if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+        setAuthError(`Unable to load portfolio: ${reason instanceof Error ? reason.message : 'Unable to check your session'}`)
+        setAuthState('login')
+      })
     return () => {
+      active = false
       requestGeneration.current += 1
       controllerRef.current?.abort()
       controllerRef.current = null
     }
-  }, [load])
+  }, [clearPrivateState])
+
+  useEffect(() => { if (authState === 'authenticated') load() }, [authState, load])
+
+  const signIn = useCallback(async (username: string, password: string) => {
+    setAuthError('')
+    try {
+      const response = await apiFetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) })
+      if (!response.ok) return 'Unable to sign in right now.'
+      const session = await response.json() as AuthSession
+      if (session.authenticated !== true || !session.csrf_token) return 'Unable to sign in right now.'
+      csrfToken.current = session.csrf_token
+      setAuthState('authenticated')
+      return null
+    } catch (reason) {
+      return reason instanceof APIError && reason.status === 401 ? 'Sign-in failed. Check your username and password.' : 'Unable to sign in right now.'
+    }
+  }, [])
+
+  const logout = useCallback(async () => {
+    try { await jsonResponse(await apiFetch('/api/v1/auth/logout', { method: 'POST', csrfToken: csrfToken.current })) }
+    catch (reason) { if (!(reason instanceof APIError && reason.status === 401)) setAuthError('Unable to sign out right now.') }
+    clearPrivateState(); setAuthState('login')
+  }, [clearPrivateState])
 
   const visibleHoldings = useMemo(() => {
     if (!data) return []
@@ -291,12 +367,15 @@ export default function App() {
     <th scope="col" aria-sort={sortKey === key ? sortDirection : 'none'}>{sortButton(label, key)}</th>
   )
 
+  if (authState === 'login') return <Login onLogin={signIn} initialError={authError} />
+
   return (
     <main className="shell">
       <header className="brand">
         <span className="eyebrow">Private workspace</span>
         <h1>Portfolio Dashboard</h1>
         <p className="muted">Read-only holdings and immutable valuation snapshots.</p>
+        <button type="button" onClick={logout}>Sign out</button>
       </header>
 
       <section className="toolbar" aria-label="Portfolio controls">
@@ -312,6 +391,7 @@ export default function App() {
       </section>
 
       {state === 'loading' && <section className="notice" role="status"><h2>Loading portfolio</h2><p>Reading the latest immutable snapshot…</p></section>}
+      {authError && <section className="notice error" role="alert"><h2>Session error</h2><p>{authError}</p></section>}
       {state === 'error' && <section className="notice error" role="alert"><h2>Unable to load portfolio</h2><p>{error}</p><button type="button" onClick={load}>Try again</button></section>}
 
       {state === 'ready' && data && (

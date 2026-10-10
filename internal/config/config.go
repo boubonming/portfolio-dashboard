@@ -1,12 +1,21 @@
 package config
 
-import "os"
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/boubonming/portfolio-dashboard/internal/auth"
+)
 
 type Config struct {
 	BindAddress       string
 	DataPath          string
 	ReportingCurrency string
 	ProviderKeys      ProviderKeys
+	Auth              auth.Config
 }
 
 // ProviderKeys are read once at process startup and are never persisted or
@@ -17,7 +26,11 @@ type ProviderKeys struct {
 	OpenExchangeRates string
 }
 
+// FromEnv preserves the non-auth configuration API used by import tooling.
+// The server must use Load, which validates the required authentication gate.
 func FromEnv() Config {
+	cookieSecure, _ := strconv.ParseBool(envOr("PORTFOLIO_COOKIE_SECURE", "true"))
+	ttl, _ := time.ParseDuration(envOr("PORTFOLIO_SESSION_TTL", "12h"))
 	return Config{
 		BindAddress:       envOr("PORTFOLIO_BIND_ADDRESS", ":8080"),
 		DataPath:          envOr("PORTFOLIO_DATA_PATH", "portfolio-dashboard.sqlite"),
@@ -27,7 +40,32 @@ func FromEnv() Config {
 			AlphaVantage:      os.Getenv("ALPHA_VANTAGE_API_KEY"),
 			OpenExchangeRates: os.Getenv("OPEN_EXCHANGE_RATES_APP_ID"),
 		},
+		Auth: auth.Config{
+			Username: os.Getenv("PORTFOLIO_AUTH_USERNAME"), PasswordHash: os.Getenv("PORTFOLIO_AUTH_PASSWORD_HASH"),
+			SessionSecret: os.Getenv("PORTFOLIO_SESSION_SECRET"), CookieSecure: cookieSecure, SessionTTL: ttl,
+		},
 	}
+}
+
+// Load reads and validates all server configuration. Authentication is
+// intentionally fail-closed: there are no development credentials or secret
+// fallbacks. Local HTTP use must explicitly opt into PORTFOLIO_ENV=development
+// and PORTFOLIO_COOKIE_SECURE=false.
+func Load() (Config, error) {
+	cfg := FromEnv()
+	if _, err := strconv.ParseBool(envOr("PORTFOLIO_COOKIE_SECURE", "true")); err != nil {
+		return Config{}, fmt.Errorf("authentication configuration: invalid PORTFOLIO_COOKIE_SECURE")
+	}
+	if _, err := time.ParseDuration(envOr("PORTFOLIO_SESSION_TTL", "12h")); err != nil {
+		return Config{}, fmt.Errorf("authentication configuration: invalid PORTFOLIO_SESSION_TTL")
+	}
+	if !cfg.Auth.CookieSecure && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "development") && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "test") {
+		return Config{}, fmt.Errorf("authentication configuration: insecure cookies require PORTFOLIO_ENV=development or test")
+	}
+	if err := cfg.Auth.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
 }
 
 func envOr(name, fallback string) string {

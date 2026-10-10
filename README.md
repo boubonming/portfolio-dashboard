@@ -40,6 +40,16 @@ go run ./cmd/portfolio-dashboard
 
 Configuration is environment-driven. `PORTFOLIO_REPORTING_CURRENCY` defaults to `MYR`; timestamps stored by the application are UTC and human-facing dates use Singapore time in later phases.
 
+The HTTP server fails closed unless authentication is configured explicitly:
+`PORTFOLIO_AUTH_USERNAME`, a bcrypt `PORTFOLIO_AUTH_PASSWORD_HASH` (cost 10 or
+higher), and an independent random `PORTFOLIO_SESSION_SECRET` of at least 32
+bytes are required. Sessions are short-lived, signed, in-memory and carried
+only by an `HttpOnly`, `SameSite=Strict` cookie. Production must use TLS and
+the default secure cookie setting. For local HTTP development only, explicitly
+set `PORTFOLIO_ENV=development PORTFOLIO_COOKIE_SECURE=false`; there are no
+default credentials or secrets. CSRF tokens are returned by session bootstrap,
+kept in frontend memory, and required on unsafe same-origin API requests.
+
 ## Non-mutating import preview
 
 Preview the authoritative note without changing the note or SQLite:

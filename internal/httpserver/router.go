@@ -3,36 +3,56 @@ package httpserver
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"path"
 	"strings"
 
+	"github.com/boubonming/portfolio-dashboard/internal/auth"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 	"github.com/boubonming/portfolio-dashboard/internal/web"
 )
 
-// NewHandler serves the static app and, when a store is supplied, the
-// read-only API. The variadic form preserves the original static-only call.
+// NewHandler serves the static app and is retained for static/legacy tests.
+// The executable uses NewHandlerWithAuth; production API access never uses this
+// compatibility constructor.
 func NewHandler(databases ...*store.Store) (http.Handler, error) {
 	var database *store.Store
 	if len(databases) > 0 {
 		database = databases[0]
 	}
-	return newHandler(database)
+	return newHandler(database, nil)
 }
 
-// NewHandlerWithStore is the explicit constructor for application startup.
-func NewHandlerWithStore(database *store.Store) (http.Handler, error) { return newHandler(database) }
+func NewHandlerWithStore(database *store.Store) (http.Handler, error) {
+	return newHandler(database, nil)
+}
 
-func newHandler(database *store.Store) (http.Handler, error) {
+// NewHandlerWithAuth is the production constructor. Authentication must be
+// configured explicitly before private routes are registered.
+func NewHandlerWithAuth(database *store.Store, config auth.Config) (http.Handler, error) {
+	authenticator, err := auth.New(config)
+	if err != nil {
+		return nil, err
+	}
+	return newHandler(database, authenticator)
+}
+
+func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.Handler, error) {
 	files, err := web.Files()
 	if err != nil {
 		return nil, err
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", health)
-	mux.HandleFunc("/api/v1/portfolios/", portfolioOverview(database))
+	mux.HandleFunc("/api/v1/auth/", authRoutes(authenticator))
+	portfolio := http.Handler(portfolioOverview(database))
+	if authenticator != nil {
+		portfolio = authenticator.RequireAuth(authenticator.RequireCSRF(portfolio))
+	}
+	mux.Handle("/api/v1/portfolios/", portfolio)
 	mux.HandleFunc("/api/", apiNotFound)
 	mux.HandleFunc("/", spa(files))
 	return mux, nil
@@ -41,9 +61,93 @@ func newHandler(database *store.Store) (http.Handler, error) {
 func health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
-
 func apiNotFound(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+}
+
+func authRoutes(authenticator *auth.Authenticator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if authenticator == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v1/auth/login":
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodPost)
+				writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+				return
+			}
+			login(authenticator, w, r)
+		case "/api/v1/auth/session":
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", http.MethodGet)
+				writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+				return
+			}
+			s, err := authenticator.Session(r)
+			if err != nil {
+				writeJSONNoStore(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+				return
+			}
+			writeJSONNoStore(w, http.StatusOK, auth.SessionResponse{Authenticated: true, CSRFToken: s.CSRFToken, ExpiresAt: s.ExpiresAt.Format("2006-01-02T15:04:05Z07:00")})
+		case "/api/v1/auth/logout":
+			logout := authenticator.RequireAuth(authenticator.RequireCSRF(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = authenticator.Logout(w, r)
+				writeJSONNoStore(w, http.StatusOK, map[string]bool{"authenticated": false})
+			})))
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodPost)
+				writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+				return
+			}
+			logout.ServeHTTP(w, r)
+		default:
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		}
+	}
+}
+
+func login(authenticator *auth.Authenticator, w http.ResponseWriter, r *http.Request) {
+	if origin := r.Header.Get("Origin"); origin != "" && !requestOriginMatches(r, origin) {
+		writeJSONNoStore(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaErr != nil || !strings.EqualFold(mediaType, "application/json") {
+		writeJSONNoStore(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	var request auth.LoginRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil || strings.TrimSpace(request.Username) == "" || request.Password == "" {
+		writeJSONNoStore(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		return
+	}
+	if extra := decoder.Decode(&struct{}{}); extra != io.EOF {
+		writeJSONNoStore(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		return
+	}
+	result, ok := authenticator.Login(w, r, request)
+	if !ok {
+		writeJSONNoStore(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	writeJSONNoStore(w, http.StatusOK, result)
+}
+
+func requestOriginMatches(r *http.Request, origin string) bool {
+	u, err := http.NewRequest(http.MethodGet, origin, nil)
+	if err != nil || u.URL.Host == "" || !strings.EqualFold(u.URL.Host, r.Host) {
+		return false
+	}
+	expectedScheme := "http"
+	if r.TLS != nil {
+		expectedScheme = "https"
+	}
+	return u.URL.Scheme == expectedScheme
 }
 
 func portfolioOverview(database *store.Store) http.HandlerFunc {
@@ -83,6 +187,10 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+func writeJSONNoStore(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, status, value)
 }
 
 func spa(files fs.FS) http.HandlerFunc {
