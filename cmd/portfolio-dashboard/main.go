@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/config"
 	"github.com/boubonming/portfolio-dashboard/internal/httpserver"
@@ -40,8 +41,18 @@ func runCommand(command string, args []string) error {
 		return runApply(args)
 	case "import-status":
 		return runStatus(args)
+	case "quote-add":
+		return runQuoteAdd(args)
+	case "fx-add":
+		return runFXAdd(args)
+	case "snapshot-create":
+		return runSnapshotCreate(args)
+	case "snapshot-status":
+		return runSnapshotStatus(args)
+	case "snapshot-show":
+		return runSnapshotShow(args)
 	default:
-		return fmt.Errorf("unknown command %q (use import-preview, import-apply, or import-status)", command)
+		return fmt.Errorf("unknown command %q (use import-preview, import-apply, import-status, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
 	}
 }
 
@@ -120,6 +131,151 @@ func runStatus(args []string) error {
 		return err
 	}
 	return writeJSON(status)
+}
+
+func openDatabase(path string) (*store.Store, context.Context, error) {
+	if path == "" {
+		return nil, nil, errors.New("-db is required")
+	}
+	ctx := context.Background()
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, ctx, nil
+}
+
+func runQuoteAdd(args []string) error {
+	flags := flag.NewFlagSet("quote-add", flag.ContinueOnError)
+	database := flags.String("db", "", "SQLite database path")
+	instrument := flags.String("instrument", "", "instrument ID (or use -symbol and -currency)")
+	symbol := flags.String("symbol", "", "instrument symbol")
+	currency := flags.String("currency", "", "quote currency")
+	price := flags.String("price", "", "positive decimal price")
+	source := flags.String("source", "", "source name")
+	marketAt := flags.String("market-at", "", "UTC market timestamp in RFC3339")
+	fetchedAt := flags.String("fetched-at", "", "UTC fetch timestamp in RFC3339; defaults to controlled current UTC")
+	basis := flags.String("basis", "", "quote basis, e.g. close")
+	provenance := flags.String("provenance", "", "provenance note or reference")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	db, ctx, err := openDatabase(*database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	quote, err := db.AddQuote(ctx, store.QuoteInput{InstrumentID: *instrument, Symbol: *symbol, Currency: *currency, Price: *price, Source: *source, MarketAt: *marketAt, FetchedAt: *fetchedAt, Basis: *basis, Provenance: *provenance})
+	if err != nil {
+		return err
+	}
+	return writeJSON(quote)
+}
+
+func runFXAdd(args []string) error {
+	flags := flag.NewFlagSet("fx-add", flag.ContinueOnError)
+	database := flags.String("db", "", "SQLite database path")
+	base := flags.String("base", "", "base currency")
+	quote := flags.String("quote", "", "quote currency")
+	rate := flags.String("rate", "", "positive decimal FX rate")
+	source := flags.String("source", "", "source name")
+	marketAt := flags.String("market-at", "", "UTC market timestamp in RFC3339")
+	fetchedAt := flags.String("fetched-at", "", "UTC fetch timestamp in RFC3339; defaults to controlled current UTC")
+	basis := flags.String("basis", "", "FX basis, e.g. close")
+	provenance := flags.String("provenance", "", "provenance note or reference")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	db, ctx, err := openDatabase(*database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	fx, err := db.AddFXRate(ctx, store.FXInput{BaseCurrency: *base, QuoteCurrency: *quote, Rate: *rate, Source: *source, MarketAt: *marketAt, FetchedAt: *fetchedAt, Basis: *basis, Provenance: *provenance})
+	if err != nil {
+		return err
+	}
+	return writeJSON(fx)
+}
+
+func parseOptionalTime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Now().UTC(), nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid -as-of: %w", err)
+	}
+	return parsed.UTC(), nil
+}
+
+func runSnapshotCreate(args []string) error {
+	flags := flag.NewFlagSet("snapshot-create", flag.ContinueOnError)
+	database := flags.String("db", "", "SQLite database path")
+	portfolioID := flags.String("portfolio", "portfolio-default", "portfolio ID")
+	reportingCurrency := flags.String("reporting-currency", "MYR", "reporting currency")
+	version := flags.String("calculation-version", "", "calculation version; defaults to current reviewed version")
+	asOf := flags.String("as-of", "", "UTC valuation timestamp in RFC3339; defaults to current UTC")
+	maxAge := flags.Duration("max-age", 36*time.Hour, "maximum quote/FX age")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	when, err := parseOptionalTime(*asOf)
+	if err != nil {
+		return err
+	}
+	db, ctx, err := openDatabase(*database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	status, err := db.CreateSnapshot(ctx, store.SnapshotRequest{PortfolioID: *portfolioID, ReportingCurrency: *reportingCurrency, CalculationVersion: *version, AsOf: when, MaxAge: *maxAge})
+	if err != nil {
+		return err
+	}
+	return writeJSON(status)
+}
+
+func runSnapshotStatus(args []string) error {
+	flags := flag.NewFlagSet("snapshot-status", flag.ContinueOnError)
+	database := flags.String("db", "", "SQLite database path")
+	snapshotID := flags.String("snapshot", "", "snapshot ID; defaults to latest")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	db, ctx, err := openDatabase(*database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	status, err := db.SnapshotStatus(ctx, *snapshotID)
+	if err != nil {
+		return err
+	}
+	return writeJSON(status)
+}
+
+func runSnapshotShow(args []string) error {
+	flags := flag.NewFlagSet("snapshot-show", flag.ContinueOnError)
+	database := flags.String("db", "", "SQLite database path")
+	snapshotID := flags.String("snapshot", "", "snapshot ID")
+	includeLots := flags.Bool("include-lots", false, "explicitly include private lot values")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *snapshotID == "" {
+		return errors.New("-snapshot is required")
+	}
+	db, ctx, err := openDatabase(*database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	result, err := db.SnapshotShow(ctx, *snapshotID, *includeLots)
+	if err != nil {
+		return err
+	}
+	return writeJSON(result)
 }
 
 func writeJSON(value any) error {

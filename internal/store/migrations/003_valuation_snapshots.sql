@@ -1,0 +1,12 @@
+ALTER TABLE fx_rates ADD COLUMN basis TEXT NOT NULL DEFAULT 'close';
+ALTER TABLE snapshots ADD COLUMN input_hash TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_quotes_lookup ON quotes(instrument_id, market_at DESC, fetched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fx_lookup ON fx_rates(base_currency, quote_currency, market_at DESC, fetched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_snapshots_portfolio_created ON snapshots(portfolio_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_input_hash ON snapshots(portfolio_id, calculation_version, input_hash);
+CREATE TRIGGER IF NOT EXISTS quotes_append_only_update BEFORE UPDATE ON quotes BEGIN SELECT RAISE(ABORT, 'quotes are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS quotes_append_only_delete BEFORE DELETE ON quotes BEGIN SELECT RAISE(ABORT, 'quotes are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS fx_append_only_update BEFORE UPDATE ON fx_rates BEGIN SELECT RAISE(ABORT, 'FX rates are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS fx_append_only_delete BEFORE DELETE ON fx_rates BEGIN SELECT RAISE(ABORT, 'FX rates are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS snapshots_immutable_update BEFORE UPDATE ON snapshots BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS snapshots_immutable_delete BEFORE DELETE ON snapshots BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;
