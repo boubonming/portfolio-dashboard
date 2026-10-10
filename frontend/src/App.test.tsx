@@ -38,7 +38,8 @@ const allocationOverview: PortfolioOverview = {
   },
 }
 
-const authenticatedSession = { ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token' }) } as Response
+const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+const authenticatedSession = { ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: expiresAt }) } as Response
 function authenticatedFetch(handler: (input: RequestInfo | URL, init?: RequestInit) => Response | Promise<Response>) {
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).includes('/api/v1/auth/session') ? Promise.resolve(authenticatedSession) : handler(input, init))
 }
@@ -133,6 +134,7 @@ describe('Portfolio Dashboard', () => {
     }))
     vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
     render(<App />)
+    await waitFor(() => expect(screen.getByLabelText(/reporting currency/i)).toBeTruthy())
     fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('currency=USD'), expect.anything()))
     resolveUSD?.({ ok: true, json: async () => ({ ...completeOverview, reporting_currency: 'USD' }) } as Response)
@@ -256,7 +258,7 @@ describe('Portfolio Dashboard', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.includes('/api/v1/auth/session')) return Promise.resolve({ ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) } as Response)
-      if (url.includes('/api/v1/auth/login')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token' }) } as Response)
+      if (url.includes('/api/v1/auth/login')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: expiresAt }) } as Response)
       return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
     })
     vi.stubGlobal('fetch', fetchMock)

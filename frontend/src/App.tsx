@@ -256,15 +256,37 @@ export default function App() {
   const [sortKey, setSortKey] = useState<SortKey>('symbol')
   const [sortDirection, setSortDirection] = useState<SortDirection>('ascending')
   const controllerRef = useRef<AbortController | null>(null)
-  const requestGeneration = useRef(0)
+  const authGeneration = useRef(0)
+  const loadGeneration = useRef(0)
+  const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const clearPrivateState = useCallback(() => {
-    setData(null); setError(''); setState('loading'); csrfToken.current = undefined
+    authGeneration.current += 1
+    loadGeneration.current += 1
+    controllerRef.current?.abort()
+    controllerRef.current = null
+    if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
+    csrfToken.current = undefined
+    setData(null); setError(''); setState('loading')
   }, [])
+
+  const scheduleExpiry = useCallback((expiresAt: string, generation: number) => {
+    const expiry = Date.parse(expiresAt)
+    if (!Number.isFinite(expiry) || expiry <= Date.now()) return false
+    if (expiryTimerRef.current) clearTimeout(expiryTimerRef.current)
+    expiryTimerRef.current = setTimeout(() => {
+      if (authGeneration.current !== generation) return
+      clearPrivateState()
+      setAuthError('Your session expired. Please sign in again.')
+      setAuthState('login')
+    }, Math.max(0, expiry - Date.now()))
+    return true
+  }, [clearPrivateState])
 
   const load = useCallback(() => {
     if (authState !== 'authenticated') return
-    const generation = ++requestGeneration.current
+    const authGenerationAtStart = authGeneration.current
+    const generation = ++loadGeneration.current
     controllerRef.current?.abort()
     const controller = new AbortController()
     controllerRef.current = controller
@@ -274,12 +296,12 @@ export default function App() {
     apiFetch(url, { signal: controller.signal })
       .then((response) => jsonResponse<PortfolioOverview>(response))
       .then((overview) => {
-        if (controller.signal.aborted || generation !== requestGeneration.current) return
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== loadGeneration.current) return
         setData(overview)
         setState('ready')
       })
       .catch((reason: unknown) => {
-        if (controller.signal.aborted || generation !== requestGeneration.current) return
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== loadGeneration.current) return
         if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
         setError(reason instanceof Error ? reason.message : 'Unable to load the portfolio')
         setState('error')
@@ -287,50 +309,69 @@ export default function App() {
   }, [authState, clearPrivateState, currency])
 
   useEffect(() => {
-    let active = true
-    apiFetch('/api/v1/auth/session')
+    const generation = ++authGeneration.current
+    const controller = new AbortController()
+    controllerRef.current = controller
+    apiFetch('/api/v1/auth/session', { signal: controller.signal })
       .then(async (response) => {
         if (response.status === 401) throw new APIError(401)
         const session = await jsonResponse<AuthSession>(response)
-        if (session.authenticated !== true || !session.csrf_token) throw new APIError(401)
+        if (session.authenticated !== true || !session.csrf_token || !session.expires_at || !scheduleExpiry(session.expires_at, generation)) throw new APIError(401)
+        if (controller.signal.aborted || generation !== authGeneration.current) return
         csrfToken.current = session.csrf_token
-        if (active) setAuthState('authenticated')
+        setAuthState('authenticated')
       })
       .catch((reason: unknown) => {
-        if (!active) return
+        if (controller.signal.aborted || generation !== authGeneration.current) return
         if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
         setAuthError(`Unable to load portfolio: ${reason instanceof Error ? reason.message : 'Unable to check your session'}`)
         setAuthState('login')
       })
     return () => {
-      active = false
-      requestGeneration.current += 1
-      controllerRef.current?.abort()
-      controllerRef.current = null
+      if (authGeneration.current === generation) {
+        controller.abort()
+        authGeneration.current += 1
+        loadGeneration.current += 1
+        if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
+      }
     }
-  }, [clearPrivateState])
+  }, [clearPrivateState, scheduleExpiry])
 
   useEffect(() => { if (authState === 'authenticated') load() }, [authState, load])
 
   const signIn = useCallback(async (username: string, password: string) => {
     setAuthError('')
+    clearPrivateState()
+    const generation = authGeneration.current
+    const controller = new AbortController()
+    controllerRef.current = controller
     try {
-      const response = await apiFetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) })
+      const response = await apiFetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }), signal: controller.signal })
       if (!response.ok) return 'Unable to sign in right now.'
       const session = await response.json() as AuthSession
-      if (session.authenticated !== true || !session.csrf_token) return 'Unable to sign in right now.'
+      if (generation !== authGeneration.current || session.authenticated !== true || !session.csrf_token || !session.expires_at || !scheduleExpiry(session.expires_at, generation)) return 'Unable to sign in right now.'
       csrfToken.current = session.csrf_token
       setAuthState('authenticated')
       return null
     } catch (reason) {
       return reason instanceof APIError && reason.status === 401 ? 'Sign-in failed. Check your username and password.' : 'Unable to sign in right now.'
     }
-  }, [])
+  }, [clearPrivateState, scheduleExpiry])
 
   const logout = useCallback(async () => {
-    try { await jsonResponse(await apiFetch('/api/v1/auth/logout', { method: 'POST', csrfToken: csrfToken.current })) }
-    catch (reason) { if (!(reason instanceof APIError && reason.status === 401)) setAuthError('Unable to sign out right now.') }
-    clearPrivateState(); setAuthState('login')
+    const token = csrfToken.current
+    clearPrivateState()
+    const generation = authGeneration.current
+    setAuthState('login')
+    try {
+      await jsonResponse(await apiFetch('/api/v1/auth/logout', { method: 'POST', csrfToken: token }))
+      if (authGeneration.current === generation) setAuthError('')
+    } catch (reason) {
+      if (authGeneration.current !== generation) return
+      setAuthError(reason instanceof APIError && reason.status === 401
+        ? 'Sign-out was not confirmed by the server. Please sign in again if you want to retry.'
+        : 'Sign-out was not confirmed by the server. Close this window or try again.')
+    }
   }, [clearPrivateState])
 
   const visibleHoldings = useMemo(() => {
@@ -368,6 +409,7 @@ export default function App() {
   )
 
   if (authState === 'login') return <Login onLogin={signIn} initialError={authError} />
+  if (authState === 'checking') return <main className="shell" aria-busy="true"><section className="notice" role="status" aria-live="polite"><h1>Checking your session…</h1><p>Loading portfolio securely.</p></section></main>
 
   return (
     <main className="shell">

@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -42,7 +44,7 @@ func FromEnv() Config {
 		},
 		Auth: auth.Config{
 			Username: os.Getenv("PORTFOLIO_AUTH_USERNAME"), PasswordHash: os.Getenv("PORTFOLIO_AUTH_PASSWORD_HASH"),
-			SessionSecret: os.Getenv("PORTFOLIO_SESSION_SECRET"), CookieSecure: cookieSecure, SessionTTL: ttl,
+			SessionSecret: os.Getenv("PORTFOLIO_SESSION_SECRET"), PublicOrigin: os.Getenv("PORTFOLIO_PUBLIC_ORIGIN"), CookieSecure: cookieSecure, SessionTTL: ttl,
 		},
 	}
 }
@@ -62,10 +64,35 @@ func Load() (Config, error) {
 	if !cfg.Auth.CookieSecure && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "development") && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "test") {
 		return Config{}, fmt.Errorf("authentication configuration: insecure cookies require PORTFOLIO_ENV=development or test")
 	}
+	if !cfg.Auth.CookieSecure && !loopbackBind(cfg.BindAddress) {
+		return Config{}, fmt.Errorf("authentication configuration: insecure cookies require an explicit loopback bind address")
+	}
+	if err := publicOriginEnvironment(cfg.Auth.PublicOrigin); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Auth.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func loopbackBind(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil || host == "" {
+		return false
+	}
+	return net.ParseIP(strings.Trim(host, "[]")).IsLoopback()
+}
+
+func publicOriginEnvironment(origin string) error {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" {
+		return fmt.Errorf("authentication configuration: invalid PORTFOLIO_PUBLIC_ORIGIN")
+	}
+	if strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "development") && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "test") {
+		return fmt.Errorf("authentication configuration: production requires an HTTPS public origin")
+	}
+	return nil
 }
 
 func envOr(name, fallback string) string {

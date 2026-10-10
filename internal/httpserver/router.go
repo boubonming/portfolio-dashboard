@@ -15,20 +15,9 @@ import (
 	"github.com/boubonming/portfolio-dashboard/internal/web"
 )
 
-// NewHandler serves the static app and is retained for static/legacy tests.
-// The executable uses NewHandlerWithAuth; production API access never uses this
-// compatibility constructor.
-func NewHandler(databases ...*store.Store) (http.Handler, error) {
-	var database *store.Store
-	if len(databases) > 0 {
-		database = databases[0]
-	}
-	return newHandler(database, nil)
-}
-
-func NewHandlerWithStore(database *store.Store) (http.Handler, error) {
-	return newHandler(database, nil)
-}
+// NewStaticHandler serves only public assets and health. It intentionally has
+// no database or private API access.
+func NewStaticHandler() (http.Handler, error) { return newHandler(nil, nil) }
 
 // NewHandlerWithAuth is the production constructor. Authentication must be
 // configured explicitly before private routes are registered.
@@ -52,6 +41,7 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 	if authenticator != nil {
 		portfolio = authenticator.RequireAuth(authenticator.RequireCSRF(portfolio))
 	}
+	portfolio = noStorePrivate(portfolio)
 	mux.Handle("/api/v1/portfolios/", portfolio)
 	mux.HandleFunc("/api/", apiNotFound)
 	mux.HandleFunc("/", spa(files))
@@ -75,14 +65,14 @@ func authRoutes(authenticator *auth.Authenticator) http.HandlerFunc {
 		case "/api/v1/auth/login":
 			if r.Method != http.MethodPost {
 				w.Header().Set("Allow", http.MethodPost)
-				writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+				writeJSONNoStore(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 				return
 			}
 			login(authenticator, w, r)
 		case "/api/v1/auth/session":
 			if r.Method != http.MethodGet {
 				w.Header().Set("Allow", http.MethodGet)
-				writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+				writeJSONNoStore(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 				return
 			}
 			s, err := authenticator.Session(r)
@@ -98,18 +88,20 @@ func authRoutes(authenticator *auth.Authenticator) http.HandlerFunc {
 			})))
 			if r.Method != http.MethodPost {
 				w.Header().Set("Allow", http.MethodPost)
-				writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+				writeJSONNoStore(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 				return
 			}
 			logout.ServeHTTP(w, r)
 		default:
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+			writeJSONNoStore(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 		}
 	}
 }
 
 func login(authenticator *auth.Authenticator, w http.ResponseWriter, r *http.Request) {
-	if origin := r.Header.Get("Origin"); origin != "" && !requestOriginMatches(r, origin) {
+	origin := r.Header.Get("Origin")
+	referer := r.Header.Get("Referer")
+	if (origin == "" && referer == "") || (origin != "" && !authenticator.CanonicalOriginMatches(origin)) || (referer != "" && !authenticator.CanonicalOriginMatches(referer)) {
 		writeJSONNoStore(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}
@@ -136,18 +128,6 @@ func login(authenticator *auth.Authenticator, w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSONNoStore(w, http.StatusOK, result)
-}
-
-func requestOriginMatches(r *http.Request, origin string) bool {
-	u, err := http.NewRequest(http.MethodGet, origin, nil)
-	if err != nil || u.URL.Host == "" || !strings.EqualFold(u.URL.Host, r.Host) {
-		return false
-	}
-	expectedScheme := "http"
-	if r.TLS != nil {
-		expectedScheme = "https"
-	}
-	return u.URL.Scheme == expectedScheme
 }
 
 func portfolioOverview(database *store.Store) http.HandlerFunc {
@@ -191,6 +171,14 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func writeJSONNoStore(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, status, value)
+}
+
+func noStorePrivate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Vary", "Cookie")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func spa(files fs.FS) http.HandlerFunc {

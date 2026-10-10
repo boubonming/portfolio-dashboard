@@ -1,7 +1,9 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boubonming/portfolio-dashboard/internal/auth"
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func apiFixture(t *testing.T) *store.Store {
@@ -39,6 +43,39 @@ func apiFixture(t *testing.T) *store.Store {
 	return database
 }
 
+func authenticatedAPIHandler(t *testing.T, database *store.Store) http.Handler {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandlerWithAuth(database, auth.Config{
+		Username: "fixture-user", PasswordHash: string(hash),
+		SessionSecret: base64.StdEncoding.EncodeToString([]byte("api-fixture-session-secret-with-diversity-123")),
+		PublicOrigin:  "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]string{"username": "fixture-user", "password": "fixture-only-value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRequest(http.MethodPost, "https://example.test/api/v1/auth/login", bytes.NewReader(payload))
+	login.Header.Set("Content-Type", "application/json")
+	login.Header.Set("Origin", "https://example.test")
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK || len(loginResponse.Result().Cookies()) != 1 {
+		t.Fatalf("fixture login status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
+	cookie := loginResponse.Result().Cookies()[0]
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.AddCookie(cookie)
+		handler.ServeHTTP(w, r)
+	})
+}
+
 func TestPortfolioOverviewAPIIsScopedAndKeepsDecimalsAsStrings(t *testing.T) {
 	database := apiFixture(t)
 	defer database.Close()
@@ -46,10 +83,7 @@ func TestPortfolioOverviewAPIIsScopedAndKeepsDecimalsAsStrings(t *testing.T) {
 	if _, err := database.CreateSnapshot(context.Background(), store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "MYR", CalculationVersion: "api.test.v1", AsOf: when, MaxAge: 2 * time.Hour}); err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandlerWithStore(database)
-	if err != nil {
-		t.Fatal(err)
-	}
+	handler := authenticatedAPIHandler(t, database)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview?currency=MYR", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -105,10 +139,7 @@ func TestPortfolioOverviewAPIIsScopedAndKeepsDecimalsAsStrings(t *testing.T) {
 func TestPortfolioOverviewAPINoSnapshotIsExplicit(t *testing.T) {
 	database := apiFixture(t)
 	defer database.Close()
-	handler, err := NewHandlerWithStore(database)
-	if err != nil {
-		t.Fatal(err)
-	}
+	handler := authenticatedAPIHandler(t, database)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview", nil))
 	if response.Code != 200 || !contains(response.Body.String(), `"state":"no_snapshot"`) || contains(response.Body.String(), `"reporting_total"`) {
@@ -165,7 +196,7 @@ func TestPortfolioOverviewAPILegacyAlternateCurrencyWithholdsAllocation(t *testi
 	if _, err := database.DB.ExecContext(ctx, `INSERT INTO snapshots(id,portfolio_id,calculation_version,payload,created_at,input_hash) VALUES(?,?,?,?,?,?)`, legacyID, "portfolio-api", "legacy-api.v1", legacyEncoded, now.Add(time.Minute).Format(time.RFC3339Nano), "legacy-api-input"); err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandlerWithStore(database)
+	handler := authenticatedAPIHandler(t, database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,10 +305,7 @@ func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing
 		t.Fatalf("second snapshot=%+v err=%v", secondSnapshot, err)
 	}
 
-	handler, err := NewHandlerWithStore(database)
-	if err != nil {
-		t.Fatal(err)
-	}
+	handler := authenticatedAPIHandler(t, database)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-33/overview", nil))
 	if response.Code != http.StatusOK {

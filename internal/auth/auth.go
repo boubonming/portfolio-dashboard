@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +24,8 @@ import (
 const (
 	SessionCookieName = "portfolio_session"
 	CSRFHeaderName    = "X-CSRF-Token"
-	maxLoginAttempts  = 4096
+	maxLoginAttempts  = 5
+	loginWindow       = time.Minute
 )
 
 var (
@@ -36,6 +38,7 @@ type Config struct {
 	Username      string
 	PasswordHash  string
 	SessionSecret string
+	PublicOrigin  string
 	CookieSecure  bool
 	SessionTTL    time.Duration
 	Now           func() time.Time
@@ -48,11 +51,14 @@ func (c Config) Validate() error {
 	if cost, err := bcrypt.Cost([]byte(c.PasswordHash)); err != nil || cost < bcrypt.MinCost+6 || cost > bcrypt.MaxCost {
 		return fmt.Errorf("%w: password hash is invalid or too weak", ErrInvalidConfig)
 	}
-	if len(c.SessionSecret) < 32 {
-		return fmt.Errorf("%w: session secret must contain at least 32 bytes", ErrInvalidConfig)
+	if _, err := decodeSecret(c.SessionSecret); err != nil {
+		return fmt.Errorf("%w: session secret must be base64-encoded random bytes of at least 32 bytes", ErrInvalidConfig)
 	}
-	if c.SessionTTL <= 0 || c.SessionTTL > 24*time.Hour {
+	if c.SessionTTL < time.Second || c.SessionTTL > 24*time.Hour {
 		return fmt.Errorf("%w: session lifetime must be between 1 second and 24 hours", ErrInvalidConfig)
+	}
+	if _, err := parseOrigin(c.PublicOrigin); err != nil {
+		return fmt.Errorf("%w: public origin: %v", ErrInvalidConfig, err)
 	}
 	return nil
 }
@@ -84,6 +90,7 @@ type tokenPayload struct {
 type loginAttempt struct {
 	WindowStart time.Time
 	Failures    int
+	InFlight    int
 }
 
 // Authenticator owns the short-lived in-memory session registry. Keeping the
@@ -91,6 +98,7 @@ type loginAttempt struct {
 // putting session state or CSRF values in SQLite.
 type Authenticator struct {
 	config   Config
+	secret   []byte
 	mu       sync.Mutex
 	sessions map[string]session
 	attempts map[string]loginAttempt
@@ -103,23 +111,23 @@ func New(c Config) (*Authenticator, error) {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
-	return &Authenticator{config: c, sessions: make(map[string]session), attempts: make(map[string]loginAttempt)}, nil
+	secret, _ := decodeSecret(c.SessionSecret)
+	return &Authenticator{config: c, secret: secret, sessions: make(map[string]session), attempts: make(map[string]loginAttempt)}, nil
 }
 
 func (a *Authenticator) now() time.Time { return a.config.Now().UTC() }
 
 func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request, request LoginRequest) (SessionResponse, bool) {
-	key := loginKey(r, request.Username)
-	if !a.allowAttempt(key) {
+	if !a.reserveAttempt() {
 		return SessionResponse{}, false
 	}
 	passwordOK := bcrypt.CompareHashAndPassword([]byte(a.config.PasswordHash), []byte(request.Password)) == nil
 	usernameOK := subtle.ConstantTimeCompare([]byte(request.Username), []byte(a.config.Username)) == 1
 	if !passwordOK || !usernameOK {
-		a.recordFailure(key)
+		a.finishAttempt(false)
 		return SessionResponse{}, false
 	}
-	a.clearAttempt(key)
+	a.finishAttempt(true)
 	id, err := randomToken(32)
 	if err != nil {
 		return SessionResponse{}, false
@@ -199,7 +207,7 @@ func (a *Authenticator) RequireCSRF(next http.Handler) http.Handler {
 			return
 		}
 		s, ok := sessionFromContext(r.Context())
-		if !ok || !sameOrigin(r) || subtle.ConstantTimeCompare([]byte(r.Header.Get(CSRFHeaderName)), []byte(s.CSRFToken)) != 1 {
+		if !ok || !a.sameOrigin(r) || subtle.ConstantTimeCompare([]byte(r.Header.Get(CSRFHeaderName)), []byte(s.CSRFToken)) != 1 {
 			writeError(w, http.StatusForbidden, "forbidden")
 			return
 		}
@@ -207,25 +215,23 @@ func (a *Authenticator) RequireCSRF(next http.Handler) http.Handler {
 	})
 }
 
-func sameOrigin(r *http.Request) bool {
+func (a *Authenticator) sameOrigin(r *http.Request) bool {
+	seen := false
 	for _, header := range []string{"Origin", "Referer"} {
 		value := r.Header.Get(header)
 		if value == "" {
 			continue
 		}
-		u, err := http.NewRequest(http.MethodGet, value, nil)
-		if err != nil || u.URL.Host == "" || !strings.EqualFold(u.URL.Host, r.Host) {
-			return false
-		}
-		expectedScheme := "http"
-		if r.TLS != nil {
-			expectedScheme = "https"
-		}
-		if u.URL.Scheme != expectedScheme {
+		seen = true
+		if !a.canonicalOriginMatches(value) {
 			return false
 		}
 	}
-	return true
+	return seen
+}
+
+func (a *Authenticator) CanonicalOriginMatches(value string) bool {
+	return a.canonicalOriginMatches(value)
 }
 
 func (a *Authenticator) sign(payload tokenPayload) (string, error) {
@@ -234,7 +240,7 @@ func (a *Authenticator) sign(payload tokenPayload) (string, error) {
 		return "", err
 	}
 	body := base64.RawURLEncoding.EncodeToString(encoded)
-	mac := hmac.New(sha256.New, []byte(a.config.SessionSecret))
+	mac := hmac.New(sha256.New, a.secret)
 	_, _ = mac.Write([]byte(body))
 	return body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
@@ -244,7 +250,7 @@ func (a *Authenticator) verify(token string, payload *tokenPayload) error {
 	if len(parts) != 2 || len(parts[1]) < 20 {
 		return errors.New("invalid token")
 	}
-	mac := hmac.New(sha256.New, []byte(a.config.SessionSecret))
+	mac := hmac.New(sha256.New, a.secret)
 	_, _ = mac.Write([]byte(parts[0]))
 	supplied, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil || !hmac.Equal(supplied, mac.Sum(nil)) {
@@ -261,45 +267,46 @@ func (a *Authenticator) setCookie(w http.ResponseWriter, token string, expires t
 	http.SetCookie(w, &http.Cookie{Name: SessionCookieName, Value: token, Path: "/", Expires: expires, MaxAge: int(a.config.SessionTTL.Seconds()), HttpOnly: true, Secure: a.config.CookieSecure, SameSite: http.SameSiteStrictMode})
 }
 
-func (a *Authenticator) allowAttempt(key string) bool {
+// reserveAttempt admits work under the mutex, before bcrypt starts. The
+// single configured account uses one bounded global bucket rather than an
+// attacker-controlled username/IP map, so username churn cannot bypass it.
+func (a *Authenticator) reserveAttempt() bool {
 	now := a.now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	attempt := a.attempts[key]
-	if now.Sub(attempt.WindowStart) >= time.Minute {
-		return true
-	}
-	return attempt.Failures < 5
-}
-func (a *Authenticator) recordFailure(key string) {
-	now := a.now()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if _, exists := a.attempts[key]; !exists && len(a.attempts) >= maxLoginAttempts {
-		for oldest := range a.attempts {
-			delete(a.attempts, oldest)
-			break
-		}
-	}
-	attempt := a.attempts[key]
-	if now.Sub(attempt.WindowStart) >= time.Minute {
+	attempt := a.attempts["global"]
+	if attempt.WindowStart.IsZero() || now.Sub(attempt.WindowStart) >= loginWindow {
 		attempt = loginAttempt{WindowStart: now}
 	}
-	if attempt.WindowStart.IsZero() {
-		attempt.WindowStart = now
+	if attempt.Failures >= maxLoginAttempts || attempt.InFlight >= 1 {
+		a.attempts["global"] = attempt
+		return false
 	}
 	attempt.Failures++
-	a.attempts[key] = attempt
+	attempt.InFlight++
+	a.attempts["global"] = attempt
+	return true
 }
-func (a *Authenticator) clearAttempt(key string) { a.mu.Lock(); delete(a.attempts, key); a.mu.Unlock() }
 
-func loginKey(r *http.Request, username string) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+func (a *Authenticator) finishAttempt(success bool) {
+	now := a.now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	attempt := a.attempts["global"]
+	if attempt.InFlight > 0 {
+		attempt.InFlight--
 	}
-	return host + "\x00" + username
+	if success {
+		delete(a.attempts, "global")
+		return
+	}
+	if attempt.WindowStart.IsZero() || now.Sub(attempt.WindowStart) >= loginWindow {
+		attempt.WindowStart = now
+		attempt.Failures = 1
+	}
+	a.attempts["global"] = attempt
 }
+
 func hashID(id string) string { sum := sha256.Sum256([]byte(id)); return hex.EncodeToString(sum[:]) }
 func randomToken(size int) (string, error) {
 	b := make([]byte, size)
@@ -321,4 +328,65 @@ type sessionContextKey struct{}
 func sessionFromContext(ctx context.Context) (session, bool) {
 	s, ok := ctx.Value(sessionContextKey{}).(session)
 	return s, ok
+}
+
+func decodeSecret(encoded string) ([]byte, error) {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" {
+		return nil, errors.New("empty secret")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(encoded)
+	}
+	if err != nil || len(decoded) < 32 {
+		return nil, errors.New("secret is not sufficiently long")
+	}
+	var nonZero, distinct int
+	seen := make(map[byte]struct{}, len(decoded))
+	for _, value := range decoded {
+		if value != 0 {
+			nonZero++
+		}
+		if _, ok := seen[value]; !ok {
+			seen[value] = struct{}{}
+			distinct++
+		}
+	}
+	if nonZero < len(decoded)/2 || distinct < 16 {
+		return nil, errors.New("secret has insufficient diversity")
+	}
+	return decoded, nil
+}
+
+func parseOrigin(raw string) (*url.URL, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return nil, errors.New("origin is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return nil, errors.New("origin must be scheme plus host[:port] with no path, query, fragment, or userinfo")
+	}
+	if !strings.EqualFold(u.Scheme, "https") && !strings.EqualFold(u.Scheme, "http") {
+		return nil, errors.New("origin scheme must be http or https")
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		ip := net.ParseIP(u.Hostname())
+		if ip == nil || !ip.IsLoopback() {
+			return nil, errors.New("http origin is allowed only for loopback development")
+		}
+	}
+	return u, nil
+}
+
+func (a *Authenticator) canonicalOriginMatches(raw string) bool {
+	expected, err := parseOrigin(a.config.PublicOrigin)
+	if err != nil {
+		return false
+	}
+	actual, err := parseOrigin(raw)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(expected.Scheme, actual.Scheme) && strings.EqualFold(expected.Host, actual.Host)
 }

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,7 +17,8 @@ func fixtureAuthenticator(t *testing.T) *Authenticator {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authenticator, err := New(Config{Username: "fixture-user", PasswordHash: string(hash), SessionSecret: strings.Repeat("s", 32), CookieSecure: true, SessionTTL: time.Hour})
+	validSecret := base64.StdEncoding.EncodeToString([]byte("fixture-session-secret-with-enough-diversity-123"))
+	authenticator, err := New(Config{Username: "fixture-user", PasswordHash: string(hash), SessionSecret: validSecret, PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,9 +86,9 @@ func TestCSRFRequiresSessionBoundTokenAndOrigin(t *testing.T) {
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin status = %d", response.Code)
 	}
-	request = httptest.NewRequest(http.MethodPost, "http://example.test/private", nil)
+	request = httptest.NewRequest(http.MethodPost, "https://example.test/private", nil)
 	request.Host = "example.test"
-	request.Header.Set("Origin", "http://example.test")
+	request.Header.Set("Origin", "https://example.test")
 	request.Header.Set(CSRFHeaderName, result.CSRFToken)
 	request.AddCookie(loginResponse.Result().Cookies()[0])
 	response = httptest.NewRecorder()

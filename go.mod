@@ -1,6 +1,8 @@
 module github.com/boubonming/portfolio-dashboard
 
-go 1.23
+go 1.23.0
+
+toolchain go1.23.8
 
 require modernc.org/sqlite v1.36.1
 

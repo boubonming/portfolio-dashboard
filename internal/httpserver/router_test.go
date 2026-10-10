@@ -8,7 +8,7 @@ import (
 )
 
 func TestRoutesPrioritizeAPIHealthAndSPA(t *testing.T) {
-	handler, err := NewHandler()
+	handler, err := NewStaticHandler()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestRoutesPrioritizeAPIHealthAndSPA(t *testing.T) {
 }
 
 func TestOverviewRouteValidatesPathBeforeMethod(t *testing.T) {
-	handler, err := NewHandler()
+	handler, err := NewStaticHandler()
 	if err != nil {
 		t.Fatal(err)
 	}

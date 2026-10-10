@@ -41,7 +41,15 @@ func main() {
 		fatal(err)
 	}
 	fmt.Fprintf(os.Stderr, "portfolio dashboard listening on %s\n", cfg.BindAddress)
-	fatal(http.ListenAndServe(cfg.BindAddress, handler))
+	server := &http.Server{
+		Addr:              cfg.BindAddress,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	fatal(server.ListenAndServe())
 }
 
 func runCommand(command string, args []string) error {
