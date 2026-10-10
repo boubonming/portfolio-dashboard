@@ -216,11 +216,13 @@ function AllocationSection({ data }: { data: PortfolioOverview }) {
 
 type AuthSession = { authenticated: boolean; csrf_token?: string; expires_at?: string }
 
-function Login({ onLogin, initialError = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; initialError?: string }) {
+function Login({ onLogin, externalError = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; externalError?: string }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [state, setState] = useState<'idle' | 'submitting'>('idle')
-  const [error, setError] = useState(initialError)
+  const [error, setError] = useState('')
+  const usernameRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { usernameRef.current?.focus() }, [])
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setState('submitting'); setError('')
@@ -236,9 +238,9 @@ function Login({ onLogin, initialError = '' }: { onLogin: (username: string, pas
     <header className="brand"><span className="eyebrow">Private workspace</span><h1>Portfolio Dashboard</h1><p className="muted">Sign in to view your private portfolio.</p></header>
     <form className="login-card" onSubmit={submit} aria-labelledby="login-title">
       <h2 id="login-title">Sign in</h2>
-      <label htmlFor="username">Username</label><input id="username" name="username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required />
+      <label htmlFor="username">Username</label><input ref={usernameRef} id="username" name="username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required />
       <label htmlFor="password">Password</label><input id="password" name="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
-      {error && <p className="notice error" role="alert">{error}</p>}
+      {(error || externalError) && <p className="notice error" role="alert">{error || externalError}</p>}
       <button type="submit" disabled={state === 'submitting'}>{state === 'submitting' ? 'Signing in…' : 'Sign in'}</button>
     </form>
   </main>
@@ -255,7 +257,8 @@ export default function App() {
   const [filter, setFilter] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('symbol')
   const [sortDirection, setSortDirection] = useState<SortDirection>('ascending')
-  const controllerRef = useRef<AbortController | null>(null)
+  const authControllerRef = useRef<AbortController | null>(null)
+  const loadControllerRef = useRef<AbortController | null>(null)
   const authGeneration = useRef(0)
   const loadGeneration = useRef(0)
   const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -263,19 +266,23 @@ export default function App() {
   const clearPrivateState = useCallback(() => {
     authGeneration.current += 1
     loadGeneration.current += 1
-    controllerRef.current?.abort()
-    controllerRef.current = null
+    authControllerRef.current?.abort()
+    authControllerRef.current = null
+    loadControllerRef.current?.abort()
+    loadControllerRef.current = null
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
     setData(null); setError(''); setState('loading')
   }, [])
 
-  const scheduleExpiry = useCallback((expiresAt: string, generation: number) => {
+  const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
+    if (controller.signal.aborted || authGeneration.current !== generation) return false
     const expiry = Date.parse(expiresAt)
     if (!Number.isFinite(expiry) || expiry <= Date.now()) return false
+    if (controller.signal.aborted || authGeneration.current !== generation) return false
     if (expiryTimerRef.current) clearTimeout(expiryTimerRef.current)
     expiryTimerRef.current = setTimeout(() => {
-      if (authGeneration.current !== generation) return
+      if (controller.signal.aborted || authGeneration.current !== generation) return
       clearPrivateState()
       setAuthError('Your session expired. Please sign in again.')
       setAuthState('login')
@@ -287,9 +294,9 @@ export default function App() {
     if (authState !== 'authenticated') return
     const authGenerationAtStart = authGeneration.current
     const generation = ++loadGeneration.current
-    controllerRef.current?.abort()
+    loadControllerRef.current?.abort()
     const controller = new AbortController()
-    controllerRef.current = controller
+    loadControllerRef.current = controller
     setState('loading')
     setError('')
     const url = `/api/v1/portfolios/portfolio-default/overview?currency=${encodeURIComponent(currency)}`
@@ -311,13 +318,16 @@ export default function App() {
   useEffect(() => {
     const generation = ++authGeneration.current
     const controller = new AbortController()
-    controllerRef.current = controller
+    authControllerRef.current = controller
+    const current = () => !controller.signal.aborted && generation === authGeneration.current
     apiFetch('/api/v1/auth/session', { signal: controller.signal })
       .then(async (response) => {
+        if (!current()) return
         if (response.status === 401) throw new APIError(401)
         const session = await jsonResponse<AuthSession>(response)
-        if (session.authenticated !== true || !session.csrf_token || !session.expires_at || !scheduleExpiry(session.expires_at, generation)) throw new APIError(401)
-        if (controller.signal.aborted || generation !== authGeneration.current) return
+        if (!current()) return
+        if (session.authenticated !== true || !session.csrf_token || !session.expires_at || !scheduleExpiry(session.expires_at, generation, controller)) throw new APIError(401)
+        if (!current()) return
         csrfToken.current = session.csrf_token
         setAuthState('authenticated')
       })
@@ -328,33 +338,46 @@ export default function App() {
         setAuthState('login')
       })
     return () => {
-      if (authGeneration.current === generation) {
-        controller.abort()
-        authGeneration.current += 1
-        loadGeneration.current += 1
-        if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
-      }
+      controller.abort()
+      authControllerRef.current?.abort()
+      authControllerRef.current = null
+      authGeneration.current += 1
+      loadGeneration.current += 1
+      loadControllerRef.current?.abort()
+      loadControllerRef.current = null
+      if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     }
   }, [clearPrivateState, scheduleExpiry])
 
-  useEffect(() => { if (authState === 'authenticated') load() }, [authState, load])
+  useEffect(() => {
+    if (authState !== 'authenticated') return
+    load()
+    return () => {
+      loadGeneration.current += 1
+      loadControllerRef.current?.abort()
+      loadControllerRef.current = null
+    }
+  }, [authState, load])
 
   const signIn = useCallback(async (username: string, password: string) => {
     setAuthError('')
     clearPrivateState()
     const generation = authGeneration.current
     const controller = new AbortController()
-    controllerRef.current = controller
+    authControllerRef.current = controller
+    const current = () => !controller.signal.aborted && generation === authGeneration.current
     try {
       const response = await apiFetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }), signal: controller.signal })
       if (!response.ok) return 'Unable to sign in right now.'
       const session = await response.json() as AuthSession
-      if (generation !== authGeneration.current || session.authenticated !== true || !session.csrf_token || !session.expires_at || !scheduleExpiry(session.expires_at, generation)) return 'Unable to sign in right now.'
+      if (!current() || session.authenticated !== true || !session.csrf_token || !session.expires_at || !scheduleExpiry(session.expires_at, generation, controller)) return 'Unable to sign in right now.'
       csrfToken.current = session.csrf_token
       setAuthState('authenticated')
       return null
     } catch (reason) {
       return reason instanceof APIError && reason.status === 401 ? 'Sign-in failed. Check your username and password.' : 'Unable to sign in right now.'
+    } finally {
+      if (authControllerRef.current === controller) authControllerRef.current = null
     }
   }, [clearPrivateState, scheduleExpiry])
 
@@ -363,14 +386,19 @@ export default function App() {
     clearPrivateState()
     const generation = authGeneration.current
     setAuthState('login')
+    const controller = new AbortController()
+    authControllerRef.current = controller
+    const current = () => !controller.signal.aborted && generation === authGeneration.current
     try {
-      await jsonResponse(await apiFetch('/api/v1/auth/logout', { method: 'POST', csrfToken: token }))
-      if (authGeneration.current === generation) setAuthError('')
+      await jsonResponse(await apiFetch('/api/v1/auth/logout', { method: 'POST', csrfToken: token, signal: controller.signal }))
+      if (current()) setAuthError('')
     } catch (reason) {
-      if (authGeneration.current !== generation) return
+      if (!current()) return
       setAuthError(reason instanceof APIError && reason.status === 401
         ? 'Sign-out was not confirmed by the server. Please sign in again if you want to retry.'
         : 'Sign-out was not confirmed by the server. Close this window or try again.')
+    } finally {
+      if (authControllerRef.current === controller) authControllerRef.current = null
     }
   }, [clearPrivateState])
 
@@ -408,7 +436,7 @@ export default function App() {
     <th scope="col" aria-sort={sortKey === key ? sortDirection : 'none'}>{sortButton(label, key)}</th>
   )
 
-  if (authState === 'login') return <Login onLogin={signIn} initialError={authError} />
+  if (authState === 'login') return <Login onLogin={signIn} externalError={authError} />
   if (authState === 'checking') return <main className="shell" aria-busy="true"><section className="notice" role="status" aria-live="polite"><h1>Checking your session…</h1><p>Loading portfolio securely.</p></section></main>
 
   return (

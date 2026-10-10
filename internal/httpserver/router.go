@@ -99,9 +99,7 @@ func authRoutes(authenticator *auth.Authenticator) http.HandlerFunc {
 }
 
 func login(authenticator *auth.Authenticator, w http.ResponseWriter, r *http.Request) {
-	origin := r.Header.Get("Origin")
-	referer := r.Header.Get("Referer")
-	if (origin == "" && referer == "") || (origin != "" && !authenticator.CanonicalOriginMatches(origin)) || (referer != "" && !authenticator.CanonicalOriginMatches(referer)) {
+	if !authenticator.SameOrigin(r) {
 		writeJSONNoStore(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}

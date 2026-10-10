@@ -1,10 +1,16 @@
 package httpserver
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/boubonming/portfolio-dashboard/internal/auth"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestRoutesPrioritizeAPIHealthAndSPA(t *testing.T) {
@@ -67,4 +73,36 @@ func contains(value, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestLoginAcceptsFullSameOriginReferer(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandlerWithAuth(nil, auth.Config{
+		Username: "fixture-user", PasswordHash: string(hash),
+		SessionSecret: base64.StdEncoding.EncodeToString([]byte("fixture-session-secret-with-enough-diversity-123")),
+		PublicOrigin:  "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://example.test/api/v1/auth/login", strings.NewReader(`{"username":"fixture-user","password":"fixture-only-value"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Referer", "https://example.test/portfolio?x=1")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("same-origin referer login status = %d, body=%s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "https://example.test/api/v1/auth/login", strings.NewReader(`{"username":"fixture-user","password":"fixture-only-value"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Referer", "https://attacker.test/portfolio?x=1")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin referer login status = %d", response.Code)
+	}
 }

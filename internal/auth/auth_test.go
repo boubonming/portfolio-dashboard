@@ -110,3 +110,50 @@ func TestConfigRejectsWeakHashAndSecret(t *testing.T) {
 		t.Fatal("weak session secret or password hash was accepted")
 	}
 }
+
+func TestOriginAndRefererCanonicalization(t *testing.T) {
+	authenticator := fixtureAuthenticator(t)
+	cases := []struct {
+		name   string
+		header string
+		value  string
+		want   bool
+	}{
+		{"origin exact", "Origin", "https://example.test", true},
+		{"origin default port", "Origin", "https://example.test:443/", true},
+		{"origin non-default port", "Origin", "https://example.test:444", false},
+		{"origin query rejected", "Origin", "https://example.test/?x=1", false},
+		{"origin path rejected", "Origin", "https://example.test/portfolio", false},
+		{"referer path and query", "Referer", "https://example.test/portfolio?x=1", true},
+		{"referer cross-origin", "Referer", "https://attacker.test/portfolio?x=1", false},
+		{"referer root", "Referer", "https://example.test", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "https://example.test/private", nil)
+			request.Header.Set(tc.header, tc.value)
+			if got := authenticator.SameOrigin(request); got != tc.want {
+				t.Fatalf("SameOrigin(%s=%q) = %v, want %v", tc.header, tc.value, got, tc.want)
+			}
+		})
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "https://example.test/private", nil)
+	request.Header.Set("Origin", "https://example.test:443")
+	request.Header.Set("Referer", "https://example.test/portfolio?x=1")
+	if !authenticator.SameOrigin(request) {
+		t.Fatal("matching origin and referer were rejected")
+	}
+	request.Header.Set("Referer", "https://attacker.test/portfolio?x=1")
+	if authenticator.SameOrigin(request) {
+		t.Fatal("mismatched origin and referer were accepted")
+	}
+}
+
+func TestSameOriginRequiresAtLeastOneHeader(t *testing.T) {
+	authenticator := fixtureAuthenticator(t)
+	request := httptest.NewRequest(http.MethodPost, "https://example.test/private", nil)
+	if authenticator.SameOrigin(request) {
+		t.Fatal("request without origin headers was accepted")
+	}
+}

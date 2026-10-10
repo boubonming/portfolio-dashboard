@@ -286,4 +286,40 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/sign-in failed/i))
     expect(screen.getByRole('alert').textContent).not.toMatch(/wrong-user|wrong-value/i)
   })
+
+  it('clears private data, moves focus to login, and shows failed logout revocation', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve(authenticatedSession)
+      if (url.includes('/api/v1/auth/logout')) return Promise.resolve({ ok: false, status: 503, json: async () => ({ error: 'unavailable' }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/revocation|sign-out was not confirmed/i))
+    expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy()
+    expect(document.activeElement).toBe(screen.getByLabelText('Username'))
+  })
+
+  it('does not repopulate private data when a portfolio response resolves after logout', async () => {
+    let resolveOverview: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve(authenticatedSession)
+      if (url.includes('/api/v1/portfolios/')) return new Promise<Response>((resolve) => { resolveOverview = resolve })
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: false }) } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Sign out' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    resolveOverview?.({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    await Promise.resolve()
+    expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+  })
 })

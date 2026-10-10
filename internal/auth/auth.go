@@ -228,15 +228,27 @@ func (a *Authenticator) sameOrigin(r *http.Request) bool {
 			continue
 		}
 		seen = true
-		if !a.canonicalOriginMatches(value) {
+		if header == "Origin" && !a.canonicalOriginMatches(value) {
+			return false
+		}
+		if header == "Referer" && !a.canonicalRefererMatches(value) {
 			return false
 		}
 	}
 	return seen
 }
 
+// SameOrigin validates the browser origin headers for callers that perform
+// authentication before a request has a session context (for example login).
+func (a *Authenticator) SameOrigin(r *http.Request) bool { return a.sameOrigin(r) }
+
 func (a *Authenticator) CanonicalOriginMatches(value string) bool {
 	return a.canonicalOriginMatches(value)
+}
+
+// CanonicalRefererMatches compares the origin derived from a full Referer URL.
+func (a *Authenticator) CanonicalRefererMatches(value string) bool {
+	return a.canonicalRefererMatches(value)
 }
 
 func (a *Authenticator) sign(payload tokenPayload) (string, error) {
@@ -369,7 +381,7 @@ func parseOrigin(raw string) (*url.URL, error) {
 		return nil, errors.New("origin is required")
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
 		return nil, errors.New("origin must be scheme plus host[:port] with no path, query, fragment, or userinfo")
 	}
 	if !strings.EqualFold(u.Scheme, "https") && !strings.EqualFold(u.Scheme, "http") {
@@ -380,6 +392,9 @@ func parseOrigin(raw string) (*url.URL, error) {
 		if ip == nil || !ip.IsLoopback() {
 			return nil, errors.New("http origin is allowed only for loopback development")
 		}
+	}
+	if _, err := effectivePort(u); err != nil {
+		return nil, err
 	}
 	return u, nil
 }
@@ -393,5 +408,75 @@ func (a *Authenticator) canonicalOriginMatches(raw string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(expected.Scheme, actual.Scheme) && strings.EqualFold(expected.Host, actual.Host)
+	return canonicalOrigin(expected) == canonicalOrigin(actual)
+}
+
+func (a *Authenticator) canonicalRefererMatches(raw string) bool {
+	expected, err := parseOrigin(a.config.PublicOrigin)
+	if err != nil {
+		return false
+	}
+	actual, err := parseRefererOrigin(raw)
+	if err != nil {
+		return false
+	}
+	return canonicalOrigin(expected) == canonicalOrigin(actual)
+}
+
+func parseRefererOrigin(raw string) (*url.URL, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return nil, errors.New("referer is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Opaque != "" {
+		return nil, errors.New("referer must be an absolute URL")
+	}
+	if !strings.EqualFold(u.Scheme, "https") && !strings.EqualFold(u.Scheme, "http") {
+		return nil, errors.New("referer scheme must be http or https")
+	}
+	if _, err := effectivePort(u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func canonicalOrigin(u *url.URL) string {
+	port, _ := effectivePort(u)
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Hostname()) + ":" + port
+}
+
+func effectivePort(u *url.URL) (string, error) {
+	host := u.Hostname()
+	if host == "" {
+		return "", errors.New("host is required")
+	}
+	port := u.Port()
+	if port == "" {
+		if strings.HasSuffix(u.Host, ":") {
+			return "", errors.New("origin port is empty")
+		}
+		if strings.EqualFold(u.Scheme, "https") {
+			return "443", nil
+		}
+		if strings.EqualFold(u.Scheme, "http") {
+			return "80", nil
+		}
+		return "", errors.New("unsupported scheme")
+	}
+	for _, digit := range port {
+		if digit < '0' || digit > '9' {
+			return "", errors.New("origin port must be numeric")
+		}
+	}
+	value := 0
+	for _, digit := range port {
+		value = value*10 + int(digit-'0')
+		if value > 65535 {
+			return "", errors.New("origin port is out of range")
+		}
+	}
+	if value == 0 {
+		return "", errors.New("origin port is out of range")
+	}
+	return fmt.Sprintf("%d", value), nil
 }
