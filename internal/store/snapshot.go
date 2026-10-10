@@ -54,7 +54,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 	if exists == 0 {
 		return domain.SnapshotStatus{}, fmt.Errorf("unknown portfolio %s", request.PortfolioID)
 	}
-	input, err := s.loadValuationInput(ctx, request.ReportingCurrency, request.AsOf, request.MaxAge)
+	input, err := s.loadValuationInput(ctx, request.PortfolioID, request.ReportingCurrency, request.AsOf, request.MaxAge)
 	if err != nil {
 		return domain.SnapshotStatus{}, err
 	}

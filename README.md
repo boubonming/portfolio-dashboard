@@ -1,6 +1,6 @@
 # Portfolio Dashboard
 
-Private, single-user portfolio dashboard scaffold. The Obsidian holdings note remains authoritative until the user reviews and explicitly approves the import preview.
+Private, single-user portfolio dashboard scaffold. The Obsidian holdings note has completed reconciliation and its import has been explicitly approved; the resulting imported SQLite portfolio is authoritative for calculations.
 
 The application currently serves a minimal React shell and a health endpoint. It does not expose state-changing portfolio HTTP endpoints, make market-data calls, access credentials, or deploy anything.
 
@@ -111,7 +111,14 @@ go run ./cmd/portfolio-dashboard fx-add -db /path/to/portfolio-dashboard.sqlite 
 Both commands reject malformed or non-positive decimals, unknown instruments,
 ambiguous currency pairs, future market timestamps beyond the controlled
 tolerance, and missing source/basis/provenance. Writes are append-only and
-produce audit events. Replacing a historical observation is not supported.
+produce audit events. Market timestamps up to and including five minutes ahead
+of the accounting as-of time are accepted and classified as fresh with zero
+age; timestamps beyond that tolerance are rejected at ingestion and classified
+as future/invalid during valuation. The first accepted orientation of an
+unordered FX pair (for example, USD/MYR) becomes canonical; the reverse
+orientation is rejected, while later observations in the same direction remain
+append-only. Multiple observations for one directed pair at the same market
+timestamp are rejected.
 
 Create and inspect a snapshot without dumping private lot values:
 

@@ -11,7 +11,7 @@ import (
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 )
 
-const futureTimestampTolerance = 5 * time.Minute
+const futureTimestampTolerance = domain.DefaultFutureTolerance
 
 type QuoteInput struct {
 	InstrumentID string
@@ -155,6 +155,13 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 		return domain.FXRate{}, err
 	}
 	defer tx.Rollback()
+	var reverseCount int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM fx_rates WHERE base_currency = ? AND quote_currency = ?`, fx.QuoteCurrency, fx.BaseCurrency).Scan(&reverseCount); err != nil {
+		return domain.FXRate{}, fmt.Errorf("check FX pair orientation: %w", err)
+	}
+	if reverseCount != 0 {
+		return domain.FXRate{}, fmt.Errorf("FX pair orientation is already established as %s/%s", fx.QuoteCurrency, fx.BaseCurrency)
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO fx_rates(id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?)`, fx.ID, fx.BaseCurrency, fx.QuoteCurrency, fx.Rate, fx.Source, fx.MarketAt, fx.FetchedAt, fx.Basis, fx.Provenance); err != nil {
 		return domain.FXRate{}, fmt.Errorf("persist FX rate: %w", err)
 	}
@@ -168,9 +175,9 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	return fx, nil
 }
 
-func (s *Store) loadValuationInput(ctx context.Context, reportingCurrency string, asOf time.Time, maxAge time.Duration) (domain.ValuationInput, error) {
+func (s *Store) loadValuationInput(ctx context.Context, portfolioID, reportingCurrency string, asOf time.Time, maxAge time.Duration) (domain.ValuationInput, error) {
 	input := domain.ValuationInput{ReportingCurrency: reportingCurrency, AsOf: asOf, MaxAge: maxAge, Lots: []domain.ValuationLot{}}
-	rows, err := s.DB.QueryContext(ctx, `SELECT l.id,COALESCE((SELECT id FROM import_runs ir WHERE ir.source_sha256=l.source_sha256 AND ir.status='applied' ORDER BY ir.created_at DESC LIMIT 1),''),l.source_sha256,l.instrument_id,i.symbol,l.currency,l.quantity,l.unit_cost,l.cost_basis FROM lots l JOIN instruments i ON i.id=l.instrument_id ORDER BY l.id`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT l.id,COALESCE((SELECT id FROM import_runs ir WHERE ir.source_sha256=l.source_sha256 AND ir.status='applied' ORDER BY ir.created_at DESC LIMIT 1),''),l.source_sha256,l.instrument_id,i.symbol,l.currency,l.quantity,l.unit_cost,l.cost_basis FROM lots l JOIN instruments i ON i.id=l.instrument_id WHERE l.portfolio_id = ? ORDER BY l.id`, portfolioID)
 	if err != nil {
 		return input, err
 	}

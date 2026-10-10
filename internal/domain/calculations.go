@@ -21,7 +21,11 @@ func ClassifyFreshness(marketAt string, asOf time.Time, maxAge time.Duration) Fr
 	if asOf.IsZero() {
 		asOf = time.Now().UTC()
 	}
-	if at.After(asOf) {
+	// Ingestion allows a small clock-skew window for observations received just
+	// ahead of the requested as-of instant. Keep classification consistent with
+	// that rule: within the window the observation is fresh with zero age, while
+	// anything beyond it is a future dependency.
+	if at.After(asOf.Add(DefaultFutureTolerance)) {
 		return Freshness{Status: Future, MarketAt: marketAt}
 	}
 	if maxAge <= 0 {
