@@ -64,6 +64,12 @@ tbody th { font-weight: 500; }
 .numeric { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .sort-button { background: transparent; border: 0; color: inherit; font-weight: 700; padding: .2rem; text-align: left; white-space: nowrap; }
 .empty { color: #b8cbc8; padding: 1rem; }
+.login-shell { max-width: 36rem; }
+.login-card { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; display: grid; gap: .65rem; margin-top: 1.5rem; padding: 1.5rem; }
+.login-card label { color: #b8cbc8; font-weight: 700; margin-top: .35rem; }
+.login-card input, .login-card button { width: 100%; }
+.login-card button { background: #164d43; font-weight: 700; margin-top: .65rem; }
+.login-card .notice { margin-top: .5rem; }
 @media (max-width: 780px) {
   .overview { grid-template-columns: 1fr; }
   .snapshot-meta { border-left: 0; border-top: 1px solid #41615d; padding-left: 0; padding-top: 1rem; }

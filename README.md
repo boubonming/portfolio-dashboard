@@ -33,12 +33,27 @@ go build ./cmd/portfolio-dashboard
 ## Run locally
 
 ```sh
-PORTFOLIO_BIND_ADDRESS=:8080 \
+PORTFOLIO_BIND_ADDRESS=127.0.0.1:8080 \
+PORTFOLIO_PUBLIC_ORIGIN=http://127.0.0.1:8080 \
 PORTFOLIO_DATA_PATH=./portfolio-dashboard.sqlite \
+PORTFOLIO_ENV=development PORTFOLIO_COOKIE_SECURE=false \
 go run ./cmd/portfolio-dashboard
 ```
 
 Configuration is environment-driven. `PORTFOLIO_REPORTING_CURRENCY` defaults to `MYR`; timestamps stored by the application are UTC and human-facing dates use Singapore time in later phases.
+
+The HTTP server fails closed unless authentication is configured explicitly:
+`PORTFOLIO_AUTH_USERNAME`, a bcrypt `PORTFOLIO_AUTH_PASSWORD_HASH` (cost 10 or
+higher), `PORTFOLIO_PUBLIC_ORIGIN` (one exact `https://host[:port]` origin), and
+an independent random `PORTFOLIO_SESSION_SECRET` encoded as at least 32 random
+bytes are required. Generate a new reviewable secret without exposing an
+existing one with `openssl rand -base64 32`; place that command's output only in
+secret injection. Sessions are short-lived, signed, in-memory and carried
+only by an `HttpOnly`, `SameSite=Strict` cookie. Production must use TLS and
+the default secure cookie setting. For local HTTP development only, explicitly
+set `PORTFOLIO_ENV=development PORTFOLIO_COOKIE_SECURE=false`; there are no
+default credentials or secrets. CSRF tokens are returned by session bootstrap,
+kept in frontend memory, and required on unsafe same-origin API requests.
 
 ## Non-mutating import preview
 

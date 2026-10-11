@@ -6,11 +6,45 @@ info:
 servers:
   - url: /
 paths:
+  /api/v1/auth/login:
+    post:
+      summary: Start an authenticated session
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200': { description: Authenticated session, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+        '400': { description: Invalid request }
+        '401': { description: Invalid credentials or throttled login }
+        '403': { description: Cross-origin request rejected }
+  /api/v1/auth/session:
+    get:
+      summary: Bootstrap the current session
+      operationId: getSession
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Authenticated session, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+        '401': { description: No valid session }
+  /api/v1/auth/logout:
+    post:
+      summary: End the current session
+      operationId: logout
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: X-CSRF-Token, in: header, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Session ended }
+        '401': { description: No valid session }
+        '403': { description: Invalid CSRF token or cross-origin request }
   /api/v1/portfolios/{portfolioId}/overview:
     get:
       summary: Read one portfolio overview
       description: Returns source-traceable lots and the latest immutable snapshot. Reporting currency changes only this read view.
       operationId: getPortfolioOverview
+      security: [{ sessionCookie: [] }]
       parameters:
         - name: portfolioId
           in: path
@@ -29,6 +63,10 @@ paths:
               schema: { $ref: '#/components/schemas/PortfolioOverview' }
         '400':
           description: Invalid reporting currency.
+        '401':
+          description: Authentication is required. The response is never cacheable.
+        '403':
+          description: Cross-origin or CSRF validation failed.
         '404':
           description: Portfolio or API route not found.
         '405':
@@ -36,7 +74,26 @@ paths:
         '500':
           description: Internal server error.
 components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: portfolio_session
   schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username: { type: string, minLength: 1 }
+        password: { type: string, minLength: 1, writeOnly: true }
+    Session:
+      type: object
+      required: [authenticated, csrf_token, expires_at]
+      properties:
+        authenticated: { type: boolean }
+        csrf_token: { type: string, description: In-memory token for unsafe same-origin API requests. }
+        expires_at: { type: string, format: date-time }
     PortfolioOverview:
       type: object
       required: [portfolio, reporting_currency, snapshot, allocation, holdings]
