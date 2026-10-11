@@ -48,11 +48,10 @@ type activityCursorPayload struct {
 }
 
 func canonicalActivityTime(value string) (string, time.Time, error) {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil || parsed.Year() < 1970 {
+	parsed, err := domain.ValidateObservationTimestamp(value)
+	if err != nil {
 		return "", time.Time{}, ErrInvalidActivityPagination
 	}
-	parsed = parsed.UTC()
 	return parsed.Format(activityTimestampFormat), parsed, nil
 }
 

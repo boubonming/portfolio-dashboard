@@ -233,7 +233,8 @@ function AllocationSection({ data }: { data: PortfolioOverview }) {
   )
 }
 
-function ActivityView({ page, state, error, loadingMore, appendError, announcement, loadMoreRef, statusRef, onLoadMore, onRetry }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; appendError: string; announcement: string; loadingMore: boolean; loadMoreRef: RefObject<HTMLButtonElement | null>; statusRef: RefObject<HTMLParagraphElement | null>; onLoadMore: () => void; onRetry: () => void }) {
+function ActivityView({ page, state, error, loadingMore, appendError, announcement, loadMoreRef, statusRef, onLoadMore, onRetry }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; loadingMore: boolean; appendError: string; announcement: string; loadMoreRef: RefObject<HTMLButtonElement | null>; statusRef: RefObject<HTMLParagraphElement | null>; onLoadMore: (keyboardActivated: boolean) => void; onRetry: () => void }) {
+  const keyboardActivationRef = useRef(false)
   return (
     <section className="activity-card" aria-labelledby="activity-title">
       <div className="section-heading"><div><span className="eyebrow">Audit-safe timeline</span><h2 id="activity-title">Activity</h2></div><span className="muted">Newest first</span></div>
@@ -249,7 +250,7 @@ function ActivityView({ page, state, error, loadingMore, appendError, announceme
       </ol>}
       <p ref={statusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}>{announcement}</p>
       {appendError && <p className="notice error" role="alert">{appendError} <button type="button" onClick={onRetry}>Retry loading activity</button></p>}
-      {page?.has_more && !appendError && <button ref={loadMoreRef} type="button" onClick={onLoadMore} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more activity…' : 'Load more activity'}</button>}
+      {page?.has_more && !appendError && <button ref={loadMoreRef} type="button" onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') keyboardActivationRef.current = true }} onClick={() => { const keyboardActivated = keyboardActivationRef.current; keyboardActivationRef.current = false; onLoadMore(keyboardActivated) }} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more activity…' : 'Load more activity'}</button>}
     </section>
   )
 }
@@ -416,8 +417,9 @@ export default function App() {
       })
   }, [authState, clearPrivateState, currency])
 
-  const loadActivity = useCallback((cursor: string | undefined, append: boolean) => {
+  const loadActivity = useCallback((cursor: string | undefined, append: boolean, keyboardActivated = false) => {
     if (authState !== 'authenticated' || (append && activityLoadingMoreRef.current)) return
+    const hadKeyboardFocus = append && keyboardActivated && document.activeElement === activityLoadMoreRef.current
     const authGenerationAtStart = authGeneration.current
     const generation = ++activityGeneration.current
     activityControllerRef.current?.abort()
@@ -430,7 +432,6 @@ export default function App() {
       .then((nextPage) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
         validateActivityPage(nextPage)
-        const hadLoadMoreFocus = append && document.activeElement === activityLoadMoreRef.current
         const previousItems = activityItemsRef.current
         const combined = append ? [...previousItems, ...nextPage.items] : nextPage.items
         const previousIDs = new Set(previousItems.map((item) => item.id))
@@ -450,11 +451,12 @@ export default function App() {
         if (append) {
           setActivityAnnouncement(`Loaded ${appendedCount} more activit${appendedCount === 1 ? 'y' : 'ies'}.`)
           window.setTimeout(() => {
+            if (!hadKeyboardFocus) return
             if (!nextPage.has_more && appendedItems[0]) {
               Array.from(document.querySelectorAll<HTMLElement>('[data-activity-id]')).find((node) => node.dataset.activityId === appendedItems[0].id)?.focus()
             } else if (!nextPage.has_more) {
               activityStatusRef.current?.focus()
-            } else if (hadLoadMoreFocus) {
+            } else {
               activityLoadMoreRef.current?.focus()
             }
           }, 0)
@@ -703,7 +705,7 @@ export default function App() {
         </>
       )}
       </>}
-      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={() => loadActivity(activity?.next_cursor, true)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
+      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={(keyboardActivated) => loadActivity(activity?.next_cursor, true, keyboardActivated)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
     </main>
   )
 }

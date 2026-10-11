@@ -14,6 +14,8 @@ import (
 
 const futureTimestampTolerance = domain.DefaultFutureTolerance
 
+var ErrObservationIDConflict = errors.New("observation id conflicts with existing immutable row")
+
 type QuoteInput struct {
 	ID           string
 	PortfolioIDs []string
@@ -41,20 +43,46 @@ type FXInput struct {
 	Provenance    string
 }
 
+func quotePersistenceEqual(left, right domain.Quote) bool {
+	return left.ID == right.ID && left.InstrumentID == right.InstrumentID && left.Price == right.Price &&
+		left.Currency == right.Currency && left.Source == right.Source && left.MarketAt == right.MarketAt &&
+		left.FetchedAt == right.FetchedAt && left.Basis == right.Basis && left.Provenance == right.Provenance
+}
+
+func fxPersistenceEqual(left, right domain.FXRate) bool {
+	return left.ID == right.ID && left.BaseCurrency == right.BaseCurrency && left.QuoteCurrency == right.QuoteCurrency &&
+		left.Rate == right.Rate && left.Source == right.Source && left.MarketAt == right.MarketAt &&
+		left.FetchedAt == right.FetchedAt && left.Basis == right.Basis && left.Provenance == right.Provenance
+}
+
+func readExistingQuote(ctx context.Context, tx *sql.Tx, id string) (domain.Quote, error) {
+	var quote domain.Quote
+	err := tx.QueryRowContext(ctx, `SELECT id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance FROM quotes WHERE id = ?`, id).
+		Scan(&quote.ID, &quote.InstrumentID, &quote.Price, &quote.Currency, &quote.Source, &quote.MarketAt, &quote.FetchedAt, &quote.Basis, &quote.Provenance)
+	return quote, err
+}
+
+func readExistingFX(ctx context.Context, tx *sql.Tx, id string) (domain.FXRate, error) {
+	var fx domain.FXRate
+	err := tx.QueryRowContext(ctx, `SELECT id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance FROM fx_rates WHERE id = ?`, id).
+		Scan(&fx.ID, &fx.BaseCurrency, &fx.QuoteCurrency, &fx.Rate, &fx.Source, &fx.MarketAt, &fx.FetchedAt, &fx.Basis, &fx.Provenance)
+	return fx, err
+}
+
 func normalizeObservation(value string, allowEmpty bool, now time.Time) (string, error) {
 	if strings.TrimSpace(value) == "" && allowEmpty {
 		value = now.UTC().Format(activityTimestampFormat)
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
-	if err != nil || parsed.Year() < 1970 {
+	parsed, err := domain.ValidateObservationTimestamp(value)
+	if err != nil {
 		return "", fmt.Errorf("invalid timestamp %q", value)
 	}
 	return parsed.UTC().Format(activityTimestampFormat), nil
 }
 
 func validateObservationTimes(now time.Time, marketAt, fetchedAt string) error {
-	market, marketErr := time.Parse(time.RFC3339Nano, marketAt)
-	fetched, fetchedErr := time.Parse(time.RFC3339Nano, fetchedAt)
+	market, marketErr := domain.ValidateObservationTimestamp(marketAt)
+	fetched, fetchedErr := domain.ValidateObservationTimestamp(fetchedAt)
 	if marketErr != nil || fetchedErr != nil {
 		return errors.Join(marketErr, fetchedErr)
 	}
@@ -138,8 +166,12 @@ func (s *Store) AddQuote(ctx context.Context, input QuoteInput) (domain.Quote, e
 	}
 	inserted, _ := result.RowsAffected()
 	if inserted == 0 {
-		if err = tx.QueryRowContext(ctx, `SELECT id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance FROM quotes WHERE id = ?`, quote.ID).Scan(&quote.ID, &quote.InstrumentID, &quote.Price, &quote.Currency, &quote.Source, &quote.MarketAt, &quote.FetchedAt, &quote.Basis, &quote.Provenance); err != nil {
-			return domain.Quote{}, fmt.Errorf("read existing quote: %w", err)
+		existing, readErr := readExistingQuote(ctx, tx, quote.ID)
+		if readErr != nil {
+			return domain.Quote{}, fmt.Errorf("read existing quote: %w", readErr)
+		}
+		if !quotePersistenceEqual(quote, existing) {
+			return domain.Quote{}, fmt.Errorf("%w: quote %s", ErrObservationIDConflict, quote.ID)
 		}
 		if err = tx.Commit(); err != nil {
 			return domain.Quote{}, err
@@ -204,6 +236,14 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	if err := validatePortfolioAssociations(input.PortfolioIDs, portfolioIDs); err != nil {
 		return domain.FXRate{}, err
 	}
+	if existing, readErr := readExistingFX(ctx, tx, fx.ID); readErr == nil {
+		if !fxPersistenceEqual(fx, existing) {
+			return domain.FXRate{}, fmt.Errorf("%w: FX rate %s", ErrObservationIDConflict, fx.ID)
+		}
+		return fx, tx.Commit()
+	} else if readErr != sql.ErrNoRows {
+		return domain.FXRate{}, fmt.Errorf("read existing FX rate: %w", readErr)
+	}
 	var reverseCount int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM fx_rates WHERE base_currency = ? AND quote_currency = ?`, fx.QuoteCurrency, fx.BaseCurrency).Scan(&reverseCount); err != nil {
 		return domain.FXRate{}, fmt.Errorf("check FX pair orientation: %w", err)
@@ -217,8 +257,12 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	}
 	inserted, _ := result.RowsAffected()
 	if inserted == 0 {
-		if err = tx.QueryRowContext(ctx, `SELECT id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance FROM fx_rates WHERE id = ?`, fx.ID).Scan(&fx.ID, &fx.BaseCurrency, &fx.QuoteCurrency, &fx.Rate, &fx.Source, &fx.MarketAt, &fx.FetchedAt, &fx.Basis, &fx.Provenance); err != nil {
-			return domain.FXRate{}, fmt.Errorf("read existing FX rate: %w", err)
+		existing, readErr := readExistingFX(ctx, tx, fx.ID)
+		if readErr != nil {
+			return domain.FXRate{}, fmt.Errorf("read existing FX rate: %w", readErr)
+		}
+		if !fxPersistenceEqual(fx, existing) {
+			return domain.FXRate{}, fmt.Errorf("%w: FX rate %s", ErrObservationIDConflict, fx.ID)
 		}
 		if err = tx.Commit(); err != nil {
 			return domain.FXRate{}, err
@@ -266,6 +310,13 @@ func (s *Store) persistQuoteTx(ctx context.Context, tx *sql.Tx, quote domain.Quo
 	}
 	inserted, _ := result.RowsAffected()
 	if inserted == 0 {
+		existing, readErr := readExistingQuote(ctx, tx, quote.ID)
+		if readErr != nil {
+			return fmt.Errorf("read existing quote: %w", readErr)
+		}
+		if !quotePersistenceEqual(quote, existing) {
+			return fmt.Errorf("%w: quote %s", ErrObservationIDConflict, quote.ID)
+		}
 		return nil
 	}
 	payload, _ := json.Marshal(quote)
@@ -297,6 +348,14 @@ func (s *Store) persistFXTx(ctx context.Context, tx *sql.Tx, fx domain.FXRate, p
 	if err := validatePortfolioAssociationsSubset(activityIDs, portfolioIDs); err != nil {
 		return err
 	}
+	if existing, readErr := readExistingFX(ctx, tx, fx.ID); readErr == nil {
+		if !fxPersistenceEqual(fx, existing) {
+			return fmt.Errorf("%w: FX rate %s", ErrObservationIDConflict, fx.ID)
+		}
+		return nil
+	} else if readErr != sql.ErrNoRows {
+		return fmt.Errorf("read existing FX rate: %w", readErr)
+	}
 	var reverseCount int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM fx_rates WHERE base_currency=? AND quote_currency=?`, fx.QuoteCurrency, fx.BaseCurrency).Scan(&reverseCount); err != nil {
 		return err
@@ -310,6 +369,13 @@ func (s *Store) persistFXTx(ctx context.Context, tx *sql.Tx, fx domain.FXRate, p
 	}
 	inserted, _ := result.RowsAffected()
 	if inserted == 0 {
+		existing, readErr := readExistingFX(ctx, tx, fx.ID)
+		if readErr != nil {
+			return fmt.Errorf("read existing FX rate: %w", readErr)
+		}
+		if !fxPersistenceEqual(fx, existing) {
+			return fmt.Errorf("%w: FX rate %s", ErrObservationIDConflict, fx.ID)
+		}
 		return nil
 	}
 	payload, _ := json.Marshal(fx)

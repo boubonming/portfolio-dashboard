@@ -41,6 +41,35 @@ type refreshObservations struct {
 
 var errRefreshProviderContract = errors.New("provider response does not match request")
 
+func markRefreshObservationConflict(result *domain.RefreshResult, provider, observationID string) {
+	for index := range result.Providers {
+		status := &result.Providers[index]
+		if status.Provider != provider {
+			continue
+		}
+		if status.SucceededCount > 0 {
+			status.SucceededCount--
+		}
+		status.FailedCount++
+		status.Status = "incomplete"
+		status.Errors = append(status.Errors, "persistence")
+		for idIndex, id := range status.ObservationIDs {
+			if id == observationID {
+				status.ObservationIDs = append(status.ObservationIDs[:idIndex], status.ObservationIDs[idIndex+1:]...)
+				break
+			}
+		}
+		break
+	}
+	for index, id := range result.ObservationIDs {
+		if id == observationID {
+			result.ObservationIDs = append(result.ObservationIDs[:index], result.ObservationIDs[index+1:]...)
+			break
+		}
+	}
+	result.Status = "incomplete"
+}
+
 func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.RefreshResult, error) {
 	if options.PortfolioID == "" {
 		options.PortfolioID = defaultPortfolioID
@@ -89,11 +118,6 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 		}
 	}
 	result.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	payload, _ := json.Marshal(struct {
-		RefreshID string                         `json:"refresh_id"`
-		Status    string                         `json:"status"`
-		Providers []domain.ProviderRefreshStatus `json:"providers"`
-	}{result.RefreshID, result.Status, result.Providers})
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.RefreshResult{}, err
@@ -101,14 +125,27 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 	defer tx.Rollback()
 	for _, quote := range observations.quotes {
 		if err := s.persistQuoteTx(ctx, tx, quote, []string{options.PortfolioID}); err != nil {
+			if errors.Is(err, ErrObservationIDConflict) {
+				markRefreshObservationConflict(&result, quote.Source, quote.ID)
+				continue
+			}
 			return domain.RefreshResult{}, err
 		}
 	}
 	for _, fx := range observations.fx {
 		if err := s.persistFXTx(ctx, tx, fx, []string{options.PortfolioID}); err != nil {
+			if errors.Is(err, ErrObservationIDConflict) {
+				markRefreshObservationConflict(&result, fx.Source, fx.ID)
+				continue
+			}
 			return domain.RefreshResult{}, err
 		}
 	}
+	payload, _ := json.Marshal(struct {
+		RefreshID string                         `json:"refresh_id"`
+		Status    string                         `json:"status"`
+		Providers []domain.ProviderRefreshStatus `json:"providers"`
+	}{result.RefreshID, result.Status, result.Providers})
 	for _, status := range result.Providers {
 		if err := s.persistRefreshRunTx(ctx, tx, result.RefreshID, options.PortfolioID, status, started); err != nil {
 			return domain.RefreshResult{}, err
