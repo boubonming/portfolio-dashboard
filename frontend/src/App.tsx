@@ -98,7 +98,7 @@ export type ActivityItem = {
 
 export type ActivityPage = {
   items: ActivityItem[]
-  next_offset?: number
+  next_cursor?: string
   has_more: boolean
 }
 
@@ -233,21 +233,22 @@ function AllocationSection({ data }: { data: PortfolioOverview }) {
   )
 }
 
-function ActivityView({ page, state, error, onLoadMore }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; onLoadMore: () => void }) {
+function ActivityView({ page, state, error, loadingMore, appendError, onLoadMore, onRetry }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; loadingMore: boolean; appendError: string; onLoadMore: () => void; onRetry: () => void }) {
   return (
     <section className="activity-card" aria-labelledby="activity-title">
       <div className="section-heading"><div><span className="eyebrow">Audit-safe timeline</span><h2 id="activity-title">Activity</h2></div><span className="muted">Newest first</span></div>
-      {state === 'loading' && <p role="status" aria-live="polite">Loading activity…</p>}
-      {state === 'error' && <p className="notice error" role="alert">{error}</p>}
-      {state === 'ready' && page && page.items.length === 0 && <p className="empty">No activity recorded for this portfolio.</p>}
-      {state === 'ready' && page && page.items.length > 0 && <ol className="activity-list" aria-label="Portfolio activity">
+      {state === 'loading' && !page && <p role="status" aria-live="polite">Loading activity…</p>}
+      {state === 'error' && !page && <p className="notice error" role="alert">{error}<br /><button type="button" onClick={onRetry}>Try again</button></p>}
+      {page && page.items.length === 0 && state !== 'loading' && <p className="empty">No activity recorded for this portfolio.</p>}
+      {page && page.items.length > 0 && <ol className="activity-list" aria-label="Portfolio activity">
         {page.items.map((item) => <li className="activity-item" key={item.id}>
           <div className="activity-heading"><strong>{item.summary}</strong><time dateTime={item.occurred_at}>{displayDate(item.occurred_at)}</time></div>
           <div className="activity-meta"><span>{item.action}</span><span>Actor: {item.actor_category}</span></div>
           {item.details && <p>{item.details}</p>}
         </li>)}
       </ol>}
-      {state === 'ready' && page?.has_more && <button type="button" onClick={onLoadMore}>Load more activity</button>}
+      {appendError && <p className="notice error" role="alert">{appendError} <button type="button" onClick={onRetry}>Retry loading activity</button></p>}
+      {page?.has_more && !appendError && <button type="button" onClick={onLoadMore} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more activity…' : 'Load more activity'}</button>}
     </section>
   )
 }
@@ -300,6 +301,8 @@ export default function App() {
   const [activity, setActivity] = useState<ActivityPage | null>(null)
   const [activityState, setActivityState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [activityError, setActivityError] = useState('')
+  const [activityLoadingMore, setActivityLoadingMore] = useState(false)
+  const [activityAppendError, setActivityAppendError] = useState('')
   const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState('')
@@ -311,6 +314,7 @@ export default function App() {
   const authControllerRef = useRef<AbortController | null>(null)
   const loadControllerRef = useRef<AbortController | null>(null)
   const activityControllerRef = useRef<AbortController | null>(null)
+  const activityLoadingMoreRef = useRef(false)
   const authGeneration = useRef(0)
   const loadGeneration = useRef(0)
   const activityGeneration = useRef(0)
@@ -328,7 +332,8 @@ export default function App() {
     activityControllerRef.current = null
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
-    setData(null); setActivity(null); setError(''); setActivityError(''); setState('loading'); setActivityState('loading')
+    activityLoadingMoreRef.current = false
+    setData(null); setActivity(null); setError(''); setActivityError(''); setActivityAppendError(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -371,37 +376,49 @@ export default function App() {
       })
   }, [authState, clearPrivateState, currency])
 
-  const loadActivity = useCallback((offset: number, append: boolean) => {
-    if (authState !== 'authenticated') return
+  const loadActivity = useCallback((cursor: string | undefined, append: boolean) => {
+    if (authState !== 'authenticated' || (append && activityLoadingMoreRef.current)) return
     const authGenerationAtStart = authGeneration.current
     const generation = ++activityGeneration.current
     activityControllerRef.current?.abort()
     const controller = new AbortController()
     activityControllerRef.current = controller
-    setActivityState('loading')
-    setActivityError('')
-    apiFetch(`/api/v1/portfolios/portfolio-default/activity?limit=20&offset=${offset}`, { signal: controller.signal })
+    if (append) { activityLoadingMoreRef.current = true; setActivityLoadingMore(true); setActivityAppendError('') } else { setActivityState('loading'); setActivityError(''); setActivityAppendError('') }
+    const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
+    apiFetch(`/api/v1/portfolios/portfolio-default/activity?limit=20${query}`, { signal: controller.signal })
       .then((response) => jsonResponse<ActivityPage>(response))
       .then((nextPage) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
-        setActivity((previous) => append && previous ? { ...nextPage, items: [...previous.items, ...nextPage.items] } : nextPage)
+        const validCursor = typeof nextPage.next_cursor === 'string' && nextPage.next_cursor.length >= 16 && nextPage.next_cursor.length <= 512 && /^[A-Za-z0-9_-]+$/.test(nextPage.next_cursor)
+        if (!Array.isArray(nextPage.items) || typeof nextPage.has_more !== 'boolean' || (nextPage.has_more && !validCursor) || (!nextPage.has_more && nextPage.next_cursor)) throw new Error('Invalid activity pagination response')
+        setActivity((previous) => {
+          const combined = append && previous ? [...previous.items, ...nextPage.items] : nextPage.items
+          const unique = new Map(combined.map((item) => [item.id, item]))
+          const items = [...unique.values()].sort((left, right) => right.occurred_at.localeCompare(left.occurred_at) || right.id.localeCompare(left.id))
+          return { ...nextPage, items }
+        })
+        activityLoadingMoreRef.current = false
+        setActivityLoadingMore(false)
+        setActivityAppendError('')
         setActivityState('ready')
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
         if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
-        setActivityError(reason instanceof Error ? reason.message : 'Unable to load activity')
-        setActivityState('error')
+        if (append) { activityLoadingMoreRef.current = false; setActivityLoadingMore(false); setActivityAppendError(reason instanceof Error ? reason.message : 'Unable to load activity') }
+        else { setActivityError(reason instanceof Error ? reason.message : 'Unable to load activity'); setActivityState('error') }
       })
   }, [authState, clearPrivateState])
 
   useEffect(() => {
     if (authState !== 'authenticated' || view !== 'activity') return
-    loadActivity(0, false)
+    loadActivity(undefined, false)
     return () => {
       activityGeneration.current += 1
       activityControllerRef.current?.abort()
       activityControllerRef.current = null
+      activityLoadingMoreRef.current = false
+      setActivityLoadingMore(false)
     }
   }, [authState, loadActivity, view])
 
@@ -625,7 +642,7 @@ export default function App() {
         </>
       )}
       </>}
-      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} onLoadMore={() => loadActivity(activity?.next_offset ?? 0, true)} />}
+      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} onLoadMore={() => loadActivity(activity?.next_cursor, true)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
     </main>
   )
 }

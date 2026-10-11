@@ -383,6 +383,6 @@ func (s *Store) persistRefreshRun(ctx context.Context, refreshID, portfolioID st
 		classification = status.Errors[0]
 	}
 	id := deterministicID("refresh-run", refreshID, status.Provider)
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO refresh_runs(id,portfolio_id,provider,status,started_at,ended_at,request_count,succeeded_count,failed_count,missing_mapping_count,error_classification) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, portfolioID, status.Provider, status.Status, started.Format(time.RFC3339Nano), ended.Format(time.RFC3339Nano), status.RequestCount, status.SucceededCount, status.FailedCount, status.MissingMapping, classification)
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO refresh_runs(id,portfolio_id,provider,status,started_at,ended_at,request_count,succeeded_count,failed_count,missing_mapping_count,error_classification,refresh_group_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, portfolioID, status.Provider, status.Status, started.Format(time.RFC3339Nano), ended.Format(time.RFC3339Nano), status.RequestCount, status.SucceededCount, status.FailedCount, status.MissingMapping, classification, refreshID)
 	return err
 }

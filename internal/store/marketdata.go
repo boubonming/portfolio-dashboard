@@ -116,6 +116,13 @@ func (s *Store) AddQuote(ctx context.Context, input QuoteInput) (domain.Quote, e
 		return domain.Quote{}, err
 	}
 	defer tx.Rollback()
+	portfolioIDs, err := portfoliosForInstrument(ctx, tx, quote.InstrumentID)
+	if err != nil {
+		return domain.Quote{}, fmt.Errorf("find quote portfolios: %w", err)
+	}
+	if err := validatePortfolioAssociations(input.PortfolioIDs, portfolioIDs); err != nil {
+		return domain.Quote{}, err
+	}
 	result, insertErr := tx.ExecContext(ctx, `INSERT INTO quotes(id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, quote.ID, quote.InstrumentID, quote.Price, quote.Currency, quote.Source, quote.MarketAt, quote.FetchedAt, quote.Basis, quote.Provenance)
 	if insertErr != nil {
 		return domain.Quote{}, fmt.Errorf("persist quote: %w", insertErr)
@@ -133,13 +140,6 @@ func (s *Store) AddQuote(ctx context.Context, input QuoteInput) (domain.Quote, e
 	payload, _ := json.Marshal(quote)
 	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, deterministicID("audit", "quote", quote.ID), "administrative-quote", "market.quote.added", "quote", quote.ID, payload, fetchedAt); err != nil {
 		return domain.Quote{}, fmt.Errorf("audit quote: %w", err)
-	}
-	portfolioIDs := input.PortfolioIDs
-	if len(portfolioIDs) == 0 {
-		portfolioIDs, err = portfoliosForInstrument(ctx, tx, quote.InstrumentID)
-		if err != nil {
-			return domain.Quote{}, fmt.Errorf("find quote portfolios: %w", err)
-		}
 	}
 	auditID := deterministicID("audit", "quote", quote.ID)
 	if err := s.recordActivityForPortfolios(ctx, tx, portfolioIDs, "administrative", "market.quote.added", "quote", quote.ID, fetchedAt, auditID); err != nil {
@@ -187,6 +187,13 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 		return domain.FXRate{}, err
 	}
 	defer tx.Rollback()
+	portfolioIDs, err := portfoliosForFX(ctx, tx, fx.BaseCurrency, fx.QuoteCurrency)
+	if err != nil {
+		return domain.FXRate{}, fmt.Errorf("find FX portfolios: %w", err)
+	}
+	if err := validatePortfolioAssociations(input.PortfolioIDs, portfolioIDs); err != nil {
+		return domain.FXRate{}, err
+	}
 	var reverseCount int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM fx_rates WHERE base_currency = ? AND quote_currency = ?`, fx.QuoteCurrency, fx.BaseCurrency).Scan(&reverseCount); err != nil {
 		return domain.FXRate{}, fmt.Errorf("check FX pair orientation: %w", err)
@@ -211,13 +218,6 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	payload, _ := json.Marshal(fx)
 	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, deterministicID("audit", "fx", fx.ID), "administrative-fx", "market.fx.added", "fx_rate", fx.ID, payload, fetchedAt); err != nil {
 		return domain.FXRate{}, fmt.Errorf("audit FX rate: %w", err)
-	}
-	portfolioIDs := input.PortfolioIDs
-	if len(portfolioIDs) == 0 {
-		portfolioIDs, err = portfoliosForFX(ctx, tx, fx.BaseCurrency, fx.QuoteCurrency)
-		if err != nil {
-			return domain.FXRate{}, fmt.Errorf("find FX portfolios: %w", err)
-		}
 	}
 	auditID := deterministicID("audit", "fx", fx.ID)
 	if err := s.recordActivityForPortfolios(ctx, tx, portfolioIDs, "administrative", "market.fx.added", "fx_rate", fx.ID, fetchedAt, auditID); err != nil {

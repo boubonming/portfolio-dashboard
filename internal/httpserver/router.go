@@ -213,12 +213,12 @@ func portfolioActivity(database *store.Store) http.HandlerFunc {
 		}
 		query := r.URL.Query()
 		for key, values := range query {
-			if (key != "limit" && key != "offset") || len(values) != 1 || values[0] == "" {
+			if (key != "limit" && key != "cursor") || len(values) != 1 || values[0] == "" {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_pagination"})
 				return
 			}
 		}
-		options, err := store.ParseActivityPagination(query.Get("limit"), query.Get("offset"))
+		options, err := store.ParseActivityPagination(query.Get("limit"), query.Get("cursor"))
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_pagination"})
 			return

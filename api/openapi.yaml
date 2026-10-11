@@ -88,10 +88,11 @@ paths:
           in: query
           required: false
           schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
-        - name: offset
+        - name: cursor
           in: query
           required: false
-          schema: { type: integer, minimum: 0, maximum: 100000, default: 0 }
+          description: Opaque signed cursor returned by the previous page. It encodes the occurred_at/id keyset position.
+          schema: { type: string, minLength: 16, maxLength: 512 }
       responses:
         '200': { description: Activity page, content: { application/json: { schema: { $ref: '#/components/schemas/ActivityPage' } } } }
         '400': { description: Malformed or out-of-bounds pagination }
@@ -233,14 +234,23 @@ components:
         market_at: { type: string, format: date-time }
         age: { type: string }
     ActivityPage:
+      oneOf:
+        - $ref: '#/components/schemas/ActivityPageMore'
+        - $ref: '#/components/schemas/ActivityPageFinal'
+    ActivityPageMore:
+      type: object
+      required: [items, has_more, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Activity' } }
+        next_cursor: { type: string, minLength: 16, maxLength: 512 }
+        has_more: { type: boolean, enum: [true] }
+    ActivityPageFinal:
       type: object
       required: [items, has_more]
       properties:
-        items:
-          type: array
-          items: { $ref: '#/components/schemas/Activity' }
-        next_offset: { type: integer, minimum: 0 }
-        has_more: { type: boolean }
+        items: { type: array, items: { $ref: '#/components/schemas/Activity' } }
+        next_cursor: { type: string, maxLength: 0 }
+        has_more: { type: boolean, enum: [false] }
     Activity:
       type: object
       required: [id, portfolio_id, action, category, actor_category, occurred_at, summary]

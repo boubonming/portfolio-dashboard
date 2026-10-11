@@ -460,8 +460,8 @@ describe('Portfolio Dashboard', () => {
   it('loads safe authenticated activity with bounded load-more pagination', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
-      if (url.includes('/activity') && url.includes('offset=1')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-two', portfolio_id: 'portfolio-default', action: 'portfolio.snapshot.created', category: 'portfolio', actor_category: 'system', occurred_at: '2026-01-02T12:00:00Z', summary: 'Immutable snapshot created' }], has_more: false }) } as Response)
-      if (url.includes('/activity')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T11:00:00Z', summary: 'Manual quote added', details: 'A safe summary' }], next_offset: 1, has_more: true }) } as Response)
+      if (url.includes('/activity') && url.includes('cursor=Y3Vyc29yLW9uZS0xMjM')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-two', portfolio_id: 'portfolio-default', action: 'portfolio.snapshot.created', category: 'portfolio', actor_category: 'system', occurred_at: '2026-01-02T12:00:00Z', summary: 'Immutable snapshot created' }], has_more: false }) } as Response)
+      if (url.includes('/activity')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T11:00:00Z', summary: 'Manual quote added', details: 'A safe summary' }], next_cursor: 'Y3Vyc29yLW9uZS0xMjM', has_more: true }) } as Response)
       return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
     })
     vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
@@ -474,6 +474,6 @@ describe('Portfolio Dashboard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load more activity' }))
     await waitFor(() => expect(screen.getByText('Immutable snapshot created')).toBeTruthy())
     expect(screen.queryByRole('button', { name: 'Load more activity' })).toBeNull()
-    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/activity?limit=20&offset=1'))).toBe(true)
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/activity?limit=20&cursor=Y3Vyc29yLW9uZS0xMjM'))).toBe(true)
   })
 })
