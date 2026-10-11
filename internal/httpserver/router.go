@@ -36,6 +36,13 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", health)
+	// Register the namespace roots explicitly. Without these exact patterns,
+	// ServeMux redirects a slashless API prefix to its slash-suffixed handler,
+	// which turns an API error into an HTML redirect response.
+	mux.HandleFunc("/api", apiNotFound)
+	mux.HandleFunc("/api/v1", apiNotFound)
+	mux.HandleFunc("/api/v1/auth", apiNotFound)
+	mux.HandleFunc("/api/v1/portfolios", apiNotFound)
 	mux.HandleFunc("/api/v1/auth/", authRoutes(authenticator))
 	portfolio := http.Handler(portfolioOverview(database))
 	if authenticator != nil {
@@ -48,7 +55,17 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 	return mux, nil
 }
 
-func health(w http.ResponseWriter, _ *http.Request) {
+func health(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 func apiNotFound(w http.ResponseWriter, _ *http.Request) {

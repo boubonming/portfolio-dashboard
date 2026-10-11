@@ -149,7 +149,9 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request, request Lo
 	}
 	a.sessions[hashID(id)] = s
 	a.mu.Unlock()
-	token, err := a.sign(tokenPayload{ID: id, CSRFToken: csrf, IssuedAt: now.Unix(), ExpiresAt: s.ExpiresAt.Unix()})
+	// Keep sub-second precision in the signed token. Unix-second truncation
+	// makes a one-second session valid for less than its configured lifetime.
+	token, err := a.sign(tokenPayload{ID: id, CSRFToken: csrf, IssuedAt: now.UnixNano(), ExpiresAt: s.ExpiresAt.UnixNano()})
 	if err != nil {
 		return SessionResponse{}, false
 	}
@@ -167,7 +169,7 @@ func (a *Authenticator) Session(r *http.Request) (session, error) {
 		return session{}, ErrUnauthenticated
 	}
 	now := a.now()
-	if payload.ExpiresAt <= now.Unix() || payload.IssuedAt > now.Add(time.Minute).Unix() {
+	if payload.ExpiresAt <= now.UnixNano() || payload.IssuedAt > now.Add(time.Minute).UnixNano() {
 		return session{}, ErrUnauthenticated
 	}
 	a.mu.Lock()

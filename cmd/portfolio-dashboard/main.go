@@ -41,15 +41,21 @@ func main() {
 		fatal(err)
 	}
 	fmt.Fprintf(os.Stderr, "portfolio dashboard listening on %s\n", cfg.BindAddress)
-	server := &http.Server{
-		Addr:              cfg.BindAddress,
+	server := newHTTPServer(cfg.BindAddress, handler)
+	fatal(server.ListenAndServe())
+}
+
+// newHTTPServer centralizes the production timeout policy so it can be
+// exercised without starting a listener in tests.
+func newHTTPServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              address,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	fatal(server.ListenAndServe())
 }
 
 func runCommand(command string, args []string) error {

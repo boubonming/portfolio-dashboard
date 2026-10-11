@@ -222,17 +222,26 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
   const [state, setState] = useState<'idle' | 'submitting'>('idle')
   const [error, setError] = useState('')
   const usernameRef = useRef<HTMLInputElement>(null)
+  const mountedRef = useRef(true)
   useEffect(() => { usernameRef.current?.focus() }, [])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setState('submitting'); setError('')
     try {
       const message = await onLogin(username, password)
+      if (!mountedRef.current) return
       if (message) setError(message)
       else setPassword('')
     } catch (reason) {
+      if (!mountedRef.current) return
       setError(reason instanceof Error ? reason.message : 'Unable to sign in')
-    } finally { setPassword(''); setState('idle') }
+    } finally {
+      if (mountedRef.current) { setPassword(''); setState('idle') }
+    }
   }
   return <main className="shell login-shell">
     <header className="brand"><span className="eyebrow">Private workspace</span><h1>Portfolio Dashboard</h1><p className="muted">Sign in to view your private portfolio.</p></header>
@@ -370,11 +379,13 @@ export default function App() {
       const response = await apiFetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }), signal: controller.signal })
       if (!response.ok) return 'Unable to sign in right now.'
       const session = await response.json() as AuthSession
-      if (!current() || session.authenticated !== true || !session.csrf_token || !session.expires_at || !scheduleExpiry(session.expires_at, generation, controller)) return 'Unable to sign in right now.'
+      if (!current()) return null
+      if (session.authenticated !== true || !session.csrf_token || !session.expires_at || !scheduleExpiry(session.expires_at, generation, controller)) return 'Unable to sign in right now.'
       csrfToken.current = session.csrf_token
       setAuthState('authenticated')
       return null
     } catch (reason) {
+      if (!current()) return null
       return reason instanceof APIError && reason.status === 401 ? 'Sign-in failed. Check your username and password.' : 'Unable to sign in right now.'
     } finally {
       if (authControllerRef.current === controller) authControllerRef.current = null

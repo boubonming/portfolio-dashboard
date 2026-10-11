@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -156,4 +157,80 @@ func TestSameOriginRequiresAtLeastOneHeader(t *testing.T) {
 	if authenticator.SameOrigin(request) {
 		t.Fatal("request without origin headers was accepted")
 	}
+}
+
+func TestSessionExpiryRetainsSubSecondPrecision(t *testing.T) {
+	clock := time.Date(2026, time.January, 2, 12, 0, 0, int(500*time.Millisecond), time.UTC)
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := New(Config{
+		Username: "fixture-user", PasswordHash: string(hash),
+		SessionSecret: base64.StdEncoding.EncodeToString([]byte("fixture-session-secret-with-enough-diversity-123")),
+		PublicOrigin:  "https://example.test", CookieSecure: true, SessionTTL: time.Second,
+		Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	result, ok := authenticator.Login(response, httptest.NewRequest(http.MethodPost, "/login", nil), LoginRequest{Username: "fixture-user", Password: "fixture-only-value"})
+	if !ok || !result.Authenticated {
+		t.Fatalf("login result = %+v, ok=%v", result, ok)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/session", nil)
+	request.AddCookie(response.Result().Cookies()[0])
+	clock = clock.Add(999 * time.Millisecond)
+	if _, err := authenticator.Session(request); err != nil {
+		t.Fatalf("session expired early: %v", err)
+	}
+	clock = clock.Add(time.Millisecond)
+	if _, err := authenticator.Session(request); err == nil {
+		t.Fatal("session remained valid at its precise expiry")
+	}
+}
+
+func TestLoginAdmissionIsBoundedAcrossUsernameChurnAndRecoversByClock(t *testing.T) {
+	clock := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)
+	authenticator := fixtureAuthenticatorWithClock(t, &clock)
+	var group sync.WaitGroup
+	for index := 0; index < 20; index++ {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			_, _ = authenticator.Login(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/login", nil), LoginRequest{Username: "churn-" + string(rune('a'+index)), Password: "wrong"})
+		}(index)
+	}
+	group.Wait()
+	authenticator.mu.Lock()
+	attempt := authenticator.attempts["global"]
+	authenticator.mu.Unlock()
+	if attempt.Failures < 1 || attempt.Failures > maxLoginAttempts || attempt.InFlight != 0 {
+		t.Fatalf("parallel admission state = %+v", attempt)
+	}
+	clock = clock.Add(loginWindow)
+	_, _ = authenticator.Login(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/login", nil), LoginRequest{Username: "after-window", Password: "wrong"})
+	authenticator.mu.Lock()
+	recovered := authenticator.attempts["global"]
+	authenticator.mu.Unlock()
+	if recovered.Failures != 1 || recovered.WindowStart != clock {
+		t.Fatalf("recovered admission state = %+v, clock=%s", recovered, clock)
+	}
+}
+
+func fixtureAuthenticatorWithClock(t *testing.T, clock *time.Time) *Authenticator {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := New(Config{
+		Username: "fixture-user", PasswordHash: string(hash), SessionSecret: base64.StdEncoding.EncodeToString([]byte("fixture-session-secret-with-enough-diversity-123")),
+		PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour, Now: func() time.Time { return *clock },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authenticator
 }

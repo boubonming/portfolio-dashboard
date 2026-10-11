@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App, { compareDecimalStrings, type PortfolioOverview } from './App'
 
@@ -42,6 +43,12 @@ const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
 const authenticatedSession = { ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: expiresAt }) } as Response
 function authenticatedFetch(handler: (input: RequestInfo | URL, init?: RequestInit) => Response | Promise<Response>) {
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).includes('/api/v1/auth/session') ? Promise.resolve(authenticatedSession) : handler(input, init))
+}
+
+async function flushEffects() {
+  await act(async () => {
+    for (let index = 0; index < 10; index += 1) await Promise.resolve()
+  })
 }
 
 afterEach(() => {
@@ -270,6 +277,7 @@ describe('Portfolio Dashboard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
     expect((globalThis.localStorage?.length ?? 0)).toBe(0)
+    expect((globalThis.sessionStorage?.length ?? 0)).toBe(0)
   })
 
   it('shows a uniform login failure without revealing which credential failed', async () => {
@@ -321,5 +329,131 @@ describe('Portfolio Dashboard', () => {
     resolveOverview?.({ ok: true, status: 200, json: async () => completeOverview } as Response)
     await Promise.resolve()
     expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+  })
+
+  it('clears private state and focuses login when the absolute session expiry fires', async () => {
+    vi.useFakeTimers()
+    try {
+      const expiry = new Date(Date.now() + 1000).toISOString()
+      const fetchMock = vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes('/api/v1/auth/session')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: expiry }) } as Response)
+        return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      render(<App />)
+      await flushEffects()
+      expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy()
+      await act(async () => { vi.advanceTimersByTime(999) })
+      expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy()
+      await act(async () => { vi.advanceTimersByTime(1) })
+      expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy()
+      expect(screen.getByRole('alert').textContent).toMatch(/session expired/i)
+      expect(document.activeElement).toBe(screen.getByLabelText('Username'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not let a stale StrictMode bootstrap completion replace the active expiry timer', async () => {
+    vi.useFakeTimers()
+    try {
+      const sessions: Array<(response: Response) => void> = []
+      const shortExpiry = new Date(Date.now() + 1000).toISOString()
+      const longExpiry = new Date(Date.now() + 60_000).toISOString()
+      const fetchMock = vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes('/api/v1/auth/session')) return new Promise<Response>((resolve) => { sessions.push(resolve) })
+        return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      render(<StrictMode><App /></StrictMode>)
+      expect(sessions).toHaveLength(2)
+      sessions[1]({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'active-token', expires_at: shortExpiry }) } as Response)
+      await flushEffects()
+      expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy()
+      sessions[0]({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'stale-token', expires_at: longExpiry }) } as Response)
+      await flushEffects()
+      await act(async () => { vi.advanceTimersByTime(1000) })
+      expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears private data and focuses login after a private overview 401', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve(authenticatedSession)
+      if (url.includes('/api/v1/portfolios/')) return Promise.resolve({ ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: false }) } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+    expect(document.activeElement).toBe(screen.getByLabelText('Username'))
+  })
+
+  it('sends the in-memory CSRF token on successful logout without a false warning', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve(authenticatedSession)
+      if (url.includes('/api/v1/auth/logout')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: false }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    const logoutCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/api/v1/auth/logout'))
+    expect(new Headers(logoutCall?.[1]?.headers as HeadersInit).get('X-CSRF-Token')).toBe('fixture-token')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+  })
+
+  it('aborts bootstrap, login, and overview work when the app unmounts', async () => {
+    let bootstrapInit: RequestInit | undefined
+    let resolveSession: ((response: Response) => void) | undefined
+    const bootstrapFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      bootstrapInit = init
+      return new Promise<Response>((resolve) => { resolveSession = resolve })
+    })
+    vi.stubGlobal('fetch', bootstrapFetch)
+    const bootstrap = render(<App />)
+    bootstrap.unmount()
+    expect(bootstrapInit?.signal && (bootstrapInit.signal as AbortSignal).aborted).toBe(true)
+
+    let loginInit: RequestInit | undefined
+    const loginFetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve({ ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) } as Response)
+      loginInit = init
+      return new Promise<Response>(() => undefined)
+    })
+    vi.stubGlobal('fetch', loginFetch)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'fixture-user' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'fixture-only-value' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    await waitFor(() => expect(loginInit).toBeTruthy())
+    cleanup()
+    expect(loginInit?.signal && (loginInit.signal as AbortSignal).aborted).toBe(true)
+
+    let overviewInit: RequestInit | undefined
+    const overviewFetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve(authenticatedSession)
+      overviewInit = init
+      return new Promise<Response>(() => undefined)
+    })
+    vi.stubGlobal('fetch', overviewFetch)
+    const overview = render(<App />)
+    await waitFor(() => expect(overviewInit).toBeTruthy())
+    overview.unmount()
+    expect(overviewInit?.signal && (overviewInit.signal as AbortSignal).aborted).toBe(true)
+    void resolveSession
   })
 })
