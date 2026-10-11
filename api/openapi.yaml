@@ -73,6 +73,32 @@ paths:
           description: Read-only endpoint does not accept mutation methods.
         '500':
           description: Internal server error.
+  /api/v1/portfolios/{portfolioId}/activity:
+    get:
+      summary: Read authenticated portfolio activity
+      description: Returns safe, portfolio-scoped activity summaries in deterministic newest-first order. Raw audit payloads are never returned.
+      operationId: getPortfolioActivity
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: portfolioId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 100000, default: 0 }
+      responses:
+        '200': { description: Activity page, content: { application/json: { schema: { $ref: '#/components/schemas/ActivityPage' } } } }
+        '400': { description: Malformed or out-of-bounds pagination }
+        '401': { description: Authentication is required; response is never cacheable }
+        '404': { description: Portfolio or API route not found }
+        '405': { description: Read-only endpoint does not accept mutation methods }
+        '500': { description: Internal server error }
 components:
   securitySchemes:
     sessionCookie:
@@ -206,3 +232,26 @@ components:
         status: { type: string, enum: [fresh, stale, missing, future, invalid] }
         market_at: { type: string, format: date-time }
         age: { type: string }
+    ActivityPage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Activity' }
+        next_offset: { type: integer, minimum: 0 }
+        has_more: { type: boolean }
+    Activity:
+      type: object
+      required: [id, portfolio_id, action, category, actor_category, occurred_at, summary]
+      properties:
+        id: { type: string }
+        portfolio_id: { type: string }
+        action: { type: string }
+        category: { type: string }
+        actor_category: { type: string, description: Safe actor category; never a credential or username. }
+        entity_type: { type: string }
+        entity_id: { type: string }
+        occurred_at: { type: string, format: date-time }
+        summary: { type: string }
+        details: { type: string }

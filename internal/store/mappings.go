@@ -80,6 +80,13 @@ func (s *Store) AddProviderMapping(ctx context.Context, input ProviderMappingInp
 	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, deterministicID("audit", "mapping", id), "administrative-mapping", "market.mapping.added", "provider_mapping", id, payload, now); err != nil {
 		return domain.ProviderMapping{}, fmt.Errorf("audit provider mapping: %w", err)
 	}
+	portfolioIDs, err := portfoliosForInstrument(ctx, tx, instrumentID)
+	if err != nil {
+		return domain.ProviderMapping{}, fmt.Errorf("find mapping portfolios: %w", err)
+	}
+	if err := s.recordActivityForPortfolios(ctx, tx, portfolioIDs, "administrative", "market.mapping.added", "provider_mapping", id, now, deterministicID("audit", "mapping", id)); err != nil {
+		return domain.ProviderMapping{}, fmt.Errorf("activity provider mapping: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return domain.ProviderMapping{}, err
 	}

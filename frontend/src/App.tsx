@@ -83,6 +83,25 @@ export type PortfolioOverview = {
   holdings: Holding[]
 }
 
+export type ActivityItem = {
+  id: string
+  portfolio_id: string
+  action: string
+  category: string
+  actor_category: string
+  entity_type?: string
+  entity_id?: string
+  occurred_at: string
+  summary: string
+  details?: string
+}
+
+export type ActivityPage = {
+  items: ActivityItem[]
+  next_offset?: number
+  has_more: boolean
+}
+
 type SortKey = 'symbol' | 'quantity' | 'currency' | 'cost_basis' | 'latest_price' | 'reporting_value' | 'freshness'
 type SortDirection = 'ascending' | 'descending'
 
@@ -214,6 +233,25 @@ function AllocationSection({ data }: { data: PortfolioOverview }) {
   )
 }
 
+function ActivityView({ page, state, error, onLoadMore }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; onLoadMore: () => void }) {
+  return (
+    <section className="activity-card" aria-labelledby="activity-title">
+      <div className="section-heading"><div><span className="eyebrow">Audit-safe timeline</span><h2 id="activity-title">Activity</h2></div><span className="muted">Newest first</span></div>
+      {state === 'loading' && <p role="status" aria-live="polite">Loading activity…</p>}
+      {state === 'error' && <p className="notice error" role="alert">{error}</p>}
+      {state === 'ready' && page && page.items.length === 0 && <p className="empty">No activity recorded for this portfolio.</p>}
+      {state === 'ready' && page && page.items.length > 0 && <ol className="activity-list" aria-label="Portfolio activity">
+        {page.items.map((item) => <li className="activity-item" key={item.id}>
+          <div className="activity-heading"><strong>{item.summary}</strong><time dateTime={item.occurred_at}>{displayDate(item.occurred_at)}</time></div>
+          <div className="activity-meta"><span>{item.action}</span><span>Actor: {item.actor_category}</span></div>
+          {item.details && <p>{item.details}</p>}
+        </li>)}
+      </ol>}
+      {state === 'ready' && page?.has_more && <button type="button" onClick={onLoadMore}>Load more activity</button>}
+    </section>
+  )
+}
+
 type AuthSession = { authenticated: boolean; csrf_token?: string; expires_at?: string }
 
 function Login({ onLogin, externalError = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; externalError?: string }) {
@@ -257,7 +295,11 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
 
 export default function App() {
   const [currency, setCurrency] = useState('MYR')
+  const [view, setView] = useState<'overview' | 'activity'>('overview')
   const [data, setData] = useState<PortfolioOverview | null>(null)
+  const [activity, setActivity] = useState<ActivityPage | null>(null)
+  const [activityState, setActivityState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [activityError, setActivityError] = useState('')
   const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState('')
@@ -268,20 +310,25 @@ export default function App() {
   const [sortDirection, setSortDirection] = useState<SortDirection>('ascending')
   const authControllerRef = useRef<AbortController | null>(null)
   const loadControllerRef = useRef<AbortController | null>(null)
+  const activityControllerRef = useRef<AbortController | null>(null)
   const authGeneration = useRef(0)
   const loadGeneration = useRef(0)
+  const activityGeneration = useRef(0)
   const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const clearPrivateState = useCallback(() => {
     authGeneration.current += 1
     loadGeneration.current += 1
+    activityGeneration.current += 1
     authControllerRef.current?.abort()
     authControllerRef.current = null
     loadControllerRef.current?.abort()
     loadControllerRef.current = null
+    activityControllerRef.current?.abort()
+    activityControllerRef.current = null
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
-    setData(null); setError(''); setState('loading')
+    setData(null); setActivity(null); setError(''); setActivityError(''); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -324,6 +371,40 @@ export default function App() {
       })
   }, [authState, clearPrivateState, currency])
 
+  const loadActivity = useCallback((offset: number, append: boolean) => {
+    if (authState !== 'authenticated') return
+    const authGenerationAtStart = authGeneration.current
+    const generation = ++activityGeneration.current
+    activityControllerRef.current?.abort()
+    const controller = new AbortController()
+    activityControllerRef.current = controller
+    setActivityState('loading')
+    setActivityError('')
+    apiFetch(`/api/v1/portfolios/portfolio-default/activity?limit=20&offset=${offset}`, { signal: controller.signal })
+      .then((response) => jsonResponse<ActivityPage>(response))
+      .then((nextPage) => {
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
+        setActivity((previous) => append && previous ? { ...nextPage, items: [...previous.items, ...nextPage.items] } : nextPage)
+        setActivityState('ready')
+      })
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
+        if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+        setActivityError(reason instanceof Error ? reason.message : 'Unable to load activity')
+        setActivityState('error')
+      })
+  }, [authState, clearPrivateState])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || view !== 'activity') return
+    loadActivity(0, false)
+    return () => {
+      activityGeneration.current += 1
+      activityControllerRef.current?.abort()
+      activityControllerRef.current = null
+    }
+  }, [authState, loadActivity, view])
+
   useEffect(() => {
     const generation = ++authGeneration.current
     const controller = new AbortController()
@@ -352,8 +433,11 @@ export default function App() {
       authControllerRef.current = null
       authGeneration.current += 1
       loadGeneration.current += 1
+      activityGeneration.current += 1
       loadControllerRef.current?.abort()
       loadControllerRef.current = null
+      activityControllerRef.current?.abort()
+      activityControllerRef.current = null
       if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     }
   }, [clearPrivateState, scheduleExpiry])
@@ -458,7 +542,12 @@ export default function App() {
         <p className="muted">Read-only holdings and immutable valuation snapshots.</p>
         <button type="button" onClick={logout}>Sign out</button>
       </header>
+      <nav className="view-nav" aria-label="Portfolio views">
+        <button type="button" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Overview</button>
+        <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
+      </nav>
 
+      {view === 'overview' && <>
       <section className="toolbar" aria-label="Portfolio controls">
         <label htmlFor="currency">Reporting currency</label>
         <select id="currency" value={currency} onChange={(event) => setCurrency(event.target.value)}>
@@ -535,6 +624,8 @@ export default function App() {
           </section>
         </>
       )}
+      </>}
+      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} onLoadMore={() => loadActivity(activity?.next_offset ?? 0, true)} />}
     </main>
   )
 }

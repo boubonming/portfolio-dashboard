@@ -89,7 +89,19 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 		Status    string                         `json:"status"`
 		Providers []domain.ProviderRefreshStatus `json:"providers"`
 	}{result.RefreshID, result.Status, result.Providers})
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, deterministicID("audit", "refresh", result.RefreshID), "administrative-refresh", "market.refresh.completed", "refresh_run", result.RefreshID, payload, result.EndedAt); err != nil {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.RefreshResult{}, err
+	}
+	defer tx.Rollback()
+	auditID := deterministicID("audit", "refresh", result.RefreshID)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, auditID, "administrative-refresh", "market.refresh.completed", "refresh_run", result.RefreshID, payload, result.EndedAt); err != nil {
+		return domain.RefreshResult{}, err
+	}
+	if err := recordActivity(ctx, tx, options.PortfolioID, "administrative", "market.refresh.completed", "market", "refresh_run", result.RefreshID, "Market refresh completed", "A market-data refresh completed.", result.EndedAt, auditID); err != nil {
+		return domain.RefreshResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return domain.RefreshResult{}, err
 	}
 	return result, nil

@@ -15,6 +15,7 @@ const futureTimestampTolerance = domain.DefaultFutureTolerance
 
 type QuoteInput struct {
 	ID           string
+	PortfolioIDs []string
 	InstrumentID string
 	Symbol       string
 	Currency     string
@@ -28,6 +29,7 @@ type QuoteInput struct {
 
 type FXInput struct {
 	ID            string
+	PortfolioIDs  []string
 	BaseCurrency  string
 	QuoteCurrency string
 	Rate          string
@@ -132,6 +134,17 @@ func (s *Store) AddQuote(ctx context.Context, input QuoteInput) (domain.Quote, e
 	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, deterministicID("audit", "quote", quote.ID), "administrative-quote", "market.quote.added", "quote", quote.ID, payload, fetchedAt); err != nil {
 		return domain.Quote{}, fmt.Errorf("audit quote: %w", err)
 	}
+	portfolioIDs := input.PortfolioIDs
+	if len(portfolioIDs) == 0 {
+		portfolioIDs, err = portfoliosForInstrument(ctx, tx, quote.InstrumentID)
+		if err != nil {
+			return domain.Quote{}, fmt.Errorf("find quote portfolios: %w", err)
+		}
+	}
+	auditID := deterministicID("audit", "quote", quote.ID)
+	if err := s.recordActivityForPortfolios(ctx, tx, portfolioIDs, "administrative", "market.quote.added", "quote", quote.ID, fetchedAt, auditID); err != nil {
+		return domain.Quote{}, fmt.Errorf("activity quote: %w", err)
+	}
 	if err = tx.Commit(); err != nil {
 		return domain.Quote{}, err
 	}
@@ -198,6 +211,17 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	payload, _ := json.Marshal(fx)
 	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, deterministicID("audit", "fx", fx.ID), "administrative-fx", "market.fx.added", "fx_rate", fx.ID, payload, fetchedAt); err != nil {
 		return domain.FXRate{}, fmt.Errorf("audit FX rate: %w", err)
+	}
+	portfolioIDs := input.PortfolioIDs
+	if len(portfolioIDs) == 0 {
+		portfolioIDs, err = portfoliosForFX(ctx, tx, fx.BaseCurrency, fx.QuoteCurrency)
+		if err != nil {
+			return domain.FXRate{}, fmt.Errorf("find FX portfolios: %w", err)
+		}
+	}
+	auditID := deterministicID("audit", "fx", fx.ID)
+	if err := s.recordActivityForPortfolios(ctx, tx, portfolioIDs, "administrative", "market.fx.added", "fx_rate", fx.ID, fetchedAt, auditID); err != nil {
+		return domain.FXRate{}, fmt.Errorf("activity FX: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
 		return domain.FXRate{}, err

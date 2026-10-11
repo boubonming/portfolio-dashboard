@@ -110,6 +110,14 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		}
 		return statusFromPayload(existing)
 	}
+	auditID := deterministicID("audit", "snapshot", snapshotID)
+	auditPayload, _ := json.Marshal(map[string]any{"complete": valuation.Complete, "calculation_version": request.CalculationVersion})
+	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, auditID, "system-snapshot", "portfolio.snapshot.created", "snapshot", snapshotID, auditPayload, createdAt); err != nil {
+		return domain.SnapshotStatus{}, fmt.Errorf("audit snapshot: %w", err)
+	}
+	if err = recordActivity(ctx, tx, request.PortfolioID, "system", "portfolio.snapshot.created", "portfolio", "snapshot", snapshotID, "Immutable snapshot created", "An immutable valuation snapshot was created.", createdAt, auditID); err != nil {
+		return domain.SnapshotStatus{}, fmt.Errorf("activity snapshot: %w", err)
+	}
 	if err = tx.Commit(); err != nil {
 		return domain.SnapshotStatus{}, err
 	}

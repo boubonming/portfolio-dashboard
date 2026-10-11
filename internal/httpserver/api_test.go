@@ -392,3 +392,45 @@ func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing
 		t.Fatalf("second portfolio view=%+v", secondView)
 	}
 }
+
+func TestPortfolioActivityAPIIsAuthenticatedScopedAndRedacted(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	ctx := context.Background()
+	if _, err := database.DB.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, "unscoped-fixture", "administrative-quote", "market.quote.added", "quote", "missing", `{"marker":"redaction-marker"}`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandlerWithAuth(database, auth.Config{
+		Username: "fixture-user", PasswordHash: string(hash),
+		SessionSecret: base64.StdEncoding.EncodeToString([]byte("api-fixture-session-secret-with-diversity-123")),
+		PublicOrigin:  "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	anonymous := httptest.NewRecorder()
+	handler.ServeHTTP(anonymous, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/activity", nil))
+	if anonymous.Code != http.StatusUnauthorized || anonymous.Header().Get("Cache-Control") != "no-store" || anonymous.Header().Get("Vary") != "Cookie" {
+		t.Fatalf("anonymous=%d cache=%q vary=%q", anonymous.Code, anonymous.Header().Get("Cache-Control"), anonymous.Header().Get("Vary"))
+	}
+	authenticated := authenticatedAPIHandler(t, database)
+	response := httptest.NewRecorder()
+	authenticated.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/activity?limit=1", nil))
+	if response.Code != http.StatusOK || !contains(response.Body.String(), `"has_more":true`) || contains(response.Body.String(), "redaction-marker") || contains(response.Body.String(), "provenance") {
+		t.Fatalf("activity=%d %s", response.Code, response.Body.String())
+	}
+	invalid := httptest.NewRecorder()
+	authenticated.ServeHTTP(invalid, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/activity?limit=101", nil))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid pagination=%d %s", invalid.Code, invalid.Body.String())
+	}
+	unknown := httptest.NewRecorder()
+	authenticated.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/unknown/activity", nil))
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown=%d %s", unknown.Code, unknown.Body.String())
+	}
+}
