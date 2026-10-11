@@ -239,29 +239,32 @@ components:
         - $ref: '#/components/schemas/ActivityPageFinal'
     ActivityPageMore:
       type: object
+      additionalProperties: false
       required: [items, has_more, next_cursor]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/Activity' } }
-        next_cursor: { type: string, minLength: 16, maxLength: 512 }
+        next_cursor: { type: string, minLength: 16, maxLength: 512, pattern: '^[A-Za-z0-9_-]+$' }
         has_more: { type: boolean, enum: [true] }
     ActivityPageFinal:
       type: object
+      additionalProperties: false
       required: [items, has_more]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/Activity' } }
-        next_cursor: { type: string, maxLength: 0 }
+
         has_more: { type: boolean, enum: [false] }
     Activity:
       type: object
+      additionalProperties: false
       required: [id, portfolio_id, action, category, actor_category, occurred_at, summary]
       properties:
-        id: { type: string }
-        portfolio_id: { type: string }
-        action: { type: string }
-        category: { type: string }
-        actor_category: { type: string, description: Safe actor category; never a credential or username. }
-        entity_type: { type: string }
-        entity_id: { type: string }
-        occurred_at: { type: string, format: date-time }
-        summary: { type: string }
-        details: { type: string }
+        id: { type: string, minLength: 1, maxLength: 128 }
+        portfolio_id: { type: string, minLength: 1, maxLength: 128 }
+        action: { type: string, minLength: 1, maxLength: 128 }
+        category: { type: string, minLength: 1, maxLength: 64 }
+        actor_category: { type: string, minLength: 1, maxLength: 64, description: Safe actor category; never a credential or username. }
+        entity_type: { type: string, minLength: 1, maxLength: 128 }
+        entity_id: { type: string, minLength: 1, maxLength: 128 }
+        occurred_at: { type: string, format: date-time, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$' }
+        summary: { type: string, minLength: 1, maxLength: 256 }
+        details: { type: string, minLength: 1, maxLength: 2000 }

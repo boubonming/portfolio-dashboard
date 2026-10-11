@@ -6,7 +6,7 @@ import App, { compareDecimalStrings, type PortfolioOverview } from './App'
 const completeOverview: PortfolioOverview = {
   portfolio: { id: 'portfolio-default', name: 'Personal Portfolio', default_reporting_currency: 'MYR' },
   reporting_currency: 'MYR',
-  snapshot: { state: 'complete', complete: true, as_of: '2026-01-02T12:00:00Z', calculation_version: 'test.v1', reporting_total: '100.5', subtotals: [] },
+  snapshot: { state: 'complete', complete: true, as_of: '2026-01-02T12:00:00.000000000Z', calculation_version: 'test.v1', reporting_total: '100.5', subtotals: [] },
   holdings: [
     { lot_id: 'lot-a', symbol: 'AAA', name: 'AAA Fund', description: 'Distinct AAA instrument description', quantity: '2', currency: 'USD', unit_cost: '5', cost_basis: '10', latest_price: '50.5', latest_value: '101', reporting_value: '100.5', quote_source: 'fixture', freshness: { status: 'fresh' }, data_quality: [], missing_broker: false, missing_acquisition_date: false },
     { lot_id: 'lot-b', symbol: 'BBB', name: 'BBB Fund', quantity: '10', currency: 'SGD', unit_cost: '1', latest_price: '2', latest_value: '20', reporting_value: '20', freshness: { status: 'stale' }, data_quality: ['stale_dependency'], missing_broker: true, missing_acquisition_date: true },
@@ -460,8 +460,8 @@ describe('Portfolio Dashboard', () => {
   it('loads safe authenticated activity with bounded load-more pagination', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
-      if (url.includes('/activity') && url.includes('cursor=Y3Vyc29yLW9uZS0xMjM')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-two', portfolio_id: 'portfolio-default', action: 'portfolio.snapshot.created', category: 'portfolio', actor_category: 'system', occurred_at: '2026-01-02T12:00:00Z', summary: 'Immutable snapshot created' }], has_more: false }) } as Response)
-      if (url.includes('/activity')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T11:00:00Z', summary: 'Manual quote added', details: 'A safe summary' }], next_cursor: 'Y3Vyc29yLW9uZS0xMjM', has_more: true }) } as Response)
+      if (url.includes('/activity') && url.includes('cursor=Y3Vyc29yLW9uZS0xMjM')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-two', portfolio_id: 'portfolio-default', action: 'portfolio.snapshot.created', category: 'portfolio', actor_category: 'system', occurred_at: '2026-01-02T12:00:00.000000000Z', summary: 'Immutable snapshot created' }], has_more: false }) } as Response)
+      if (url.includes('/activity')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T11:00:00.000000000Z', summary: 'Manual quote added', details: 'A safe summary' }], next_cursor: 'Y3Vyc29yLW9uZS0xMjM', has_more: true }) } as Response)
       return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
     })
     vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
@@ -484,7 +484,7 @@ describe('Portfolio Dashboard', () => {
       const url = String(input)
       if (url.includes('/activity')) {
         activityCalls += 1
-        if (activityCalls === 1) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T11:00:00Z', summary: 'Manual quote added' }], next_cursor: cursor, has_more: true }) } as Response)
+        if (activityCalls === 1) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T11:00:00.000000000Z', summary: 'Manual quote added' }], next_cursor: cursor, has_more: true }) } as Response)
         if (activityCalls === 2) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [], has_more: true }) } as Response)
         return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [], has_more: false }) } as Response)
       }
@@ -508,8 +508,8 @@ describe('Portfolio Dashboard', () => {
     const cursor = 'Y3Vyc29yLW9uZS0xMjM'
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
-      if (url.includes('/activity') && url.includes('cursor=')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T06:00:00-05:00', summary: 'Duplicate row' }, { id: 'activity-two', portfolio_id: 'portfolio-default', action: 'market.fx.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T10:00:00Z', summary: 'Older row' }], has_more: false }) } as Response)
-      if (url.includes('/activity')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T12:00:00Z', summary: 'Newest row' }], next_cursor: cursor, has_more: true }) } as Response)
+      if (url.includes('/activity') && url.includes('cursor=')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T11:00:00.000000000Z', summary: 'Duplicate row' }, { id: 'activity-two', portfolio_id: 'portfolio-default', action: 'market.fx.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T10:00:00.000000000Z', summary: 'Older row' }], has_more: false }) } as Response)
+      if (url.includes('/activity')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T12:00:00.000000000Z', summary: 'Newest row' }], next_cursor: cursor, has_more: true }) } as Response)
       return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
     })
     vi.stubGlobal('fetch', authenticatedFetch(fetchMock))

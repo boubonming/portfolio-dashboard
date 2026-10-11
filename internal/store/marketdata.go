@@ -41,34 +41,30 @@ type FXInput struct {
 	Provenance    string
 }
 
-func normalizeObservation(value string, allowEmpty bool) (string, error) {
+func normalizeObservation(value string, allowEmpty bool, now time.Time) (string, error) {
 	if strings.TrimSpace(value) == "" && allowEmpty {
-		return time.Now().UTC().Format(time.RFC3339Nano), nil
+		value = now.UTC().Format(activityTimestampFormat)
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
-	if err != nil {
+	if err != nil || parsed.Year() < 1970 {
 		return "", fmt.Errorf("invalid timestamp %q", value)
 	}
-	return parsed.UTC().Format(time.RFC3339Nano), nil
+	return parsed.UTC().Format(activityTimestampFormat), nil
 }
 
-func validateMarketTime(value string) error {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return err
+func validateObservationTimes(now time.Time, marketAt, fetchedAt string) error {
+	market, marketErr := time.Parse(time.RFC3339Nano, marketAt)
+	fetched, fetchedErr := time.Parse(time.RFC3339Nano, fetchedAt)
+	if marketErr != nil || fetchedErr != nil {
+		return errors.Join(marketErr, fetchedErr)
 	}
-	if parsed.After(time.Now().UTC().Add(futureTimestampTolerance)) {
+	if market.After(fetched) {
+		return fmt.Errorf("market timestamp must not be after fetched timestamp")
+	}
+	if market.After(now.UTC().Add(futureTimestampTolerance)) {
 		return fmt.Errorf("market timestamp is in the future beyond %s tolerance", futureTimestampTolerance)
 	}
-	return nil
-}
-
-func validateFetchedTime(now time.Time, value string) error {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return err
-	}
-	if parsed.After(now.UTC().Add(futureTimestampTolerance)) {
+	if fetched.After(now.UTC().Add(futureTimestampTolerance)) {
 		return fmt.Errorf("fetched timestamp is in the future beyond %s tolerance", futureTimestampTolerance)
 	}
 	return nil
@@ -82,18 +78,16 @@ func (s *Store) AddQuote(ctx context.Context, input QuoteInput) (domain.Quote, e
 	if strings.TrimSpace(input.Source) == "" || strings.TrimSpace(input.Basis) == "" || strings.TrimSpace(input.Provenance) == "" {
 		return domain.Quote{}, fmt.Errorf("quote source, basis and provenance are required")
 	}
-	marketAt, err := normalizeObservation(input.MarketAt, false)
+	now := s.now()
+	marketAt, err := normalizeObservation(input.MarketAt, false, now)
 	if err != nil {
 		return domain.Quote{}, err
 	}
-	if err = validateMarketTime(marketAt); err != nil {
-		return domain.Quote{}, err
-	}
-	fetchedAt, err := normalizeObservation(input.FetchedAt, true)
+	fetchedAt, err := normalizeObservation(input.FetchedAt, true, now)
 	if err != nil {
 		return domain.Quote{}, err
 	}
-	if err = validateFetchedTime(s.now(), fetchedAt); err != nil {
+	if err = validateObservationTimes(now, marketAt, fetchedAt); err != nil {
 		return domain.Quote{}, err
 	}
 	currency := strings.ToUpper(strings.TrimSpace(input.Currency))
@@ -181,18 +175,16 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	if strings.TrimSpace(input.Source) == "" || strings.TrimSpace(input.Basis) == "" || strings.TrimSpace(input.Provenance) == "" {
 		return domain.FXRate{}, fmt.Errorf("FX source, basis and provenance are required")
 	}
-	marketAt, err := normalizeObservation(input.MarketAt, false)
+	now := s.now()
+	marketAt, err := normalizeObservation(input.MarketAt, false, now)
 	if err != nil {
 		return domain.FXRate{}, err
 	}
-	if err = validateMarketTime(marketAt); err != nil {
-		return domain.FXRate{}, err
-	}
-	fetchedAt, err := normalizeObservation(input.FetchedAt, true)
+	fetchedAt, err := normalizeObservation(input.FetchedAt, true, now)
 	if err != nil {
 		return domain.FXRate{}, err
 	}
-	if err = validateFetchedTime(s.now(), fetchedAt); err != nil {
+	if err = validateObservationTimes(now, marketAt, fetchedAt); err != nil {
 		return domain.FXRate{}, err
 	}
 	id := strings.TrimSpace(input.ID)

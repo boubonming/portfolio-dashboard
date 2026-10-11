@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 
@@ -216,7 +217,11 @@ func portfolioActivity(database *store.Store) http.HandlerFunc {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 			return
 		}
-		query := r.URL.Query()
+		query, parseErr := url.ParseQuery(r.URL.RawQuery)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_pagination"})
+			return
+		}
 		for key, values := range query {
 			if (key != "limit" && key != "cursor") || len(values) != 1 || values[0] == "" {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_pagination"})

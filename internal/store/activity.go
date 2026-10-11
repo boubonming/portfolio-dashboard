@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	DefaultActivityLimit  = 20
-	MaxActivityLimit      = 100
-	activityCursorVersion = 1
+	DefaultActivityLimit    = 20
+	MaxActivityLimit        = 100
+	activityCursorVersion   = 1
+	activityTimestampFormat = "2006-01-02T15:04:05.000000000Z"
 )
 
 var ErrInvalidActivityPagination = errors.New("invalid activity pagination")
@@ -48,19 +49,19 @@ type activityCursorPayload struct {
 
 func canonicalActivityTime(value string) (string, time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
+	if err != nil || parsed.Year() < 1970 {
 		return "", time.Time{}, ErrInvalidActivityPagination
 	}
 	parsed = parsed.UTC()
-	return parsed.Format(time.RFC3339Nano), parsed, nil
+	return parsed.Format(activityTimestampFormat), parsed, nil
 }
 
 func activitySortKey(value string) (string, error) {
-	_, parsed, err := canonicalActivityTime(value)
+	canonical, _, err := canonicalActivityTime(value)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%020d%09d", parsed.Unix(), parsed.Nanosecond()), nil
+	return canonical, nil
 }
 
 func encodeActivityCursorWithKey(key []byte, portfolioID, occurredAt, id string) (string, error) {
@@ -88,7 +89,7 @@ func encodeActivityCursorWithKey(key []byte, portfolioID, occurredAt, id string)
 }
 
 func decodeActivityCursorWithKey(key []byte, encoded, portfolioID string) (activityCursor, error) {
-	if len(encoded) < 16 || len(encoded) > 512 {
+	if len(encoded) < 16 || len(encoded) > 512 || !validActivityCursorText(encoded) {
 		return activityCursor{}, ErrInvalidActivityPagination
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(encoded)
@@ -156,10 +157,8 @@ func decodeActivityCursorWithKey(key []byte, encoded, portfolioID string) (activ
 			return activityCursor{}, ErrInvalidActivityPagination
 		}
 	}
-	if canonicalCursor.Version != activityCursorVersion || canonicalCursor.Portfolio != portfolioID || canonicalCursor.Portfolio == "" || len(canonicalCursor.SortTime) != 29 || canonicalCursor.ID == "" || canonicalCursor.MAC == "" || len(key) < 32 {
-		return activityCursor{}, ErrInvalidActivityPagination
-	}
-	if strings.Trim(canonicalCursor.SortTime, "0123456789") != "" {
+	canonicalTime, _, timeErr := canonicalActivityTime(canonicalCursor.SortTime)
+	if timeErr != nil || canonicalTime != canonicalCursor.SortTime || canonicalCursor.Version != activityCursorVersion || canonicalCursor.Portfolio != portfolioID || canonicalCursor.Portfolio == "" || len(canonicalCursor.SortTime) != len(activityTimestampFormat) || canonicalCursor.ID == "" || canonicalCursor.MAC == "" || len(key) < 32 {
 		return activityCursor{}, ErrInvalidActivityPagination
 	}
 	canonicalPayload = activityCursorPayload{Version: canonicalCursor.Version, Portfolio: canonicalCursor.Portfolio, SortTime: canonicalCursor.SortTime, ID: canonicalCursor.ID}
@@ -186,12 +185,16 @@ func recordActivity(ctx context.Context, tx *sql.Tx, portfolioID, actor, action,
 	if strings.TrimSpace(portfolioID) == "" {
 		return errors.New("activity portfolio is required")
 	}
+	canonicalOccurredAt, _, err := canonicalActivityTime(occurredAt)
+	if err != nil {
+		return fmt.Errorf("invalid activity timestamp: %w", err)
+	}
 	id := deterministicID("activity", sourceAuditID, portfolioID)
 	actor = safeActorCategory(actor)
-	_, err := tx.ExecContext(ctx, `INSERT INTO activity_events
-		(id,portfolio_id,actor_category,action,category,entity_type,entity_id,summary,details,occurred_at,source_audit_event_id)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, portfolioID, actor, action, category,
-		nullableStringValue(entityType), nullableStringValue(entityID), summary, details, occurredAt, nullableStringValue(sourceAuditID))
+	_, err = tx.ExecContext(ctx, `INSERT INTO activity_events
+		(id,portfolio_id,actor_category,action,category,entity_type,entity_id,summary,details,occurred_at,sort_time,source_audit_event_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, portfolioID, actor, action, category,
+		nullableStringValue(entityType), nullableStringValue(entityID), summary, details, canonicalOccurredAt, canonicalOccurredAt, nullableStringValue(sourceAuditID))
 	return err
 }
 
@@ -436,8 +439,8 @@ func (s *Store) Activity(ctx context.Context, portfolioID string, options Activi
 		FROM activity_events WHERE portfolio_id = ?`
 	args := []any{portfolioID}
 	if options.Cursor != "" {
-		query += ` AND (sort_time < ? OR (sort_time = ? AND id < ?))`
-		args = append(args, cursor.SortTime, cursor.SortTime, cursor.ID)
+		query += ` AND (sort_time,id) < (?,?)`
+		args = append(args, cursor.SortTime, cursor.ID)
 	}
 	query += ` ORDER BY sort_time DESC, id DESC LIMIT ?`
 	args = append(args, options.Limit+1)
@@ -489,10 +492,20 @@ func ParseActivityPagination(limit, cursor string) (ActivityPageOptions, error) 
 		options.Limit = parsed
 	}
 	if cursor != "" {
-		if len(cursor) < 16 || len(cursor) > 512 || strings.TrimSpace(cursor) != cursor {
+		if len(cursor) < 16 || len(cursor) > 512 || strings.TrimSpace(cursor) != cursor || !validActivityCursorText(cursor) {
 			return options, ErrInvalidActivityPagination
 		}
 		options.Cursor = cursor
 	}
 	return options, nil
+}
+
+func validActivityCursorText(value string) bool {
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if !((char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '_' || char == '-') {
+			return false
+		}
+	}
+	return true
 }

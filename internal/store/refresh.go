@@ -39,6 +39,8 @@ type refreshObservations struct {
 	fx     []domain.FXRate
 }
 
+var errRefreshProviderContract = errors.New("provider response does not match request")
+
 func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.RefreshResult, error) {
 	if options.PortfolioID == "" {
 		options.PortfolioID = defaultPortfolioID
@@ -264,6 +266,19 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 		status.Errors = append(status.Errors, "configuration")
 		return status
 	}
+	if client.Name() != provider {
+		requested := len(quoteRequests)
+		if provider == marketdata.ProviderOpenExchangeRates {
+			requested = len(fxRequests)
+		}
+		if requested > 0 {
+			status.RequestCount = requested
+			status.FailedCount += requested
+			status.Status = "incomplete"
+			status.Errors = append(status.Errors, "provider_error")
+		}
+		return status
+	}
 	if provider == marketdata.ProviderOpenExchangeRates {
 		if len(fxRequests) == 0 {
 			return status
@@ -286,10 +301,10 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 					status.Errors = append(status.Errors, "provider_error")
 					continue
 				}
-				if storeErr := validateRefreshFX(s, rate); storeErr != nil {
+				if storeErr := validateRefreshFX(s, request, provider, rate); storeErr != nil {
 					status.FailedCount++
 					status.Status = "incomplete"
-					status.Errors = append(status.Errors, "persistence")
+					status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 				} else {
 					status.SucceededCount++
 					status.ObservationIDs = append(status.ObservationIDs, rate.ID)
@@ -307,10 +322,10 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 				status.Errors = append(status.Errors, refreshErrorClass(callErr))
 				continue
 			}
-			if storeErr := validateRefreshFX(s, rate); storeErr != nil {
+			if storeErr := validateRefreshFX(s, request, provider, rate); storeErr != nil {
 				status.FailedCount++
 				status.Status = "incomplete"
-				status.Errors = append(status.Errors, "persistence")
+				status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 			} else {
 				status.SucceededCount++
 				status.ObservationIDs = append(status.ObservationIDs, rate.ID)
@@ -342,10 +357,10 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 				status.Errors = append(status.Errors, "provider_error")
 				continue
 			}
-			if storeErr := validateRefreshQuote(s, quote); storeErr != nil {
+			if storeErr := validateRefreshQuote(s, request, provider, quote); storeErr != nil {
 				status.FailedCount++
 				status.Status = "incomplete"
-				status.Errors = append(status.Errors, "persistence")
+				status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 			} else {
 				status.SucceededCount++
 				status.ObservationIDs = append(status.ObservationIDs, quote.ID)
@@ -363,10 +378,10 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 			status.Errors = append(status.Errors, refreshErrorClass(callErr))
 			continue
 		}
-		if storeErr := validateRefreshQuote(s, quote); storeErr != nil {
+		if storeErr := validateRefreshQuote(s, request, provider, quote); storeErr != nil {
 			status.FailedCount++
 			status.Status = "incomplete"
-			status.Errors = append(status.Errors, "persistence")
+			status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 		} else {
 			status.SucceededCount++
 			status.ObservationIDs = append(status.ObservationIDs, quote.ID)
@@ -394,26 +409,33 @@ func refreshErrorClass(err error) string {
 	return "provider_error"
 }
 
-func validateRefreshQuote(s *Store, quote domain.Quote) error {
+func validateRefreshQuote(s *Store, request marketdata.QuoteRequest, provider marketdata.Provider, quote domain.Quote) error {
+	if quote.InstrumentID != request.InstrumentID || quote.Symbol != request.Symbol || !strings.EqualFold(quote.Currency, request.Currency) || quote.Source != provider.String() {
+		return fmt.Errorf("%w: quote identity mismatch", errRefreshProviderContract)
+	}
 	price, err := domain.ParseDecimal(quote.Price)
 	if err != nil || price.Sign() <= 0 || strings.TrimSpace(quote.ID) == "" || strings.TrimSpace(quote.InstrumentID) == "" {
 		return errors.New("invalid provider quote")
 	}
-	if err := validateMarketTime(quote.MarketAt); err != nil {
-		return err
-	}
-	return validateFetchedTime(s.now(), quote.FetchedAt)
+	return validateObservationTimes(s.now(), quote.MarketAt, quote.FetchedAt)
 }
 
-func validateRefreshFX(s *Store, fx domain.FXRate) error {
+func validateRefreshFX(s *Store, request marketdata.FXRequest, provider marketdata.Provider, fx domain.FXRate) error {
+	if !strings.EqualFold(fx.BaseCurrency, request.BaseCurrency) || !strings.EqualFold(fx.QuoteCurrency, request.QuoteCurrency) || fx.Source != provider.String() {
+		return fmt.Errorf("%w: FX identity mismatch", errRefreshProviderContract)
+	}
 	rate, err := domain.ParseDecimal(fx.Rate)
 	if err != nil || rate.Sign() <= 0 || strings.TrimSpace(fx.ID) == "" || fx.BaseCurrency == "" || fx.QuoteCurrency == "" {
 		return errors.New("invalid provider FX rate")
 	}
-	if err := validateMarketTime(fx.MarketAt); err != nil {
-		return err
+	return validateObservationTimes(s.now(), fx.MarketAt, fx.FetchedAt)
+}
+
+func refreshValidationErrorClass(err error) string {
+	if errors.Is(err, errRefreshProviderContract) {
+		return "provider_error"
 	}
-	return validateFetchedTime(s.now(), fx.FetchedAt)
+	return "persistence"
 }
 
 func (s *Store) persistRefreshRunTx(ctx context.Context, tx *sql.Tx, refreshID, portfolioID string, status domain.ProviderRefreshStatus, started time.Time) error {

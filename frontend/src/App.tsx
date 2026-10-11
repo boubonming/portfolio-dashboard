@@ -233,7 +233,7 @@ function AllocationSection({ data }: { data: PortfolioOverview }) {
   )
 }
 
-function ActivityView({ page, state, error, loadingMore, appendError, announcement, loadMoreRef, onLoadMore, onRetry }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; loadingMore: boolean; appendError: string; announcement: string; loadMoreRef: RefObject<HTMLButtonElement | null>; onLoadMore: () => void; onRetry: () => void }) {
+function ActivityView({ page, state, error, loadingMore, appendError, announcement, loadMoreRef, statusRef, onLoadMore, onRetry }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; appendError: string; announcement: string; loadingMore: boolean; loadMoreRef: RefObject<HTMLButtonElement | null>; statusRef: RefObject<HTMLParagraphElement | null>; onLoadMore: () => void; onRetry: () => void }) {
   return (
     <section className="activity-card" aria-labelledby="activity-title">
       <div className="section-heading"><div><span className="eyebrow">Audit-safe timeline</span><h2 id="activity-title">Activity</h2></div><span className="muted">Newest first</span></div>
@@ -247,7 +247,7 @@ function ActivityView({ page, state, error, loadingMore, appendError, announceme
           {item.details && <p>{item.details}</p>}
         </li>)}
       </ol>}
-      <p className="visually-hidden" role="status" aria-live="polite">{announcement}</p>
+      <p ref={statusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}>{announcement}</p>
       {appendError && <p className="notice error" role="alert">{appendError} <button type="button" onClick={onRetry}>Retry loading activity</button></p>}
       {page?.has_more && !appendError && <button ref={loadMoreRef} type="button" onClick={onLoadMore} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more activity…' : 'Load more activity'}</button>}
     </section>
@@ -261,6 +261,8 @@ const activityPortfolioID = 'portfolio-default'
 function validateActivityPage(value: unknown): ActivityPage {
   if (!value || typeof value !== 'object') throw new Error('Invalid activity pagination response')
   const page = value as ActivityPage & Record<string, unknown>
+  const pageKeys = new Set(['items', 'has_more', 'next_cursor'])
+  if (Object.keys(page).some((key) => !pageKeys.has(key))) throw new Error('Invalid activity pagination response')
   if (!Array.isArray(page.items) || typeof page.has_more !== 'boolean') throw new Error('Invalid activity pagination response')
   const hasCursor = Object.prototype.hasOwnProperty.call(page, 'next_cursor')
   if (page.has_more) {
@@ -269,7 +271,7 @@ function validateActivityPage(value: unknown): ActivityPage {
     throw new Error('Invalid activity pagination response')
   }
   const canonicalDateTime = (candidate: unknown) => {
-    if (typeof candidate !== 'string' || !/^(?:\d{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d):[0-5]\d)$/.test(candidate) || !Number.isFinite(Date.parse(candidate))) return false
+    if (typeof candidate !== 'string' || !/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{9}Z$/.test(candidate) || !Number.isFinite(Date.parse(candidate))) return false
     const year = Number(candidate.slice(0, 4)); const month = Number(candidate.slice(5, 7)); const day = Number(candidate.slice(8, 10))
     return day <= new Date(Date.UTC(year, month, 0)).getUTCDate()
   }
@@ -278,9 +280,12 @@ function validateActivityPage(value: unknown): ActivityPage {
     const candidate = item as ActivityItem & Record<string, unknown>
     const allowed = new Set(['id', 'portfolio_id', 'action', 'category', 'actor_category', 'entity_type', 'entity_id', 'occurred_at', 'summary', 'details'])
     if (Object.keys(candidate).some((key) => !allowed.has(key))) throw new Error('Invalid activity item')
-    if (typeof candidate.id !== 'string' || candidate.id === '' || candidate.portfolio_id !== activityPortfolioID || !canonicalDateTime(candidate.occurred_at)) throw new Error('Invalid activity item')
-    for (const field of ['action', 'category', 'actor_category', 'summary'] as const) if (typeof candidate[field] !== 'string') throw new Error('Invalid activity item')
-    for (const field of ['entity_type', 'entity_id', 'details'] as const) if (candidate[field] !== undefined && typeof candidate[field] !== 'string') throw new Error('Invalid activity item')
+    const bounded = (candidate: unknown, max: number) => typeof candidate === 'string' && candidate.length >= 1 && candidate.length <= max
+    if (!bounded(candidate.id, 128) || candidate.portfolio_id !== activityPortfolioID || !bounded(candidate.portfolio_id, 128) || !canonicalDateTime(candidate.occurred_at)) throw new Error('Invalid activity item')
+    if (!bounded(candidate.action, 128) || !bounded(candidate.category, 64) || !bounded(candidate.actor_category, 64) || !bounded(candidate.summary, 256)) throw new Error('Invalid activity item')
+    if (!bounded(candidate.entity_type, 128) && candidate.entity_type !== undefined) throw new Error('Invalid activity item')
+    if (!bounded(candidate.entity_id, 128) && candidate.entity_id !== undefined) throw new Error('Invalid activity item')
+    if (!bounded(candidate.details, 2000) && candidate.details !== undefined) throw new Error('Invalid activity item')
   }
   return page
 }
@@ -346,7 +351,9 @@ export default function App() {
   const loadControllerRef = useRef<AbortController | null>(null)
   const activityControllerRef = useRef<AbortController | null>(null)
   const activityLoadMoreRef = useRef<HTMLButtonElement>(null)
+  const activityStatusRef = useRef<HTMLParagraphElement>(null)
   const activityLoadingMoreRef = useRef(false)
+  const activityItemsRef = useRef<ActivityItem[]>([])
   const authGeneration = useRef(0)
   const loadGeneration = useRef(0)
   const activityGeneration = useRef(0)
@@ -365,6 +372,7 @@ export default function App() {
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
     activityLoadingMoreRef.current = false
+    activityItemsRef.current = []
     setData(null); setActivity(null); setError(''); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
@@ -422,13 +430,17 @@ export default function App() {
       .then((nextPage) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
         validateActivityPage(nextPage)
-        let appendedCount = 0
-        setActivity((previous) => {
-          const combined = append && previous ? [...previous.items, ...nextPage.items] : nextPage.items
-          const unique = new Map<string, ActivityItem>()
-          for (const item of combined) if (!unique.has(item.id)) unique.set(item.id, item)
-          appendedCount = append ? unique.size - (previous?.items.length || 0) : 0
-          const items = [...unique.values()].sort((left, right) => Date.parse(right.occurred_at) - Date.parse(left.occurred_at) || right.id.localeCompare(left.id))
+        const hadLoadMoreFocus = append && document.activeElement === activityLoadMoreRef.current
+        const previousItems = activityItemsRef.current
+        const combined = append ? [...previousItems, ...nextPage.items] : nextPage.items
+        const previousIDs = new Set(previousItems.map((item) => item.id))
+        const unique = new Map<string, ActivityItem>()
+        for (const item of combined) if (!unique.has(item.id)) unique.set(item.id, item)
+        const appendedItems = append ? [...unique.values()].filter((item) => !previousIDs.has(item.id)) : []
+        const appendedCount = appendedItems.length
+        const items = [...unique.values()].sort((left, right) => Date.parse(right.occurred_at) - Date.parse(left.occurred_at) || right.id.localeCompare(left.id))
+        activityItemsRef.current = items
+        setActivity(() => {
           return { ...nextPage, items }
         })
         activityLoadingMoreRef.current = false
@@ -436,11 +448,19 @@ export default function App() {
         setActivityAppendError('')
         setActivityState('ready')
         if (append) {
-          const shouldRestoreFocus = document.activeElement === activityLoadMoreRef.current
           setActivityAnnouncement(`Loaded ${appendedCount} more activit${appendedCount === 1 ? 'y' : 'ies'}.`)
-          if (shouldRestoreFocus && nextPage.items[0]) {
-            window.setTimeout(() => Array.from(document.querySelectorAll<HTMLElement>('[data-activity-id]')).find((node) => node.dataset.activityId === nextPage.items[0].id)?.focus(), 0)
-          }
+          window.setTimeout(() => {
+            if (!nextPage.has_more && appendedItems[0]) {
+              Array.from(document.querySelectorAll<HTMLElement>('[data-activity-id]')).find((node) => node.dataset.activityId === appendedItems[0].id)?.focus()
+            } else if (!nextPage.has_more) {
+              activityStatusRef.current?.focus()
+            } else if (hadLoadMoreFocus) {
+              activityLoadMoreRef.current?.focus()
+            }
+          }, 0)
+        }
+        if (!append) {
+          activityItemsRef.current = items
         }
       })
       .catch((reason: unknown) => {
@@ -683,7 +703,7 @@ export default function App() {
         </>
       )}
       </>}
-      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} onLoadMore={() => loadActivity(activity?.next_cursor, true)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
+      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={() => loadActivity(activity?.next_cursor, true)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
     </main>
   )
 }

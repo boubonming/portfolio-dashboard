@@ -80,11 +80,11 @@ func TestActivityCursorIsBoundCanonicalAndStableAcrossReopen(t *testing.T) {
 		}
 	}
 	for index, id := range []string{"event-old", "event-tie"} {
-		occurred := "2026-01-02T11:00:00Z"
+		occurred := "2026-01-02T11:00:00.000000000Z"
 		if index == 1 {
-			occurred = "2026-01-02T06:00:00-05:00"
+			occurred = "2026-01-02T11:00:00.000000000Z"
 		}
-		if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, id, "cursor-a", "system", "portfolio.snapshot.created", "portfolio", id, "", occurred); err != nil {
+		if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time) VALUES(?,?,?,?,?,?,?,?,?)`, id, "cursor-a", "system", "portfolio.snapshot.created", "portfolio", id, "", occurred, occurred); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -93,7 +93,7 @@ func TestActivityCursorIsBoundCanonicalAndStableAcrossReopen(t *testing.T) {
 		t.Fatalf("first page=%+v err=%v", page, err)
 	}
 	cursor := *page.NextCursor
-	if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, "event-new", "cursor-a", "system", "portfolio.snapshot.created", "portfolio", "event-new", "", "2026-01-02T12:00:01Z"); err != nil {
+	if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time) VALUES(?,?,?,?,?,?,?,?,?)`, "event-new", "cursor-a", "system", "portfolio.snapshot.created", "portfolio", "event-new", "", "2026-01-02T12:00:01.000000000Z", "2026-01-02T12:00:01.000000000Z"); err != nil {
 		t.Fatal(err)
 	}
 	next, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Limit: 1, Cursor: cursor})
@@ -145,7 +145,7 @@ func TestActivityIsAppendOnlyAndUsesBoundedOrderIndex(t *testing.T) {
 	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "immutable-portfolio", "Immutable", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, "immutable-event", "immutable-portfolio", "system", "portfolio.snapshot.created", "portfolio", "summary", "", now); err != nil {
+	if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time) VALUES(?,?,?,?,?,?,?,?,?)`, "immutable-event", "immutable-portfolio", "system", "portfolio.snapshot.created", "portfolio", "summary", "", "2026-01-02T12:00:00.000000000Z", "2026-01-02T12:00:00.000000000Z"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`UPDATE activity_events SET summary='changed' WHERE id='immutable-event'`); err == nil {
@@ -154,12 +154,13 @@ func TestActivityIsAppendOnlyAndUsesBoundedOrderIndex(t *testing.T) {
 	if _, err := s.DB.Exec(`DELETE FROM activity_events WHERE id='immutable-event'`); err == nil {
 		t.Fatal("activity delete unexpectedly succeeded")
 	}
-	rows, err := s.DB.Query(`EXPLAIN QUERY PLAN SELECT id FROM activity_events WHERE portfolio_id=? AND (sort_time<? OR (sort_time=? AND id<?)) ORDER BY sort_time DESC,id DESC LIMIT ?`, "immutable-portfolio", "00000000000000000000", "00000000000000000000", "", 21)
+	rows, err := s.DB.Query(`EXPLAIN QUERY PLAN SELECT id FROM activity_events WHERE portfolio_id=? AND (sort_time,id) < (?,?) ORDER BY sort_time DESC,id DESC LIMIT ?`, "immutable-portfolio", "2026-01-02T12:00:00.000000000Z", "immutable-event", 21)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
 	var indexed bool
+	var ranged bool
 	for rows.Next() {
 		var id, parent, unused, detail string
 		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
@@ -168,11 +169,17 @@ func TestActivityIsAppendOnlyAndUsesBoundedOrderIndex(t *testing.T) {
 		if strings.Contains(detail, "idx_activity_portfolio_order") {
 			indexed = true
 		}
+		if strings.Contains(detail, "sort_time") && strings.Contains(detail, "<") {
+			ranged = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
 	if !indexed {
 		t.Fatal("activity order query did not use the canonical order index")
+	}
+	if !ranged {
+		t.Fatal("activity cursor query did not retain a tuple range constraint")
 	}
 }
