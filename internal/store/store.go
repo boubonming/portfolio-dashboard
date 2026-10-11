@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -13,9 +14,31 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-type Store struct{ DB *sql.DB }
+type Store struct {
+	DB        *sql.DB
+	cursorKey []byte
+}
 
 func Open(ctx context.Context, path string) (*Store, error) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generate activity cursor key: %w", err)
+	}
+	return openWithActivityCursorKey(ctx, path, key)
+}
+
+// OpenWithActivityCursorSecret keeps opaque activity cursors stable across
+// process restarts. Production callers should derive this from their existing
+// high-entropy session secret rather than introducing another configuration
+// secret.
+func OpenWithActivityCursorSecret(ctx context.Context, path string, secret []byte) (*Store, error) {
+	if len(secret) < 32 {
+		return nil, fmt.Errorf("activity cursor secret must contain at least 32 bytes")
+	}
+	return openWithActivityCursorKey(ctx, path, secret)
+}
+
+func openWithActivityCursorKey(ctx context.Context, path string, key []byte) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -33,7 +56,17 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{DB: db}, nil
+	return &Store{DB: db, cursorKey: append([]byte(nil), key...)}, nil
+}
+
+// SetActivityCursorSecret is used by the authenticated HTTP constructor. It
+// intentionally copies the derived key and never persists or logs it.
+func (s *Store) SetActivityCursorSecret(secret []byte) error {
+	if len(secret) < 32 {
+		return fmt.Errorf("activity cursor secret must contain at least 32 bytes")
+	}
+	s.cursorKey = append(s.cursorKey[:0], secret...)
+	return nil
 }
 
 func (s *Store) Close() error { return s.DB.Close() }

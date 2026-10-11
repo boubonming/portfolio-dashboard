@@ -1,6 +1,3 @@
-ALTER TABLE refresh_runs ADD COLUMN refresh_group_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_refresh_runs_group ON refresh_runs(refresh_group_id, portfolio_id);
-
 CREATE TABLE IF NOT EXISTS activity_events (
     id TEXT PRIMARY KEY,
     portfolio_id TEXT NOT NULL REFERENCES portfolios(id),

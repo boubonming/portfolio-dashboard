@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -39,10 +41,10 @@ func TestActivityIsPortfolioScopedAndPaginatesDeterministically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Items) != 1 || page.Items[0].PortfolioID != "activity-a" || !page.HasMore || page.NextOffset == nil || *page.NextOffset != 1 {
+	if len(page.Items) != 1 || page.Items[0].PortfolioID != "activity-a" || !page.HasMore || page.NextCursor == nil {
 		t.Fatalf("page=%+v", page)
 	}
-	page, err = s.Activity(ctx, "activity-a", ActivityPageOptions{Limit: 1, Offset: 1})
+	page, err = s.Activity(ctx, "activity-a", ActivityPageOptions{Limit: 1, Cursor: *page.NextCursor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,44 +60,75 @@ func TestActivityIsPortfolioScopedAndPaginatesDeterministically(t *testing.T) {
 	}
 }
 
-func TestActivityLegacyAmbiguousRowsFailClosed(t *testing.T) {
+func TestActivityCursorIsBoundCanonicalAndStableAcrossReopen(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "legacy-activity.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	for _, id := range []string{"legacy-a", "legacy-b"} {
-		if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, id, id, "USD", now, now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "legacy-instrument", "LEG", "USD", now); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"legacy-lot-a", "legacy-lot-b"} {
-		portfolio := "legacy-a"
-		if id == "legacy-lot-b" {
-			portfolio = "legacy-b"
-		}
-		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at) VALUES(?,?,?,?,?,?)`, id, portfolio, "legacy-instrument", "1", "USD", now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := s.DB.Exec(`INSERT INTO quotes(id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?)`, "legacy-quote", "legacy-instrument", "1", "USD", "fixture", now, now, "close", "redaction-marker"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.Exec(`INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, "legacy-audit", "administrative-quote", "market.quote.added", "quote", "legacy-quote", `{"marker":"redaction-marker"}`, now); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"legacy-a", "legacy-b"} {
-		page, err := s.Activity(ctx, id, ActivityPageOptions{})
+	path := filepath.Join(t.TempDir(), "cursor.sqlite")
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	open := func() *Store {
+		store, err := OpenWithActivityCursorSecret(ctx, path, secret)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(page.Items) != 0 {
-			t.Fatalf("ambiguous row leaked to %s: %+v", id, page.Items)
+		return store
+	}
+	s := open()
+	now := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)
+	for _, id := range []string{"cursor-a", "cursor-b"} {
+		if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, id, id, "USD", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
 		}
+	}
+	for index, id := range []string{"event-old", "event-tie"} {
+		occurred := "2026-01-02T11:00:00Z"
+		if index == 1 {
+			occurred = "2026-01-02T06:00:00-05:00"
+		}
+		if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, id, "cursor-a", "system", "portfolio.snapshot.created", "portfolio", id, "", occurred); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Limit: 1})
+	if err != nil || !page.HasMore || page.NextCursor == nil {
+		t.Fatalf("first page=%+v err=%v", page, err)
+	}
+	cursor := *page.NextCursor
+	if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, "event-new", "cursor-a", "system", "portfolio.snapshot.created", "portfolio", "event-new", "", "2026-01-02T12:00:01Z"); err != nil {
+		t.Fatal(err)
+	}
+	next, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Limit: 1, Cursor: cursor})
+	if err != nil || len(next.Items) != 1 || next.Items[0].ID != "event-old" {
+		t.Fatalf("stable keyset page=%+v err=%v", next, err)
+	}
+	if _, err := s.Activity(ctx, "cursor-b", ActivityPageOptions{Cursor: cursor}); err != ErrInvalidActivityPagination {
+		t.Fatalf("wrong-portfolio cursor err=%v", err)
+	}
+	if _, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Cursor: cursor[:len(cursor)-1] + "A"}); err != ErrInvalidActivityPagination {
+		t.Fatalf("tampered cursor err=%v", err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	envelope["x"] = "unknown"
+	malformed, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformedCursor := base64.RawURLEncoding.EncodeToString(malformed)
+	if _, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Cursor: malformedCursor}); err != ErrInvalidActivityPagination {
+		t.Fatalf("unknown-field cursor err=%v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = open()
+	defer s.Close()
+	stable, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Limit: 1, Cursor: cursor})
+	if err != nil || len(stable.Items) != 1 || stable.Items[0].ID != "event-old" {
+		t.Fatalf("reopened cursor page=%+v err=%v", stable, err)
 	}
 }

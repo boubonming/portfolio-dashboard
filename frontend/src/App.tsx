@@ -255,6 +255,27 @@ function ActivityView({ page, state, error, loadingMore, appendError, onLoadMore
 
 type AuthSession = { authenticated: boolean; csrf_token?: string; expires_at?: string }
 
+const activityPortfolioID = 'portfolio-default'
+
+function validateActivityPage(value: unknown): ActivityPage {
+  if (!value || typeof value !== 'object') throw new Error('Invalid activity pagination response')
+  const page = value as ActivityPage & Record<string, unknown>
+  if (!Array.isArray(page.items) || typeof page.has_more !== 'boolean') throw new Error('Invalid activity pagination response')
+  const hasCursor = Object.prototype.hasOwnProperty.call(page, 'next_cursor')
+  if (page.has_more) {
+    if (!hasCursor || typeof page.next_cursor !== 'string' || page.next_cursor.length < 16 || page.next_cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(page.next_cursor)) throw new Error('Invalid activity pagination response')
+  } else if (hasCursor) {
+    throw new Error('Invalid activity pagination response')
+  }
+  for (const item of page.items) {
+    if (!item || typeof item !== 'object') throw new Error('Invalid activity item')
+    const candidate = item as ActivityItem
+    if (typeof candidate.id !== 'string' || candidate.id === '' || candidate.portfolio_id !== activityPortfolioID || typeof candidate.occurred_at !== 'string' || !Number.isFinite(Date.parse(candidate.occurred_at))) throw new Error('Invalid activity item')
+    for (const field of ['action', 'category', 'actor_category', 'summary'] as const) if (typeof candidate[field] !== 'string') throw new Error('Invalid activity item')
+  }
+  return page
+}
+
 function Login({ onLogin, externalError = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; externalError?: string }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -360,7 +381,7 @@ export default function App() {
     loadControllerRef.current = controller
     setState('loading')
     setError('')
-    const url = `/api/v1/portfolios/portfolio-default/overview?currency=${encodeURIComponent(currency)}`
+    const url = `/api/v1/portfolios/${activityPortfolioID}/overview?currency=${encodeURIComponent(currency)}`
     apiFetch(url, { signal: controller.signal })
       .then((response) => jsonResponse<PortfolioOverview>(response))
       .then((overview) => {
@@ -385,16 +406,16 @@ export default function App() {
     activityControllerRef.current = controller
     if (append) { activityLoadingMoreRef.current = true; setActivityLoadingMore(true); setActivityAppendError('') } else { setActivityState('loading'); setActivityError(''); setActivityAppendError('') }
     const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
-    apiFetch(`/api/v1/portfolios/portfolio-default/activity?limit=20${query}`, { signal: controller.signal })
+    apiFetch(`/api/v1/portfolios/${activityPortfolioID}/activity?limit=20${query}`, { signal: controller.signal })
       .then((response) => jsonResponse<ActivityPage>(response))
       .then((nextPage) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
-        const validCursor = typeof nextPage.next_cursor === 'string' && nextPage.next_cursor.length >= 16 && nextPage.next_cursor.length <= 512 && /^[A-Za-z0-9_-]+$/.test(nextPage.next_cursor)
-        if (!Array.isArray(nextPage.items) || typeof nextPage.has_more !== 'boolean' || (nextPage.has_more && !validCursor) || (!nextPage.has_more && nextPage.next_cursor)) throw new Error('Invalid activity pagination response')
+        validateActivityPage(nextPage)
         setActivity((previous) => {
           const combined = append && previous ? [...previous.items, ...nextPage.items] : nextPage.items
-          const unique = new Map(combined.map((item) => [item.id, item]))
-          const items = [...unique.values()].sort((left, right) => right.occurred_at.localeCompare(left.occurred_at) || right.id.localeCompare(left.id))
+          const unique = new Map<string, ActivityItem>()
+          for (const item of combined) if (!unique.has(item.id)) unique.set(item.id, item)
+          const items = [...unique.values()].sort((left, right) => Date.parse(right.occurred_at) - Date.parse(left.occurred_at) || right.id.localeCompare(left.id))
           return { ...nextPage, items }
         })
         activityLoadingMoreRef.current = false

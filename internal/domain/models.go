@@ -246,7 +246,4 @@ type ActivityPage struct {
 	Items      []Activity `json:"items"`
 	NextCursor *string    `json:"next_cursor,omitempty"`
 	HasMore    bool       `json:"has_more"`
-	// NextOffset is retained only for old in-process callers; the HTTP contract
-	// deliberately exposes only the opaque cursor.
-	NextOffset *int `json:"-"`
 }

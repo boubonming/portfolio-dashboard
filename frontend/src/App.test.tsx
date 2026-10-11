@@ -476,4 +476,64 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('button', { name: 'Load more activity' })).toBeNull()
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/activity?limit=20&cursor=Y3Vyc29yLW9uZS0xMjM'))).toBe(true)
   })
+
+  it('fails closed on malformed load-more pages and retries the same cursor without page-one refetch', async () => {
+    let activityCalls = 0
+    const cursor = 'Y3Vyc29yLW9uZS0xMjM'
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity')) {
+        activityCalls += 1
+        if (activityCalls === 1) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T11:00:00Z', summary: 'Manual quote added' }], next_cursor: cursor, has_more: true }) } as Response)
+        if (activityCalls === 2) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [], has_more: true }) } as Response)
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [], has_more: false }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    await waitFor(() => expect(screen.getByText('Manual quote added')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Load more activity' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/invalid activity pagination/i))
+    expect(screen.getByText('Manual quote added')).toBeTruthy()
+    expect(activityCalls).toBe(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading activity' }))
+    await waitFor(() => expect(activityCalls).toBe(3))
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/activity')).at(-1)?.[0]).toContain(`cursor=${cursor}`)
+  })
+
+  it('deduplicates activity rows and sorts equivalent timestamp forms globally', async () => {
+    const cursor = 'Y3Vyc29yLW9uZS0xMjM'
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity') && url.includes('cursor=')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T06:00:00-05:00', summary: 'Duplicate row' }, { id: 'activity-two', portfolio_id: 'portfolio-default', action: 'market.fx.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T10:00:00Z', summary: 'Older row' }], has_more: false }) } as Response)
+      if (url.includes('/activity')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [{ id: 'activity-one', portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: '2026-01-02T12:00:00Z', summary: 'Newest row' }], next_cursor: cursor, has_more: true }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    await waitFor(() => expect(screen.getByText('Newest row')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Load more activity' }))
+    await waitFor(() => expect(screen.getByText('Older row')).toBeTruthy())
+    expect(screen.getAllByText(/row$/).map((node) => node.textContent)).toEqual(['Newest row', 'Older row'])
+    expect(screen.queryByText('Duplicate row')).toBeNull()
+  })
+
+  it('clears activity state and focuses login after an activity 401', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity')) return Promise.resolve({ ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(document.activeElement).toBe(screen.getByLabelText('Username'))
+  })
 })

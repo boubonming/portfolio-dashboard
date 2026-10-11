@@ -26,6 +26,11 @@ func NewHandlerWithAuth(database *store.Store, config auth.Config) (http.Handler
 	if err != nil {
 		return nil, err
 	}
+	if database != nil {
+		if err := database.SetActivityCursorSecret(authenticator.ActivityCursorSecret()); err != nil {
+			return nil, err
+		}
+	}
 	return newHandler(database, authenticator)
 }
 

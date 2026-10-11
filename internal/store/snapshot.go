@@ -22,17 +22,15 @@ type SnapshotRequest struct {
 }
 
 type snapshotPayload struct {
-	SnapshotID         string `json:"snapshot_id"`
-	PortfolioID        string `json:"portfolio_id"`
-	CalculationVersion string `json:"calculation_version"`
-	CreatedAt          string `json:"created_at"`
-	AsOf               string `json:"as_of"`
-	// A pointer distinguishes legacy payloads, which did not persist MaxAge,
-	// from new payloads that intentionally use the default threshold.
-	MaxAge       *time.Duration        `json:"max_age,omitempty"`
-	SourceHashes []string              `json:"source_hashes"`
-	Input        domain.ValuationInput `json:"input"`
-	Valuation    domain.Valuation      `json:"valuation"`
+	SnapshotID         string                `json:"snapshot_id"`
+	PortfolioID        string                `json:"portfolio_id"`
+	CalculationVersion string                `json:"calculation_version"`
+	CreatedAt          string                `json:"created_at"`
+	AsOf               string                `json:"as_of"`
+	MaxAge             time.Duration         `json:"max_age"`
+	SourceHashes       []string              `json:"source_hashes"`
+	Input              domain.ValuationInput `json:"input"`
+	Valuation          domain.Valuation      `json:"valuation"`
 }
 
 func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (domain.SnapshotStatus, error) {
@@ -89,7 +87,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		}
 	}
 	sort.Strings(sourceHashes)
-	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: request.AsOf.Format(time.RFC3339Nano), MaxAge: durationPointer(request.MaxAge), SourceHashes: sourceHashes, Input: input, Valuation: valuation}
+	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: request.AsOf.Format(time.RFC3339Nano), MaxAge: request.MaxAge, SourceHashes: sourceHashes, Input: input, Valuation: valuation}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return domain.SnapshotStatus{}, err

@@ -122,6 +122,14 @@ func New(c Config) (*Authenticator, error) {
 
 func (a *Authenticator) now() time.Time { return a.config.Now().UTC() }
 
+// ActivityCursorSecret derives a purpose-specific key from the required
+// session secret. The raw session secret is never exposed to the store.
+func (a *Authenticator) ActivityCursorSecret() []byte {
+	mac := hmac.New(sha256.New, a.secret)
+	_, _ = mac.Write([]byte("portfolio-dashboard/activity-cursor/v1"))
+	return mac.Sum(nil)
+}
+
 func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request, request LoginRequest) (SessionResponse, bool) {
 	if !a.reserveAttempt() {
 		return SessionResponse{}, false
