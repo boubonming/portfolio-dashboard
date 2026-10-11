@@ -7,6 +7,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -17,6 +18,7 @@ var migrationFiles embed.FS
 type Store struct {
 	DB        *sql.DB
 	cursorKey []byte
+	clock     func() time.Time
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -56,7 +58,24 @@ func openWithActivityCursorKey(ctx context.Context, path string, key []byte) (*S
 		db.Close()
 		return nil, err
 	}
-	return &Store{DB: db, cursorKey: append([]byte(nil), key...)}, nil
+	return &Store{DB: db, cursorKey: append([]byte(nil), key...), clock: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// SetClock provides deterministic time to validation tests and callers that
+// coordinate several writes against one logical clock.
+func (s *Store) SetClock(clock func() time.Time) {
+	if clock == nil {
+		s.clock = func() time.Time { return time.Now().UTC() }
+		return
+	}
+	s.clock = clock
+}
+
+func (s *Store) now() time.Time {
+	if s.clock == nil {
+		return time.Now().UTC()
+	}
+	return s.clock().UTC()
 }
 
 // SetActivityCursorSecret is used by the authenticated HTTP constructor. It

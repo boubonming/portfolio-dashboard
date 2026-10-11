@@ -32,18 +32,18 @@ type ActivityPageOptions struct {
 }
 
 type activityCursor struct {
-	Version    int    `json:"v"`
-	Portfolio  string `json:"p"`
-	OccurredAt string `json:"o"`
-	ID         string `json:"i"`
-	MAC        string `json:"m"`
+	Version   int    `json:"v"`
+	Portfolio string `json:"p"`
+	SortTime  string `json:"t"`
+	ID        string `json:"i"`
+	MAC       string `json:"m"`
 }
 
 type activityCursorPayload struct {
-	Version    int    `json:"v"`
-	Portfolio  string `json:"p"`
-	OccurredAt string `json:"o"`
-	ID         string `json:"i"`
+	Version   int    `json:"v"`
+	Portfolio string `json:"p"`
+	SortTime  string `json:"t"`
+	ID        string `json:"i"`
 }
 
 func canonicalActivityTime(value string) (string, time.Time, error) {
@@ -55,19 +55,31 @@ func canonicalActivityTime(value string) (string, time.Time, error) {
 	return parsed.Format(time.RFC3339Nano), parsed, nil
 }
 
+func activitySortKey(value string) (string, error) {
+	_, parsed, err := canonicalActivityTime(value)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%020d%09d", parsed.Unix(), parsed.Nanosecond()), nil
+}
+
 func encodeActivityCursorWithKey(key []byte, portfolioID, occurredAt, id string) (string, error) {
 	canonical, _, err := canonicalActivityTime(occurredAt)
 	if err != nil || strings.TrimSpace(portfolioID) == "" || strings.TrimSpace(id) == "" || len(key) < 32 {
 		return "", ErrInvalidActivityPagination
 	}
-	payload := activityCursorPayload{Version: activityCursorVersion, Portfolio: portfolioID, OccurredAt: canonical, ID: id}
+	sortTime, err := activitySortKey(canonical)
+	if err != nil {
+		return "", ErrInvalidActivityPagination
+	}
+	payload := activityCursorPayload{Version: activityCursorVersion, Portfolio: portfolioID, SortTime: sortTime, ID: id}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
 	h := hmac.New(sha256.New, key)
 	_, _ = h.Write(raw)
-	cursor := activityCursor{Version: payload.Version, Portfolio: payload.Portfolio, OccurredAt: payload.OccurredAt, ID: payload.ID, MAC: base64.RawURLEncoding.EncodeToString(h.Sum(nil))}
+	cursor := activityCursor{Version: payload.Version, Portfolio: payload.Portfolio, SortTime: payload.SortTime, ID: payload.ID, MAC: base64.RawURLEncoding.EncodeToString(h.Sum(nil))}
 	encoded, err := json.Marshal(cursor)
 	if err != nil {
 		return "", err
@@ -128,8 +140,8 @@ func decodeActivityCursorWithKey(key []byte, encoded, portfolioID string) (activ
 			if json.Unmarshal(value, &canonicalCursor.Portfolio) != nil {
 				return activityCursor{}, ErrInvalidActivityPagination
 			}
-		case "o":
-			if json.Unmarshal(value, &canonicalCursor.OccurredAt) != nil {
+		case "t":
+			if json.Unmarshal(value, &canonicalCursor.SortTime) != nil {
 				return activityCursor{}, ErrInvalidActivityPagination
 			}
 		case "i":
@@ -144,14 +156,13 @@ func decodeActivityCursorWithKey(key []byte, encoded, portfolioID string) (activ
 			return activityCursor{}, ErrInvalidActivityPagination
 		}
 	}
-	if canonicalCursor.Version != activityCursorVersion || canonicalCursor.Portfolio != portfolioID || canonicalCursor.Portfolio == "" || canonicalCursor.OccurredAt == "" || canonicalCursor.ID == "" || canonicalCursor.MAC == "" || len(key) < 32 {
+	if canonicalCursor.Version != activityCursorVersion || canonicalCursor.Portfolio != portfolioID || canonicalCursor.Portfolio == "" || len(canonicalCursor.SortTime) != 29 || canonicalCursor.ID == "" || canonicalCursor.MAC == "" || len(key) < 32 {
 		return activityCursor{}, ErrInvalidActivityPagination
 	}
-	canonical, _, err := canonicalActivityTime(canonicalCursor.OccurredAt)
-	if err != nil || canonical != canonicalCursor.OccurredAt {
+	if strings.Trim(canonicalCursor.SortTime, "0123456789") != "" {
 		return activityCursor{}, ErrInvalidActivityPagination
 	}
-	canonicalPayload = activityCursorPayload{Version: canonicalCursor.Version, Portfolio: canonicalCursor.Portfolio, OccurredAt: canonicalCursor.OccurredAt, ID: canonicalCursor.ID}
+	canonicalPayload = activityCursorPayload{Version: canonicalCursor.Version, Portfolio: canonicalCursor.Portfolio, SortTime: canonicalCursor.SortTime, ID: canonicalCursor.ID}
 	payloadBytes, err := json.Marshal(canonicalPayload)
 	if err != nil {
 		return activityCursor{}, ErrInvalidActivityPagination
@@ -187,6 +198,8 @@ func recordActivity(ctx context.Context, tx *sql.Tx, portfolioID, actor, action,
 func safeActorCategory(actor string) string {
 	actor = strings.ToLower(strings.TrimSpace(actor))
 	switch {
+	case actor == "approved-import" || actor == "import" || strings.HasPrefix(actor, "approved-import-"):
+		return "approved-import"
 	case actor == "administrative" || strings.HasPrefix(actor, "administrative-"):
 		return "administrative"
 	case actor == "system" || strings.HasPrefix(actor, "system-"):
@@ -210,9 +223,9 @@ func activitySummary(action string) (string, string, string) {
 	case "portfolio.import.approved":
 		return "import", "Approved portfolio import", "An approved import was recorded."
 	case "market.quote.added":
-		return "market", "Manual quote added", "A manual market quote was recorded."
+		return "market", "Market quote recorded", "A market quote observation was recorded."
 	case "market.fx.added":
-		return "market", "Manual FX rate added", "A manual foreign-exchange observation was recorded."
+		return "market", "FX rate recorded", "An FX rate observation was recorded."
 	case "market.mapping.added":
 		return "market", "Provider mapping added", "A provider instrument mapping was recorded."
 	case "market.refresh.completed":
@@ -261,6 +274,21 @@ func validatePortfolioAssociations(provided, expected []string) error {
 	return nil
 }
 
+func validatePortfolioAssociationsSubset(provided, expected []string) error {
+	set := make(map[string]bool, len(expected))
+	for _, id := range expected {
+		set[id] = true
+	}
+	seen := make(map[string]bool, len(provided))
+	for _, id := range provided {
+		if strings.TrimSpace(id) == "" || seen[id] || !set[id] {
+			return errors.New("invalid portfolio association")
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
 type fxAssociationEdge struct{ from, to string }
 
 func portfoliosForFX(ctx context.Context, tx *sql.Tx, base, quote string) ([]string, error) {
@@ -287,7 +315,7 @@ func portfoliosForFX(ctx context.Context, tx *sql.Tx, base, quote string) ([]str
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	edges := []fxAssociationEdge{{from: base, to: quote}}
+	edges := []fxAssociationEdge{{from: base, to: quote}, {from: quote, to: base}}
 	fxRows, err := tx.QueryContext(ctx, `SELECT base_currency,quote_currency FROM fx_rates`)
 	if err != nil {
 		return nil, err
@@ -298,26 +326,15 @@ func portfoliosForFX(ctx context.Context, tx *sql.Tx, base, quote string) ([]str
 			fxRows.Close()
 			return nil, err
 		}
-		edges = append(edges, fxAssociationEdge{from: from, to: to})
+		edges = append(edges, fxAssociationEdge{from: from, to: to}, fxAssociationEdge{from: to, to: from})
 	}
 	if err := fxRows.Close(); err != nil {
 		return nil, err
 	}
-	uniqueEdges := make([]fxAssociationEdge, 0, len(edges))
-	seenEdges := make(map[string]bool, len(edges))
-	for _, edge := range edges {
-		key := edge.from + "\x00" + edge.to
-		reverse := edge.to + "\x00" + edge.from
-		if seenEdges[key] || seenEdges[reverse] {
-			continue
-		}
-		seenEdges[key] = true
-		uniqueEdges = append(uniqueEdges, edge)
-	}
 	result := []string{}
 	for id, p := range portfolios {
 		for _, currency := range p.currencies {
-			if currency != p.reporting && uniqueFXPathUsesCandidate(currency, p.reporting, uniqueEdges, 0) {
+			if currency != p.reporting && fxPathUsesCandidate(currency, p.reporting, edges) {
 				result = append(result, id)
 				break
 			}
@@ -327,11 +344,12 @@ func portfoliosForFX(ctx context.Context, tx *sql.Tx, base, quote string) ([]str
 	return result, nil
 }
 
-// The valuation converter rejects ambiguous paths. Activity attribution uses
-// the same invariant and additionally requires that the candidate edge is on
-// the one possible path.
-func uniqueFXPathUsesCandidate(from, to string, edges []fxAssociationEdge, candidate int) bool {
-	if from == to || candidate < 0 || candidate >= len(edges) {
+// Activity attribution uses valuation's directed edge plus explicit inverse
+// semantics. A candidate is relevant only when a held currency can reach the
+// reporting currency through a path that contains that candidate edge. Other
+// paths do not make a relevant candidate disappear.
+func fxPathUsesCandidate(from, to string, edges []fxAssociationEdge) bool {
+	if from == to || len(edges) < 2 {
 		return false
 	}
 	type state struct {
@@ -340,26 +358,22 @@ func uniqueFXPathUsesCandidate(from, to string, edges []fxAssociationEdge, candi
 		uses     bool
 	}
 	paths := []state{{currency: from, visited: map[string]bool{from: true}}}
-	found, usingCandidate := 0, 0
+	usingCandidate := false
 	for len(paths) > 0 {
 		current := paths[0]
 		paths = paths[1:]
 		if current.currency == to {
-			found++
 			if current.uses {
-				usingCandidate++
+				usingCandidate = true
 			}
 			continue
 		}
 		for index, edge := range edges {
 			var next string
-			if edge.from == current.currency {
-				next = edge.to
-			} else if edge.to == current.currency {
-				next = edge.from
-			} else {
+			if edge.from != current.currency {
 				continue
 			}
+			next = edge.to
 			if current.visited[next] {
 				continue
 			}
@@ -368,10 +382,10 @@ func uniqueFXPathUsesCandidate(from, to string, edges []fxAssociationEdge, candi
 				visited[currency] = true
 			}
 			visited[next] = true
-			paths = append(paths, state{currency: next, visited: visited, uses: current.uses || index == candidate})
+			paths = append(paths, state{currency: next, visited: visited, uses: current.uses || index < 2})
 		}
 	}
-	return found == 1 && usingCandidate == 1
+	return usingCandidate
 }
 
 func queryPortfolioIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]string, error) {
@@ -417,58 +431,44 @@ func (s *Store) Activity(ctx context.Context, portfolioID string, options Activi
 			return domain.ActivityPage{}, err
 		}
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,portfolio_id,actor_category,action,category,
+	query := `SELECT id,portfolio_id,actor_category,action,category,
 		COALESCE(entity_type,''),COALESCE(entity_id,''),occurred_at,summary,details
-		FROM activity_events WHERE portfolio_id = ?`, portfolioID)
+		FROM activity_events WHERE portfolio_id = ?`
+	args := []any{portfolioID}
+	if options.Cursor != "" {
+		query += ` AND (sort_time < ? OR (sort_time = ? AND id < ?))`
+		args = append(args, cursor.SortTime, cursor.SortTime, cursor.ID)
+	}
+	query += ` ORDER BY sort_time DESC, id DESC LIMIT ?`
+	args = append(args, options.Limit+1)
+	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return domain.ActivityPage{}, fmt.Errorf("read activity: %w", err)
 	}
 	defer rows.Close()
-	type activityRecord struct {
-		item     domain.Activity
-		occurred time.Time
-	}
-	records := make([]activityRecord, 0, options.Limit+1)
+	records := make([]domain.Activity, 0, options.Limit+1)
 	for rows.Next() {
 		var item domain.Activity
 		if err := rows.Scan(&item.ID, &item.PortfolioID, &item.ActorCategory, &item.Action, &item.Category, &item.EntityType, &item.EntityID, &item.OccurredAt, &item.Summary, &item.Details); err != nil {
 			return domain.ActivityPage{}, err
 		}
 		item.ActorCategory = safeActorCategory(item.ActorCategory)
-		canonical, occurred, err := canonicalActivityTime(item.OccurredAt)
+		canonical, _, err := canonicalActivityTime(item.OccurredAt)
 		if err != nil {
 			return domain.ActivityPage{}, ErrInvalidActivityPagination
 		}
 		item.OccurredAt = canonical
-		records = append(records, activityRecord{item: item, occurred: occurred})
+		records = append(records, item)
 	}
 	if err := rows.Err(); err != nil {
 		return domain.ActivityPage{}, err
 	}
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].occurred.Equal(records[j].occurred) {
-			return records[i].item.ID > records[j].item.ID
-		}
-		return records[i].occurred.After(records[j].occurred)
-	})
-	if options.Cursor != "" {
-		_, cutoff, _ := canonicalActivityTime(cursor.OccurredAt)
-		filtered := records[:0]
-		for _, record := range records {
-			if record.occurred.Before(cutoff) || (record.occurred.Equal(cutoff) && record.item.ID < cursor.ID) {
-				filtered = append(filtered, record)
-			}
-		}
-		records = filtered
-	}
 	page := domain.ActivityPage{Items: make([]domain.Activity, 0, options.Limit)}
-	for _, record := range records {
-		if len(page.Items) == options.Limit {
-			page.HasMore = true
-			break
-		}
-		page.Items = append(page.Items, record.item)
+	page.HasMore = len(records) > options.Limit
+	if page.HasMore {
+		records = records[:options.Limit]
 	}
+	page.Items = append(page.Items, records...)
 	if page.HasMore {
 		next, err := encodeActivityCursorWithKey(s.cursorKey, portfolioID, page.Items[len(page.Items)-1].OccurredAt, page.Items[len(page.Items)-1].ID)
 		if err != nil {

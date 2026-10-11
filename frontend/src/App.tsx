@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, RefObject } from 'react'
 import { apiFetch, APIError, jsonResponse } from './api'
 
 export type Freshness = {
@@ -233,7 +233,7 @@ function AllocationSection({ data }: { data: PortfolioOverview }) {
   )
 }
 
-function ActivityView({ page, state, error, loadingMore, appendError, onLoadMore, onRetry }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; loadingMore: boolean; appendError: string; onLoadMore: () => void; onRetry: () => void }) {
+function ActivityView({ page, state, error, loadingMore, appendError, announcement, loadMoreRef, onLoadMore, onRetry }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; loadingMore: boolean; appendError: string; announcement: string; loadMoreRef: RefObject<HTMLButtonElement | null>; onLoadMore: () => void; onRetry: () => void }) {
   return (
     <section className="activity-card" aria-labelledby="activity-title">
       <div className="section-heading"><div><span className="eyebrow">Audit-safe timeline</span><h2 id="activity-title">Activity</h2></div><span className="muted">Newest first</span></div>
@@ -241,14 +241,15 @@ function ActivityView({ page, state, error, loadingMore, appendError, onLoadMore
       {state === 'error' && !page && <p className="notice error" role="alert">{error}<br /><button type="button" onClick={onRetry}>Try again</button></p>}
       {page && page.items.length === 0 && state !== 'loading' && <p className="empty">No activity recorded for this portfolio.</p>}
       {page && page.items.length > 0 && <ol className="activity-list" aria-label="Portfolio activity">
-        {page.items.map((item) => <li className="activity-item" key={item.id}>
+        {page.items.map((item) => <li className="activity-item" tabIndex={-1} data-activity-id={item.id} key={item.id}>
           <div className="activity-heading"><strong>{item.summary}</strong><time dateTime={item.occurred_at}>{displayDate(item.occurred_at)}</time></div>
           <div className="activity-meta"><span>{item.action}</span><span>Actor: {item.actor_category}</span></div>
           {item.details && <p>{item.details}</p>}
         </li>)}
       </ol>}
+      <p className="visually-hidden" role="status" aria-live="polite">{announcement}</p>
       {appendError && <p className="notice error" role="alert">{appendError} <button type="button" onClick={onRetry}>Retry loading activity</button></p>}
-      {page?.has_more && !appendError && <button type="button" onClick={onLoadMore} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more activity…' : 'Load more activity'}</button>}
+      {page?.has_more && !appendError && <button ref={loadMoreRef} type="button" onClick={onLoadMore} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more activity…' : 'Load more activity'}</button>}
     </section>
   )
 }
@@ -267,11 +268,19 @@ function validateActivityPage(value: unknown): ActivityPage {
   } else if (hasCursor) {
     throw new Error('Invalid activity pagination response')
   }
+  const canonicalDateTime = (candidate: unknown) => {
+    if (typeof candidate !== 'string' || !/^(?:\d{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d):[0-5]\d)$/.test(candidate) || !Number.isFinite(Date.parse(candidate))) return false
+    const year = Number(candidate.slice(0, 4)); const month = Number(candidate.slice(5, 7)); const day = Number(candidate.slice(8, 10))
+    return day <= new Date(Date.UTC(year, month, 0)).getUTCDate()
+  }
   for (const item of page.items) {
     if (!item || typeof item !== 'object') throw new Error('Invalid activity item')
-    const candidate = item as ActivityItem
-    if (typeof candidate.id !== 'string' || candidate.id === '' || candidate.portfolio_id !== activityPortfolioID || typeof candidate.occurred_at !== 'string' || !Number.isFinite(Date.parse(candidate.occurred_at))) throw new Error('Invalid activity item')
+    const candidate = item as ActivityItem & Record<string, unknown>
+    const allowed = new Set(['id', 'portfolio_id', 'action', 'category', 'actor_category', 'entity_type', 'entity_id', 'occurred_at', 'summary', 'details'])
+    if (Object.keys(candidate).some((key) => !allowed.has(key))) throw new Error('Invalid activity item')
+    if (typeof candidate.id !== 'string' || candidate.id === '' || candidate.portfolio_id !== activityPortfolioID || !canonicalDateTime(candidate.occurred_at)) throw new Error('Invalid activity item')
     for (const field of ['action', 'category', 'actor_category', 'summary'] as const) if (typeof candidate[field] !== 'string') throw new Error('Invalid activity item')
+    for (const field of ['entity_type', 'entity_id', 'details'] as const) if (candidate[field] !== undefined && typeof candidate[field] !== 'string') throw new Error('Invalid activity item')
   }
   return page
 }
@@ -324,6 +333,7 @@ export default function App() {
   const [activityError, setActivityError] = useState('')
   const [activityLoadingMore, setActivityLoadingMore] = useState(false)
   const [activityAppendError, setActivityAppendError] = useState('')
+  const [activityAnnouncement, setActivityAnnouncement] = useState('')
   const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState('')
@@ -335,6 +345,7 @@ export default function App() {
   const authControllerRef = useRef<AbortController | null>(null)
   const loadControllerRef = useRef<AbortController | null>(null)
   const activityControllerRef = useRef<AbortController | null>(null)
+  const activityLoadMoreRef = useRef<HTMLButtonElement>(null)
   const activityLoadingMoreRef = useRef(false)
   const authGeneration = useRef(0)
   const loadGeneration = useRef(0)
@@ -354,7 +365,7 @@ export default function App() {
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
     activityLoadingMoreRef.current = false
-    setData(null); setActivity(null); setError(''); setActivityError(''); setActivityAppendError(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
+    setData(null); setActivity(null); setError(''); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -404,17 +415,19 @@ export default function App() {
     activityControllerRef.current?.abort()
     const controller = new AbortController()
     activityControllerRef.current = controller
-    if (append) { activityLoadingMoreRef.current = true; setActivityLoadingMore(true); setActivityAppendError('') } else { setActivityState('loading'); setActivityError(''); setActivityAppendError('') }
+    if (append) { activityLoadingMoreRef.current = true; setActivityLoadingMore(true); setActivityAppendError('') } else { setActivity(null); setActivityState('loading'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement('') }
     const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
     apiFetch(`/api/v1/portfolios/${activityPortfolioID}/activity?limit=20${query}`, { signal: controller.signal })
       .then((response) => jsonResponse<ActivityPage>(response))
       .then((nextPage) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
         validateActivityPage(nextPage)
+        let appendedCount = 0
         setActivity((previous) => {
           const combined = append && previous ? [...previous.items, ...nextPage.items] : nextPage.items
           const unique = new Map<string, ActivityItem>()
           for (const item of combined) if (!unique.has(item.id)) unique.set(item.id, item)
+          appendedCount = append ? unique.size - (previous?.items.length || 0) : 0
           const items = [...unique.values()].sort((left, right) => Date.parse(right.occurred_at) - Date.parse(left.occurred_at) || right.id.localeCompare(left.id))
           return { ...nextPage, items }
         })
@@ -422,6 +435,13 @@ export default function App() {
         setActivityLoadingMore(false)
         setActivityAppendError('')
         setActivityState('ready')
+        if (append) {
+          const shouldRestoreFocus = document.activeElement === activityLoadMoreRef.current
+          setActivityAnnouncement(`Loaded ${appendedCount} more activit${appendedCount === 1 ? 'y' : 'ies'}.`)
+          if (shouldRestoreFocus && nextPage.items[0]) {
+            window.setTimeout(() => Array.from(document.querySelectorAll<HTMLElement>('[data-activity-id]')).find((node) => node.dataset.activityId === nextPage.items[0].id)?.focus(), 0)
+          }
+        }
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
@@ -663,7 +683,7 @@ export default function App() {
         </>
       )}
       </>}
-      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} onLoadMore={() => loadActivity(activity?.next_cursor, true)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
+      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} onLoadMore={() => loadActivity(activity?.next_cursor, true)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
     </main>
   )
 }

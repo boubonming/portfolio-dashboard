@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -130,5 +131,48 @@ func TestActivityCursorIsBoundCanonicalAndStableAcrossReopen(t *testing.T) {
 	stable, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Limit: 1, Cursor: cursor})
 	if err != nil || len(stable.Items) != 1 || stable.Items[0].ID != "event-old" {
 		t.Fatalf("reopened cursor page=%+v err=%v", stable, err)
+	}
+}
+
+func TestActivityIsAppendOnlyAndUsesBoundedOrderIndex(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "immutable.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := "2026-01-02T12:00:00Z"
+	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "immutable-portfolio", "Immutable", "USD", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at) VALUES(?,?,?,?,?,?,?,?)`, "immutable-event", "immutable-portfolio", "system", "portfolio.snapshot.created", "portfolio", "summary", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`UPDATE activity_events SET summary='changed' WHERE id='immutable-event'`); err == nil {
+		t.Fatal("activity update unexpectedly succeeded")
+	}
+	if _, err := s.DB.Exec(`DELETE FROM activity_events WHERE id='immutable-event'`); err == nil {
+		t.Fatal("activity delete unexpectedly succeeded")
+	}
+	rows, err := s.DB.Query(`EXPLAIN QUERY PLAN SELECT id FROM activity_events WHERE portfolio_id=? AND (sort_time<? OR (sort_time=? AND id<?)) ORDER BY sort_time DESC,id DESC LIMIT ?`, "immutable-portfolio", "00000000000000000000", "00000000000000000000", "", 21)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var indexed bool
+	for rows.Next() {
+		var id, parent, unused, detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(detail, "idx_activity_portfolio_order") {
+			indexed = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !indexed {
+		t.Fatal("activity order query did not use the canonical order index")
 	}
 }
