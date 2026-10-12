@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -274,7 +275,7 @@ func TestThesisSeparateStoresSerializeCreateAndUpdateRaces(t *testing.T) {
 	}
 	for _, table := range []string{"portfolio_theses", "thesis_revisions", "audit_events", "activity_events"} {
 		var count int
-		if err := firstStore.DB.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+		if err := firstStore.DB.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		want := 2
@@ -321,7 +322,7 @@ func TestThesisAuditAndActivityFailuresRollBackMutation(t *testing.T) {
 			}
 			for _, table := range []string{"portfolio_theses", "thesis_revisions", "audit_events", "activity_events"} {
 				var count int
-				if err := s.DB.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+				if err := s.DB.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
 					t.Fatal(err)
 				}
 				if count != 0 {
@@ -334,23 +335,24 @@ func TestThesisAuditAndActivityFailuresRollBackMutation(t *testing.T) {
 
 func TestThesisSchemaVerificationRejectsCorruption(t *testing.T) {
 	corruptions := []struct {
-		name string
-		stmt string
+		name   string
+		mutate func(*sql.DB) error
+		assert func(*sql.DB) error
 	}{
-		{name: "portfolio table", stmt: `PRAGMA foreign_keys=OFF; DROP TABLE portfolio_theses`},
-		{name: "revision table", stmt: `PRAGMA foreign_keys=OFF; DROP TABLE thesis_revisions`},
-		{name: "portfolio index", stmt: `DROP INDEX idx_portfolio_theses_portfolio`},
-		{name: "instrument index", stmt: `DROP INDEX idx_portfolio_theses_instrument`},
-		{name: "history index direction", stmt: `DROP INDEX idx_thesis_revisions_history; CREATE INDEX idx_thesis_revisions_history ON thesis_revisions(thesis_id, revision ASC)`},
-		{name: "portfolio index direction", stmt: `DROP INDEX idx_thesis_revisions_portfolio; CREATE INDEX idx_thesis_revisions_portfolio ON thesis_revisions(portfolio_id DESC, holding_id, revision DESC)`},
-		{name: "lot unique index", stmt: `DROP INDEX idx_lots_portfolio_id_id`},
-		{name: "composite unique definition", stmt: "PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql, '    UNIQUE(portfolio_id, holding_id),\\n', '') WHERE type='table' AND name='portfolio_theses'; PRAGMA schema_version=999; PRAGMA writable_schema=OFF"},
-		{name: "scope insert trigger", stmt: `DROP TRIGGER portfolio_theses_scope_insert`},
-		{name: "scope update trigger", stmt: `DROP TRIGGER portfolio_theses_scope_update`},
-		{name: "revision scope trigger", stmt: `DROP TRIGGER thesis_revisions_scope_insert`},
-		{name: "thesis delete trigger", stmt: `DROP TRIGGER portfolio_theses_append_only_delete`},
-		{name: "revision update trigger", stmt: `DROP TRIGGER thesis_revisions_append_only_update`},
-		{name: "revision delete trigger", stmt: `DROP TRIGGER thesis_revisions_append_only_delete`},
+		{name: "portfolio table", mutate: execSchemaCorruption(`PRAGMA foreign_keys=OFF; DROP TABLE portfolio_theses`), assert: assertSchemaObjectAbsent("table", "portfolio_theses")},
+		{name: "revision table", mutate: execSchemaCorruption(`PRAGMA foreign_keys=OFF; DROP TABLE thesis_revisions`), assert: assertSchemaObjectAbsent("table", "thesis_revisions")},
+		{name: "portfolio index", mutate: execSchemaCorruption(`DROP INDEX idx_portfolio_theses_portfolio`), assert: assertSchemaObjectAbsent("index", "idx_portfolio_theses_portfolio")},
+		{name: "instrument index", mutate: execSchemaCorruption(`DROP INDEX idx_portfolio_theses_instrument`), assert: assertSchemaObjectAbsent("index", "idx_portfolio_theses_instrument")},
+		{name: "history index direction", mutate: execSchemaCorruption(`DROP INDEX idx_thesis_revisions_history; CREATE INDEX idx_thesis_revisions_history ON thesis_revisions(thesis_id, revision ASC)`), assert: assertIndexDefinition("idx_thesis_revisions_history", []string{"thesis_id", "revision"}, []int{0, 1})},
+		{name: "portfolio index direction", mutate: execSchemaCorruption(`DROP INDEX idx_thesis_revisions_portfolio; CREATE INDEX idx_thesis_revisions_portfolio ON thesis_revisions(portfolio_id DESC, holding_id, revision DESC)`), assert: assertIndexDefinition("idx_thesis_revisions_portfolio", []string{"portfolio_id", "holding_id", "revision"}, []int{0, 0, 1})},
+		{name: "lot unique index", mutate: execSchemaCorruption(`DROP INDEX idx_lots_portfolio_id_id`), assert: assertSchemaObjectAbsent("index", "idx_lots_portfolio_id_id")},
+		{name: "composite unique definition", mutate: corruptPortfolioThesesCompositeUnique, assert: assertUniqueDefinitionAbsent("portfolio_theses", []string{"portfolio_id", "holding_id"})},
+		{name: "scope insert trigger", mutate: execSchemaCorruption(`DROP TRIGGER portfolio_theses_scope_insert`), assert: assertSchemaObjectAbsent("trigger", "portfolio_theses_scope_insert")},
+		{name: "scope update trigger", mutate: execSchemaCorruption(`DROP TRIGGER portfolio_theses_scope_update`), assert: assertSchemaObjectAbsent("trigger", "portfolio_theses_scope_update")},
+		{name: "revision scope trigger", mutate: execSchemaCorruption(`DROP TRIGGER thesis_revisions_scope_insert`), assert: assertSchemaObjectAbsent("trigger", "thesis_revisions_scope_insert")},
+		{name: "thesis delete trigger", mutate: execSchemaCorruption(`DROP TRIGGER portfolio_theses_append_only_delete`), assert: assertSchemaObjectAbsent("trigger", "portfolio_theses_append_only_delete")},
+		{name: "revision update trigger", mutate: execSchemaCorruption(`DROP TRIGGER thesis_revisions_append_only_update`), assert: assertSchemaObjectAbsent("trigger", "thesis_revisions_append_only_update")},
+		{name: "revision delete trigger", mutate: execSchemaCorruption(`DROP TRIGGER thesis_revisions_append_only_delete`), assert: assertSchemaObjectAbsent("trigger", "thesis_revisions_append_only_delete")},
 	}
 	for _, corruption := range corruptions {
 		t.Run(corruption.name, func(t *testing.T) {
@@ -363,9 +365,15 @@ func TestThesisSchemaVerificationRejectsCorruption(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Exec(corruption.stmt); err != nil {
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
+			if err := corruption.mutate(db); err != nil {
 				db.Close()
 				t.Fatal(err)
+			}
+			if err := corruption.assert(db); err != nil {
+				db.Close()
+				t.Fatalf("corruption did not land: %v", err)
 			}
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
@@ -377,4 +385,93 @@ func TestThesisSchemaVerificationRejectsCorruption(t *testing.T) {
 			}
 		})
 	}
+}
+
+func execSchemaCorruption(stmt string) func(*sql.DB) error {
+	return func(db *sql.DB) error {
+		_, err := db.Exec(stmt)
+		return err
+	}
+}
+
+func assertSchemaObjectAbsent(objectType, name string) func(*sql.DB) error {
+	return func(db *sql.DB) error {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?`, objectType, name).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			return fmt.Errorf("%s %s still exists", objectType, name)
+		}
+		return nil
+	}
+}
+
+func assertIndexDefinition(name string, columns []string, descending []int) func(*sql.DB) error {
+	return func(db *sql.DB) error {
+		if err := verifyIndexColumns(context.Background(), db, name, columns, descending); err == nil {
+			return fmt.Errorf("index %s still has its canonical definition", name)
+		}
+		return nil
+	}
+}
+
+func assertUniqueDefinitionAbsent(table string, columns []string) func(*sql.DB) error {
+	return func(db *sql.DB) error {
+		if err := verifyAnyUniqueColumns(context.Background(), db, table, columns); err == nil {
+			return fmt.Errorf("%s still has unique definition %v", table, columns)
+		}
+		return nil
+	}
+}
+
+func corruptPortfolioThesesCompositeUnique(db *sql.DB) error {
+	rows, err := db.Query(`SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name='portfolio_theses'`)
+	if err != nil {
+		return err
+	}
+	var triggers []string
+	for rows.Next() {
+		var definition string
+		if err := rows.Scan(&definition); err != nil {
+			rows.Close()
+			return err
+		}
+		triggers = append(triggers, definition)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF; CREATE TABLE portfolio_theses_corrupt (
+    id TEXT PRIMARY KEY,
+    portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
+    holding_id TEXT NOT NULL,
+    instrument_id TEXT NOT NULL REFERENCES instruments(id),
+    summary TEXT NOT NULL,
+    intended_holding_period TEXT NOT NULL,
+    allocation_limit TEXT,
+    reasons_to_hold TEXT NOT NULL,
+    risks TEXT NOT NULL,
+    reasons_to_sell TEXT NOT NULL,
+    conditions_to_change TEXT NOT NULL,
+    sources TEXT NOT NULL,
+    current_revision INTEGER NOT NULL CHECK (current_revision >= 1),
+    request_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(id, portfolio_id, holding_id, instrument_id),
+    FOREIGN KEY (portfolio_id, holding_id) REFERENCES lots(portfolio_id, id)
+); INSERT INTO portfolio_theses_corrupt SELECT * FROM portfolio_theses; DROP TABLE portfolio_theses; ALTER TABLE portfolio_theses_corrupt RENAME TO portfolio_theses; CREATE INDEX idx_portfolio_theses_portfolio ON portfolio_theses(portfolio_id); CREATE INDEX idx_portfolio_theses_instrument ON portfolio_theses(portfolio_id, instrument_id)`); err != nil {
+		return err
+	}
+	for _, trigger := range triggers {
+		if _, err := db.Exec(trigger); err != nil {
+			return err
+		}
+	}
+	return nil
 }

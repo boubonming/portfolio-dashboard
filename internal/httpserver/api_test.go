@@ -426,7 +426,9 @@ func newThesisAPISession(t *testing.T, database *store.Store) thesisAPISession {
 	if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
 		t.Fatalf("login status=%d body=%s", response.Code, response.Body.String())
 	}
-	var session struct{ CSRF string `json:"csrf_token"` }
+	var session struct {
+		CSRF string `json:"csrf_token"`
+	}
 	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil || session.CSRF == "" {
 		t.Fatalf("login session=%s err=%v", response.Body.String(), err)
 	}
@@ -467,7 +469,7 @@ func TestHoldingThesisProductionHandlerContract(t *testing.T) {
 	anonymousHandler, err := NewHandlerWithAuth(database, auth.Config{
 		Username: "fixture-user", PasswordHash: sessionPasswordHash(t),
 		SessionSecret: base64.StdEncoding.EncodeToString([]byte("anonymous-thesis-session-secret-diversity-123")),
-		PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
+		PublicOrigin:  "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)
