@@ -259,12 +259,12 @@ func portfolioThesis(database *store.Store) http.HandlerFunc {
 				return
 			}
 			writeJSON(w, http.StatusOK, thesis)
-		case http.MethodPut, http.MethodPost:
+		case http.MethodPut:
 			if err := saveThesisRequest(database, w, r, parts[3], parts[5]); err != nil {
 				thesisHTTPError(w, err)
 			}
 		default:
-			w.Header().Set("Allow", "GET, POST, PUT")
+			w.Header().Set("Allow", "GET, PUT")
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 		}
 	}
@@ -276,13 +276,13 @@ func saveThesisRequest(database *store.Store, w http.ResponseWriter, r *http.Req
 		return fmt.Errorf("%w: content type", store.ErrInvalidThesis)
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, store.MaxThesisBodyBytes)
-	var raw map[string]json.RawMessage
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&raw); err != nil || raw == nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, store.MaxThesisBodyBytes+1))
+	if err != nil || len(body) > store.MaxThesisBodyBytes || !json.Valid(body) || hasDuplicateJSONKeys(body) {
 		return fmt.Errorf("%w: malformed JSON", store.ErrInvalidThesis)
 	}
-	if extra := decoder.Decode(&struct{}{}); extra != io.EOF {
-		return fmt.Errorf("%w: trailing JSON", store.ErrInvalidThesis)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
+		return fmt.Errorf("%w: malformed JSON", store.ErrInvalidThesis)
 	}
 	allowed := map[string]bool{"summary": true, "intended_holding_period": true, "allocation_limit": true, "reasons_to_hold": true, "risks": true, "reasons_to_sell": true, "conditions_to_change": true, "sources": true, "expected_revision": true}
 	for key := range raw {
@@ -294,8 +294,8 @@ func saveThesisRequest(database *store.Store, w http.ResponseWriter, r *http.Req
 		if _, ok := raw[key]; !ok {
 			return fmt.Errorf("%w: missing field", store.ErrInvalidThesis)
 		}
-		if key != "summary" && key != "intended_holding_period" && key != "expected_revision" && bytes.Equal(bytes.TrimSpace(raw[key]), []byte("null")) {
-			return fmt.Errorf("%w: null list", store.ErrInvalidThesis)
+		if key != "allocation_limit" && bytes.Equal(bytes.TrimSpace(raw[key]), []byte("null")) {
+			return fmt.Errorf("%w: null field", store.ErrInvalidThesis)
 		}
 	}
 	encoded, err := json.Marshal(raw)
@@ -308,6 +308,9 @@ func saveThesisRequest(database *store.Store, w http.ResponseWriter, r *http.Req
 	if err := strictDecoder.Decode(&request); err != nil {
 		return fmt.Errorf("%w: malformed JSON", store.ErrInvalidThesis)
 	}
+	if extra := strictDecoder.Decode(&struct{}{}); extra != io.EOF {
+		return fmt.Errorf("%w: trailing JSON", store.ErrInvalidThesis)
+	}
 	request.PortfolioID, request.HoldingID = portfolioID, holdingID
 	thesis, err := database.SaveThesis(r.Context(), request)
 	if err != nil {
@@ -315,6 +318,71 @@ func saveThesisRequest(database *store.Store, w http.ResponseWriter, r *http.Req
 	}
 	writeJSON(w, http.StatusOK, thesis)
 	return nil
+}
+
+func hasDuplicateJSONKeys(data []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := walkJSONToken(decoder, nil); err != nil {
+		return true
+	}
+	_, err := decoder.Token()
+	return err != io.EOF
+}
+
+func walkJSONToken(decoder *json.Decoder, first json.Token) error {
+	var token json.Token
+	var err error
+	if first == nil {
+		token, err = decoder.Token()
+	} else {
+		token = first
+	}
+	if err != nil {
+		return err
+	}
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]struct{}{}
+		for {
+			key, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			if end, ok := key.(json.Delim); ok && end == '}' {
+				return nil
+			}
+			name, ok := key.(string)
+			if !ok {
+				return fmt.Errorf("object key is not string")
+			}
+			if _, exists := seen[name]; exists {
+				return fmt.Errorf("duplicate object key")
+			}
+			seen[name] = struct{}{}
+			if err := walkJSONToken(decoder, nil); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for {
+			next, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			if end, ok := next.(json.Delim); ok && end == ']' {
+				return nil
+			}
+			if err := walkJSONToken(decoder, next); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("unexpected delimiter")
+	}
 }
 
 func thesisHTTPError(w http.ResponseWriter, err error) {

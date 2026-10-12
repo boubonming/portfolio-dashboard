@@ -160,6 +160,35 @@ func thesisArrays(raw string, target *thesisDocument) error {
 }
 
 func (s *Store) SaveThesis(ctx context.Context, input domain.ThesisUpdate) (domain.Thesis, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		result, err := s.saveThesisOnce(ctx, input)
+		if err == nil || !isThesisContention(err) {
+			return result, err
+		}
+		if waitErr := waitForThesisRetry(ctx, attempt); waitErr != nil {
+			return domain.Thesis{}, err
+		}
+	}
+	return domain.Thesis{}, ErrThesisConflict
+}
+
+func isThesisContention(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") || strings.Contains(message, "database table is locked") || strings.Contains(message, "sqlite_busy") || strings.Contains(message, "unique constraint failed: portfolio_theses.portfolio_id, portfolio_theses.holding_id") || strings.Contains(message, "unique constraint failed: portfolio_theses.id") || strings.Contains(message, "unique constraint failed: thesis_revisions.thesis_id, thesis_revisions.revision") || strings.Contains(message, "unique constraint failed: thesis_revisions.id")
+}
+
+func waitForThesisRetry(ctx context.Context, attempt int) error {
+	timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (s *Store) saveThesisOnce(ctx context.Context, input domain.ThesisUpdate) (domain.Thesis, error) {
 	input, doc, err := normalizeThesisUpdate(input)
 	if err != nil {
 		return domain.Thesis{}, err
@@ -194,7 +223,7 @@ func (s *Store) SaveThesis(ctx context.Context, input domain.ThesisUpdate) (doma
 	if current > 0 {
 		var duplicateRevision int64
 		if duplicateErr := tx.QueryRowContext(ctx, `SELECT revision FROM thesis_revisions WHERE thesis_id=? AND request_hash=?`, thesisID, hash).Scan(&duplicateRevision); duplicateErr == nil {
-			return readThesisTx(ctx, tx, input.PortfolioID, input.HoldingID)
+			return readThesisRevisionTx(ctx, tx, thesisID, duplicateRevision)
 		} else if duplicateErr != sql.ErrNoRows {
 			return domain.Thesis{}, duplicateErr
 		}
@@ -208,7 +237,15 @@ func (s *Store) SaveThesis(ctx context.Context, input domain.ThesisUpdate) (doma
 	if current == 0 {
 		_, err = tx.ExecContext(ctx, `INSERT INTO portfolio_theses(id,portfolio_id,holding_id,instrument_id,summary,intended_holding_period,allocation_limit,reasons_to_hold,risks,reasons_to_sell,conditions_to_change,sources,current_revision,request_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, thesisID, input.PortfolioID, input.HoldingID, instrumentID, doc.Summary, doc.IntendedHoldingPeriod, nullableThesisString(doc.AllocationLimit), mustJSON(doc.ReasonsToHold), mustJSON(doc.Risks), mustJSON(doc.ReasonsToSell), mustJSON(doc.ConditionsToChange), mustJSON(doc.Sources), revision, hash, now, now)
 	} else {
-		_, err = tx.ExecContext(ctx, `UPDATE portfolio_theses SET summary=?,intended_holding_period=?,allocation_limit=?,reasons_to_hold=?,risks=?,reasons_to_sell=?,conditions_to_change=?,sources=?,current_revision=?,request_hash=?,updated_at=? WHERE id=? AND current_revision=?`, doc.Summary, doc.IntendedHoldingPeriod, nullableThesisString(doc.AllocationLimit), mustJSON(doc.ReasonsToHold), mustJSON(doc.Risks), mustJSON(doc.ReasonsToSell), mustJSON(doc.ConditionsToChange), mustJSON(doc.Sources), revision, hash, now, thesisID, current)
+		var result sql.Result
+		result, err = tx.ExecContext(ctx, `UPDATE portfolio_theses SET summary=?,intended_holding_period=?,allocation_limit=?,reasons_to_hold=?,risks=?,reasons_to_sell=?,conditions_to_change=?,sources=?,current_revision=?,request_hash=?,updated_at=? WHERE id=? AND current_revision=?`, doc.Summary, doc.IntendedHoldingPeriod, nullableThesisString(doc.AllocationLimit), mustJSON(doc.ReasonsToHold), mustJSON(doc.Risks), mustJSON(doc.ReasonsToSell), mustJSON(doc.ConditionsToChange), mustJSON(doc.Sources), revision, hash, now, thesisID, current)
+		if err == nil {
+			var affected int64
+			affected, err = result.RowsAffected()
+			if err == nil && affected != 1 {
+				err = ErrThesisConflict
+			}
+		}
 	}
 	if err != nil {
 		return domain.Thesis{}, err
@@ -228,7 +265,7 @@ func (s *Store) SaveThesis(ctx context.Context, input domain.ThesisUpdate) (doma
 	if err = tx.Commit(); err != nil {
 		return domain.Thesis{}, err
 	}
-	return s.GetThesis(ctx, input.PortfolioID, input.HoldingID)
+	return readThesisRevisionDB(ctx, s.DB, thesisID, revision)
 }
 
 func CreateOrUpdateThesis(ctx context.Context, s *Store, input domain.ThesisUpdate) (domain.Thesis, error) {
@@ -242,6 +279,58 @@ func nullableThesisString(value *string) any {
 	return *value
 }
 func mustJSON(value any) string { encoded, _ := json.Marshal(value); return string(encoded) }
+
+func decodeThesisArrays(raw string, target any) error {
+	if strings.TrimSpace(raw) == "null" || !strings.HasPrefix(strings.TrimSpace(raw), "[") {
+		return fmt.Errorf("%w: invalid stored array", ErrInvalidThesis)
+	}
+	if err := json.Unmarshal([]byte(raw), target); err != nil {
+		return fmt.Errorf("%w: invalid stored array", ErrInvalidThesis)
+	}
+	return nil
+}
+
+func readThesisRevisionTx(ctx context.Context, tx *sql.Tx, thesisID string, revision int64) (domain.Thesis, error) {
+	return scanThesisRevision(ctx, tx.QueryRowContext(ctx, `SELECT t.id,t.portfolio_id,t.holding_id,t.instrument_id,r.id,r.revision,r.summary,r.intended_holding_period,r.allocation_limit,r.reasons_to_hold,r.risks,r.reasons_to_sell,r.conditions_to_change,r.sources,r.created_at FROM thesis_revisions r JOIN portfolio_theses t ON t.id=r.thesis_id WHERE r.thesis_id=? AND r.revision=?`, thesisID, revision))
+}
+
+func readThesisRevisionDB(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, thesisID string, revision int64) (domain.Thesis, error) {
+	return scanThesisRevision(ctx, db.QueryRowContext(ctx, `SELECT t.id,t.portfolio_id,t.holding_id,t.instrument_id,r.id,r.revision,r.summary,r.intended_holding_period,r.allocation_limit,r.reasons_to_hold,r.risks,r.reasons_to_sell,r.conditions_to_change,r.sources,r.created_at FROM thesis_revisions r JOIN portfolio_theses t ON t.id=r.thesis_id WHERE r.thesis_id=? AND r.revision=?`, thesisID, revision))
+}
+
+func scanThesisRevision(_ context.Context, row *sql.Row) (domain.Thesis, error) {
+	var result domain.Thesis
+	var allocation sql.NullString
+	var reasons, risks, sell, conditions, sources string
+	err := row.Scan(&result.ID, &result.PortfolioID, &result.HoldingID, &result.InstrumentID, &result.RevisionID, &result.Revision, &result.Summary, &result.IntendedHoldingPeriod, &allocation, &reasons, &risks, &sell, &conditions, &sources, &result.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return domain.Thesis{}, ErrThesisNotFound
+	}
+	if err != nil {
+		return domain.Thesis{}, err
+	}
+	if allocation.Valid {
+		result.AllocationLimit = &allocation.String
+	}
+	if err := decodeThesisArrays(reasons, &result.ReasonsToHold); err != nil {
+		return domain.Thesis{}, err
+	}
+	if err := decodeThesisArrays(risks, &result.Risks); err != nil {
+		return domain.Thesis{}, err
+	}
+	if err := decodeThesisArrays(sell, &result.ReasonsToSell); err != nil {
+		return domain.Thesis{}, err
+	}
+	if err := decodeThesisArrays(conditions, &result.ConditionsToChange); err != nil {
+		return domain.Thesis{}, err
+	}
+	if err := decodeThesisArrays(sources, &result.Sources); err != nil {
+		return domain.Thesis{}, err
+	}
+	return result, nil
+}
 
 func readThesisTx(ctx context.Context, tx *sql.Tx, portfolioID, holdingID string) (domain.Thesis, error) {
 	var result domain.Thesis
@@ -257,19 +346,19 @@ func readThesisTx(ctx context.Context, tx *sql.Tx, portfolioID, holdingID string
 	if allocation.Valid {
 		result.AllocationLimit = &allocation.String
 	}
-	if err := json.Unmarshal([]byte(reasons), &result.ReasonsToHold); err != nil {
+	if err := decodeThesisArrays(reasons, &result.ReasonsToHold); err != nil {
 		return domain.Thesis{}, err
 	}
-	if err := json.Unmarshal([]byte(risks), &result.Risks); err != nil {
+	if err := decodeThesisArrays(risks, &result.Risks); err != nil {
 		return domain.Thesis{}, err
 	}
-	if err := json.Unmarshal([]byte(sell), &result.ReasonsToSell); err != nil {
+	if err := decodeThesisArrays(sell, &result.ReasonsToSell); err != nil {
 		return domain.Thesis{}, err
 	}
-	if err := json.Unmarshal([]byte(conditions), &result.ConditionsToChange); err != nil {
+	if err := decodeThesisArrays(conditions, &result.ConditionsToChange); err != nil {
 		return domain.Thesis{}, err
 	}
-	if err := json.Unmarshal([]byte(sources), &result.Sources); err != nil {
+	if err := decodeThesisArrays(sources, &result.Sources); err != nil {
 		return domain.Thesis{}, err
 	}
 	return result, nil
@@ -299,10 +388,20 @@ func readThesisDB(ctx context.Context, db interface {
 	if allocation.Valid {
 		result.AllocationLimit = &allocation.String
 	}
-	for raw, target := range map[string]any{reasons: &result.ReasonsToHold, risks: &result.Risks, sell: &result.ReasonsToSell, conditions: &result.ConditionsToChange, sources: &result.Sources} {
-		if err := json.Unmarshal([]byte(raw), target); err != nil {
-			return domain.Thesis{}, err
-		}
+	if err := decodeThesisArrays(reasons, &result.ReasonsToHold); err != nil {
+		return domain.Thesis{}, err
+	}
+	if err := decodeThesisArrays(risks, &result.Risks); err != nil {
+		return domain.Thesis{}, err
+	}
+	if err := decodeThesisArrays(sell, &result.ReasonsToSell); err != nil {
+		return domain.Thesis{}, err
+	}
+	if err := decodeThesisArrays(conditions, &result.ConditionsToChange); err != nil {
+		return domain.Thesis{}, err
+	}
+	if err := decodeThesisArrays(sources, &result.Sources); err != nil {
+		return domain.Thesis{}, err
 	}
 	return result, nil
 }
@@ -311,7 +410,7 @@ func (s *Store) ThesisHistory(ctx context.Context, portfolioID, holdingID string
 	if _, err := s.GetThesis(ctx, portfolioID, holdingID); err != nil {
 		return nil, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,thesis_id,portfolio_id,holding_id,instrument_id,revision,summary,intended_holding_period,allocation_limit,reasons_to_hold,risks,reasons_to_sell,conditions_to_change,sources,created_at FROM thesis_revisions WHERE portfolio_id=? AND holding_id=? ORDER BY revision ASC`, portfolioID, holdingID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT r.id,r.thesis_id,t.portfolio_id,t.holding_id,t.instrument_id,r.revision,r.summary,r.intended_holding_period,r.allocation_limit,r.reasons_to_hold,r.risks,r.reasons_to_sell,r.conditions_to_change,r.sources,r.created_at FROM thesis_revisions r JOIN portfolio_theses t ON t.id=r.thesis_id WHERE t.portfolio_id=? AND t.holding_id=? ORDER BY r.revision ASC`, portfolioID, holdingID)
 	if err != nil {
 		return nil, err
 	}
@@ -324,10 +423,11 @@ func (s *Store) ThesisHistory(ctx context.Context, portfolioID, holdingID string
 		if err := rows.Scan(&item.RevisionID, &item.ID, &item.PortfolioID, &item.HoldingID, &item.InstrumentID, &item.Revision, &item.Summary, &item.IntendedHoldingPeriod, &allocation, &reasons, &risks, &sell, &conditions, &sources, &item.CreatedAt); err != nil {
 			return nil, err
 		}
+		item.UpdatedAt = item.CreatedAt
 		if allocation.Valid {
 			item.AllocationLimit = &allocation.String
 		}
-		if json.Unmarshal([]byte(reasons), &item.ReasonsToHold) != nil || json.Unmarshal([]byte(risks), &item.Risks) != nil || json.Unmarshal([]byte(sell), &item.ReasonsToSell) != nil || json.Unmarshal([]byte(conditions), &item.ConditionsToChange) != nil || json.Unmarshal([]byte(sources), &item.Sources) != nil {
+		if decodeThesisArrays(reasons, &item.ReasonsToHold) != nil || decodeThesisArrays(risks, &item.Risks) != nil || decodeThesisArrays(sell, &item.ReasonsToSell) != nil || decodeThesisArrays(conditions, &item.ConditionsToChange) != nil || decodeThesisArrays(sources, &item.Sources) != nil {
 			return nil, fmt.Errorf("%w: invalid stored revision", ErrInvalidThesis)
 		}
 		result = append(result, item)

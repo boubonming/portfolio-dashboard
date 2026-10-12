@@ -132,7 +132,204 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := verifyActivitySchema(ctx, db); err != nil {
 		return fmt.Errorf("canonical activity schema verification failed: %w", err)
 	}
+	if err := verifyThesisSchema(ctx, db); err != nil {
+		return fmt.Errorf("canonical thesis schema verification failed: %w", err)
+	}
 	return nil
+}
+
+func verifyThesisSchema(ctx context.Context, db *sql.DB) error {
+	if err := verifyTableColumns(ctx, db, "portfolio_theses", []string{
+		"id TEXT 0 1", "portfolio_id TEXT 1 0", "holding_id TEXT 1 0", "instrument_id TEXT 1 0",
+		"summary TEXT 1 0", "intended_holding_period TEXT 1 0", "allocation_limit TEXT 0 0",
+		"reasons_to_hold TEXT 1 0", "risks TEXT 1 0", "reasons_to_sell TEXT 1 0", "conditions_to_change TEXT 1 0",
+		"sources TEXT 1 0", "current_revision INTEGER 1 0", "request_hash TEXT 1 0", "created_at TEXT 1 0", "updated_at TEXT 1 0",
+	}); err != nil {
+		return err
+	}
+	if err := verifyTableColumns(ctx, db, "thesis_revisions", []string{
+		"id TEXT 0 1", "thesis_id TEXT 1 0", "portfolio_id TEXT 1 0", "holding_id TEXT 1 0", "instrument_id TEXT 1 0",
+		"revision INTEGER 1 0", "summary TEXT 1 0", "intended_holding_period TEXT 1 0", "allocation_limit TEXT 0 0",
+		"reasons_to_hold TEXT 1 0", "risks TEXT 1 0", "reasons_to_sell TEXT 1 0", "conditions_to_change TEXT 1 0",
+		"sources TEXT 1 0", "request_hash TEXT 1 0", "created_at TEXT 1 0",
+	}); err != nil {
+		return err
+	}
+	for _, index := range []struct {
+		name   string
+		cols   []string
+		desc   []int
+		unique bool
+	}{
+		{"idx_lots_portfolio_id_id", []string{"portfolio_id", "id"}, []int{0, 0}, true},
+		{"idx_portfolio_theses_portfolio", []string{"portfolio_id"}, []int{0}, false},
+		{"idx_portfolio_theses_instrument", []string{"portfolio_id", "instrument_id"}, []int{0, 0}, false},
+		{"idx_thesis_revisions_history", []string{"thesis_id", "revision"}, []int{0, 1}, false},
+		{"idx_thesis_revisions_portfolio", []string{"portfolio_id", "holding_id", "revision"}, []int{0, 0, 1}, false},
+	} {
+		if index.unique {
+			var unique int
+			table := "portfolio_theses"
+			if index.name == "idx_lots_portfolio_id_id" {
+				table = "lots"
+			}
+			if err := db.QueryRowContext(ctx, "SELECT \"unique\" FROM pragma_index_list("+quoteSQLiteIdentifier(table)+") WHERE name=?", index.name).Scan(&unique); err != nil || unique != 1 {
+				return fmt.Errorf("index %s is missing or not unique", index.name)
+			}
+		}
+		if err := verifyIndexColumns(ctx, db, index.name, index.cols, index.desc); err != nil {
+			return err
+		}
+	}
+	for _, unique := range []struct {
+		table string
+		cols  []string
+	}{
+		{"portfolio_theses", []string{"portfolio_id", "holding_id"}},
+		{"portfolio_theses", []string{"id", "portfolio_id", "holding_id", "instrument_id"}},
+		{"thesis_revisions", []string{"thesis_id", "revision"}},
+		{"thesis_revisions", []string{"thesis_id", "request_hash"}},
+	} {
+		if err := verifyAnyUniqueColumns(ctx, db, unique.table, unique.cols); err != nil {
+			return err
+		}
+	}
+	if err := verifyForeignKey(ctx, db, "portfolio_theses", []string{"portfolio_id", "holding_id"}, "lots", []string{"portfolio_id", "id"}); err != nil {
+		return err
+	}
+	if err := verifyForeignKey(ctx, db, "thesis_revisions", []string{"thesis_id", "portfolio_id", "holding_id", "instrument_id"}, "portfolio_theses", []string{"id", "portfolio_id", "holding_id", "instrument_id"}); err != nil {
+		return err
+	}
+	for _, trigger := range []struct {
+		name, operation string
+		fragments       []string
+	}{
+		{"portfolio_theses_scope_insert", "before insert on portfolio_theses", []string{"new.holding_id", "new.portfolio_id", "new.instrument_id", "raise(abort"}},
+		{"portfolio_theses_scope_update", "before update of portfolio_id, holding_id, instrument_id on portfolio_theses", []string{"new.holding_id", "new.portfolio_id", "new.instrument_id", "raise(abort"}},
+		{"thesis_revisions_scope_insert", "before insert on thesis_revisions", []string{"new.holding_id", "new.portfolio_id", "new.instrument_id", "raise(abort"}},
+		{"portfolio_theses_append_only_delete", "before delete on portfolio_theses", []string{"append-only", "raise(abort"}},
+		{"thesis_revisions_append_only_update", "before update on thesis_revisions", []string{"append-only", "raise(abort"}},
+		{"thesis_revisions_append_only_delete", "before delete on thesis_revisions", []string{"append-only", "raise(abort"}},
+	} {
+		var definition string
+		if err := db.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", trigger.name).Scan(&definition); err != nil {
+			return fmt.Errorf("thesis trigger %s: %w", trigger.name, err)
+		}
+		definition = strings.ToLower(definition)
+		if !strings.Contains(definition, trigger.operation) {
+			return fmt.Errorf("thesis trigger %s has wrong operation", trigger.name)
+		}
+		for _, fragment := range trigger.fragments {
+			if !strings.Contains(definition, fragment) {
+				return fmt.Errorf("thesis trigger %s is missing %q", trigger.name, fragment)
+			}
+		}
+	}
+	return nil
+}
+
+func verifyTableColumns(ctx context.Context, db *sql.DB, table string, expected []string) error {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+quoteSQLiteIdentifier(table)+")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for i, item := range expected {
+		if !rows.Next() {
+			return fmt.Errorf("%s column %d is missing", table, i)
+		}
+		var cid, notnull, pk int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		parts := strings.Fields(item)
+		if len(parts) != 4 || cid != i || name != parts[0] || strings.ToUpper(typ) != parts[1] || fmt.Sprint(notnull) != parts[2] || fmt.Sprint(pk) != parts[3] {
+			return fmt.Errorf("%s column %d is %s/%s notnull=%d pk=%d, expected %s", table, i, name, typ, notnull, pk, item)
+		}
+	}
+	if rows.Next() {
+		return fmt.Errorf("%s has unexpected columns", table)
+	}
+	return rows.Err()
+}
+
+func verifyAnyUniqueColumns(ctx context.Context, db *sql.DB, table string, expected []string) error {
+	rows, err := db.QueryContext(ctx, "SELECT name FROM pragma_index_list("+quoteSQLiteIdentifier(table)+") WHERE \"unique\"=1")
+	if err != nil {
+		return err
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if verifyIndexColumns(ctx, db, name, expected, make([]int, len(expected))) == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s unique constraint %v is missing", table, expected)
+}
+
+func verifyForeignKey(ctx context.Context, db *sql.DB, table string, from []string, toTable string, to []string) error {
+	rows, err := db.QueryContext(ctx, "SELECT id,seq,\"table\",\"from\",\"to\",on_update,on_delete FROM pragma_foreign_key_list("+quoteSQLiteIdentifier(table)+") ORDER BY id,seq")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type fkGroup struct {
+		parent    string
+		pairs     []string
+		actionsOK bool
+	}
+	groups := map[int]*fkGroup{}
+	for rows.Next() {
+		var id, seq int
+		var parent, source, target, onUpdate, onDelete string
+		if err := rows.Scan(&id, &seq, &parent, &source, &target, &onUpdate, &onDelete); err != nil {
+			return err
+		}
+		if groups[id] == nil {
+			groups[id] = &fkGroup{parent: parent, actionsOK: true}
+		}
+		groups[id].pairs = append(groups[id].pairs, source, target)
+		if onUpdate != "NO ACTION" || onDelete != "NO ACTION" {
+			groups[id].actionsOK = false
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, group := range groups {
+		pair := group.pairs
+		if group.parent != toTable || !group.actionsOK || len(pair) != 2*len(from) {
+			continue
+		}
+		matched := true
+		for i := range from {
+			if pair[2*i] != from[i] || pair[2*i+1] != to[i] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s foreign key %v -> %s %v is missing", table, from, toTable, to)
 }
 
 func verifyActivitySchema(ctx context.Context, db *sql.DB) error {

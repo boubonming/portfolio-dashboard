@@ -18,7 +18,7 @@ CREATE TABLE portfolio_theses (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(portfolio_id, holding_id),
-    UNIQUE(portfolio_id, instrument_id),
+    UNIQUE(id, portfolio_id, holding_id, instrument_id),
     FOREIGN KEY (portfolio_id, holding_id) REFERENCES lots(portfolio_id, id)
 );
 CREATE INDEX idx_portfolio_theses_portfolio ON portfolio_theses(portfolio_id);
@@ -26,10 +26,10 @@ CREATE INDEX idx_portfolio_theses_instrument ON portfolio_theses(portfolio_id, i
 
 CREATE TABLE thesis_revisions (
     id TEXT PRIMARY KEY,
-    thesis_id TEXT NOT NULL REFERENCES portfolio_theses(id),
-    portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
+    thesis_id TEXT NOT NULL,
+    portfolio_id TEXT NOT NULL,
     holding_id TEXT NOT NULL,
-    instrument_id TEXT NOT NULL REFERENCES instruments(id),
+    instrument_id TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision >= 1),
     summary TEXT NOT NULL,
     intended_holding_period TEXT NOT NULL,
@@ -43,7 +43,8 @@ CREATE TABLE thesis_revisions (
     created_at TEXT NOT NULL,
     UNIQUE(thesis_id, revision),
     UNIQUE(thesis_id, request_hash),
-    FOREIGN KEY (portfolio_id, holding_id) REFERENCES lots(portfolio_id, id)
+    FOREIGN KEY (thesis_id, portfolio_id, holding_id, instrument_id)
+        REFERENCES portfolio_theses(id, portfolio_id, holding_id, instrument_id)
 );
 CREATE INDEX idx_thesis_revisions_history ON thesis_revisions(thesis_id, revision DESC);
 CREATE INDEX idx_thesis_revisions_portfolio ON thesis_revisions(portfolio_id, holding_id, revision DESC);

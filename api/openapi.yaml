@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Portfolio Dashboard API
   version: 1.0.0
-  description: Read-only, portfolio-scoped holdings and immutable valuation snapshot view.
+  description: Authenticated portfolio-scoped holdings, immutable valuation snapshots, and editable investment theses.
 servers:
   - url: /
 paths:
@@ -319,7 +319,7 @@ components:
       properties:
         summary: { type: string, minLength: 1, maxLength: 4000 }
         intended_holding_period: { type: string, minLength: 1, maxLength: 256 }
-        allocation_limit: { type: string, nullable: true, pattern: '^(0|[1-9][0-9]{0,2})([.][0-9]{1,2})?$', description: Exact decimal percentage, inclusive from 0 to 100; canonical responses remove insignificant zeroes. }
+        allocation_limit: { $ref: '#/components/schemas/AllocationLimit' }
         reasons_to_hold: { type: array, minItems: 0, maxItems: 32, items: { type: string, minLength: 1, maxLength: 1000 } }
         risks: { type: array, minItems: 0, maxItems: 32, items: { type: string, minLength: 1, maxLength: 1000 } }
         reasons_to_sell: { type: array, minItems: 0, maxItems: 32, items: { type: string, minLength: 1, maxLength: 1000 } }
@@ -345,7 +345,7 @@ components:
         instrument_id: { type: string }
         summary: { type: string, minLength: 1, maxLength: 4000 }
         intended_holding_period: { type: string, minLength: 1, maxLength: 256 }
-        allocation_limit: { type: string, nullable: true, pattern: '^(0|[1-9][0-9]{0,2})([.][0-9]{1,2})?$', description: Exact decimal percentage. }
+        allocation_limit: { $ref: '#/components/schemas/AllocationLimit' }
         reasons_to_hold: { type: array, items: { type: string } }
         risks: { type: array, items: { type: string } }
         reasons_to_sell: { type: array, items: { type: string } }
@@ -354,13 +354,35 @@ components:
         revision: { type: integer, minimum: 1 }
         revision_id: { type: string }
         updated_at: { type: string, format: date-time }
+    AllocationLimit:
+      nullable: true
+      description: Exact decimal percentage, inclusive from 0 to 100. Canonical responses remove insignificant zeroes.
+      oneOf:
+        - type: string
+          pattern: '^(0|[1-9][0-9]?)([.][0-9]{1,2})?$'
+        - type: string
+          pattern: '^100([.]0{1,2})?$'
     ThesisRevision:
-      allOf:
-        - $ref: '#/components/schemas/Thesis'
-        - type: object
-          required: [created_at]
-          properties:
-            created_at: { type: string, format: date-time }
+      type: object
+      additionalProperties: false
+      required: [id, portfolio_id, holding_id, instrument_id, summary, intended_holding_period, reasons_to_hold, risks, reasons_to_sell, conditions_to_change, sources, revision, revision_id, updated_at, created_at]
+      properties:
+        id: { type: string }
+        portfolio_id: { type: string }
+        holding_id: { type: string }
+        instrument_id: { type: string }
+        summary: { type: string, minLength: 1, maxLength: 4000 }
+        intended_holding_period: { type: string, minLength: 1, maxLength: 256 }
+        allocation_limit: { $ref: '#/components/schemas/AllocationLimit' }
+        reasons_to_hold: { type: array, items: { type: string } }
+        risks: { type: array, items: { type: string } }
+        reasons_to_sell: { type: array, items: { type: string } }
+        conditions_to_change: { type: array, items: { type: string } }
+        sources: { type: array, items: { $ref: '#/components/schemas/ThesisSource' } }
+        revision: { type: integer, minimum: 1 }
+        revision_id: { type: string }
+        updated_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
     ThesisHistory:
       type: object
       additionalProperties: false
