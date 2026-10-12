@@ -45,6 +45,15 @@ function authenticatedFetch(handler: (input: RequestInfo | URL, init?: RequestIn
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).includes('/api/v1/auth/session') ? Promise.resolve(authenticatedSession) : handler(input, init))
 }
 
+function appThesis(lotId = 'lot-a', overrides: Record<string, unknown> = {}) {
+  return {
+    id: `thesis-${lotId}`, portfolio_id: 'portfolio-default', holding_id: lotId, instrument_id: `instrument-${lotId}`,
+    summary: `Summary ${lotId}`, intended_holding_period: 'Long term', allocation_limit: null,
+    reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [],
+    revision: 1, revision_id: `revision-${lotId}`, updated_at: '2026-01-02T12:00:00.000000000Z', ...overrides,
+  }
+}
+
 const activityCursor = 'Y3Vyc29yLW9uZS0xMjM'
 function activityItem(id: string, occurredAt = '2026-01-02T11:00:00.000000000Z', overrides: Record<string, unknown> = {}) {
   return { id, portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: occurredAt, summary: `Activity ${id}`, ...overrides }
@@ -73,6 +82,29 @@ afterEach(() => {
 })
 
 describe('Portfolio Dashboard', () => {
+  it('restores focus to the exact remounted same-symbol lot button after closing its thesis', async () => {
+    const sameSymbolOverview = {
+      ...completeOverview,
+      holdings: [
+        { ...completeOverview.holdings[0], lot_id: 'lot-a', symbol: 'SAME' },
+        { ...completeOverview.holdings[0], lot_id: 'lot-c', symbol: 'SAME' },
+      ],
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/thesis')
+      ? Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response)
+      : Promise.resolve({ ok: true, status: 200, json: async () => sameSymbolOverview } as Response))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const lotAButton = screen.getByRole('button', { name: 'Open thesis for SAME lot lot-a' })
+    const lotCButton = screen.getByRole('button', { name: 'Open thesis for SAME lot lot-c' })
+    fireEvent.click(lotCButton)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /investment thesis.*same/i })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open thesis for SAME lot lot-c' })))
+    expect(document.activeElement).not.toBe(screen.getByRole('button', { name: 'Open thesis for SAME lot lot-a' }))
+  })
+
   it('shows a loading state while the typed API request is pending', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => undefined)))
     render(<App />)
@@ -843,5 +875,288 @@ describe('Portfolio Dashboard', () => {
     expect(fetchMock.mock.calls.map(([input]) => String(input)).some((url) => url.includes('/activity'))).toBe(false)
     expect(globalThis.localStorage?.length ?? 0).toBe(0)
     expect(globalThis.sessionStorage?.length ?? 0).toBe(0)
+  })
+
+  it('opens the exact holding lot thesis and treats a missing thesis as revision zero', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/v1/portfolios/portfolio-default/holdings/lot-a/thesis')) {
+        if (init?.method === 'PUT') return Promise.resolve({ ok: true, status: 200, json: async () => ({
+          id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary: 'Hold', intended_holding_period: 'Long term',
+          allocation_limit: null, reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [], revision: 1, revision_id: 'revision-a', updated_at: '2026-01-02T12:00:00.000000000Z',
+        }) } as Response)
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: 'not found' }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: /investment thesis.*aaa/i })).toBeTruthy())
+    expect(screen.getByText(/No thesis has been reviewed for this lot yet/i)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Hold' } })
+    fireEvent.change(screen.getByLabelText('Intended holding period'), { target: { value: 'Long term' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByText(/Thesis saved as revision 1/i)).toBeTruthy())
+    const saveCall = fetchMock.mock.calls.find(([request, requestInit]) => String(request).includes('/holdings/lot-a/thesis') && requestInit?.method === 'PUT')
+    expect(saveCall?.[1]?.body).toContain('"expected_revision":0')
+  })
+
+  it('preserves a conflicting draft until an explicit reload adopts the latest thesis', async () => {
+    const canonical = { id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary: 'Server summary', intended_holding_period: 'Long term', allocation_limit: '12.50', reasons_to_hold: ['Evidence'], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [{ label: 'Source', url: 'https://example.com/source', publication_date: '2026-01-01' }], revision: 2, revision_id: 'revision-2', updated_at: '2026-01-02T12:00:00.000000000Z' }
+    let thesisGets = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/holdings/lot-a/thesis')) {
+        if (init?.method === 'PUT') return Promise.resolve({ ok: false, status: 409, json: async () => ({ error: 'conflict' }) } as Response)
+        thesisGets += 1
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ ...canonical, summary: thesisGets === 1 ? 'Original summary' : 'Latest summary', revision: thesisGets === 1 ? 1 : 2 }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('Original summary')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Unsaved draft' } })
+    fireEvent.change(screen.getByLabelText('Intended holding period'), { target: { value: 'Short term' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/newer revision exists/i))
+    expect(screen.getByDisplayValue('Unsaved draft')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Reload latest revision' }))
+    await waitFor(() => expect(screen.getByDisplayValue('Latest summary')).toBeTruthy())
+    expect(screen.queryByDisplayValue('Unsaved draft')).toBeNull()
+    expect(screen.getByText(/Revision expected on save: 2/)).toBeTruthy()
+  })
+
+  it('keeps canonical decimals and dynamic lists and sources in the actual PUT payload', async () => {
+    const canonical = { id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary: 'Existing', intended_holding_period: 'Long term', allocation_limit: '12.5', reasons_to_hold: ['First'], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [], revision: 3, revision_id: 'revision-3', updated_at: '2026-01-02T12:00:00.000000000Z' }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/holdings/lot-a/thesis') && init?.method === 'PUT') return Promise.resolve({ ok: true, status: 200, json: async () => ({ ...canonical, revision: 4, revision_id: 'revision-4' }) } as Response)
+      if (url.includes('/holdings/lot-a/thesis')) return Promise.resolve({ ok: true, status: 200, json: async () => canonical } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('12.5')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add reasons to hold' }))
+    const reasons = screen.getAllByLabelText(/Reasons to hold/i)
+    fireEvent.change(reasons[1], { target: { value: 'Second' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add source' }))
+    fireEvent.change(screen.getByLabelText('Source 1 label'), { target: { value: 'Research' } })
+    fireEvent.change(screen.getByLabelText('Source 1 URL'), { target: { value: 'https://example.com/research' } })
+    fireEvent.change(screen.getByLabelText('Source 1 publication date (optional)'), { target: { value: '2026-02-03' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByText(/Thesis saved as revision 4/i)).toBeTruthy())
+    const saveCall = fetchMock.mock.calls.find(([request, requestInit]) => String(request).includes('/holdings/lot-a/thesis') && requestInit?.method === 'PUT')
+    const payload = JSON.parse(String(saveCall?.[1]?.body)) as Record<string, unknown>
+    expect(payload.allocation_limit).toBe('12.5')
+    expect(payload.reasons_to_hold).toEqual(['First', 'Second'])
+    expect(payload.sources).toEqual([{ label: 'Research', url: 'https://example.com/research', publication_date: '2026-02-03' }])
+    expect(new Headers(saveCall?.[1]?.headers as HeadersInit).get('Content-Type')).toBe('application/json')
+    expect(new Headers(saveCall?.[1]?.headers as HeadersInit).get('X-CSRF-Token')).toBe('fixture-token')
+  })
+
+  it('validates allocation limits as exact text at inclusive boundaries', async () => {
+    const canonical = { id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary: 'Existing', intended_holding_period: 'Long term', allocation_limit: null, reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [], revision: 1, revision_id: 'revision-1', updated_at: '2026-01-02T12:00:00.000000000Z' }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).includes('/holdings/lot-a/thesis') ? Promise.resolve({ ok: true, status: 200, json: async () => canonical } as Response) : Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('Existing')).toBeTruthy())
+    const limit = screen.getByLabelText(/optional allocation limit/i)
+    for (const value of ['0', '0.00', '100', '100.00', '12.34']) {
+      fireEvent.change(limit, { target: { value } })
+      expect(screen.queryByText(/Enter a percentage/i)).toBeNull()
+    }
+    for (const value of ['-0.01', '100.01', '12.345', '001']) {
+      fireEvent.change(limit, { target: { value } })
+      expect(screen.getByText(/Enter a percentage/i)).toBeTruthy()
+    }
+    expect(fetchMock.mock.calls.some((call) => call[1]?.method === 'PUT')).toBe(false)
+  })
+
+  it('loads immutable history independently and renders safe source links oldest first', async () => {
+    const thesis = (revision: number, summary: string) => ({ id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary, intended_holding_period: 'Long term', allocation_limit: null, reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [{ label: `Source ${revision}`, url: `https://example.com/${revision}`, publication_date: null }], revision, revision_id: `revision-${revision}`, updated_at: '2026-01-02T12:00:00.000000000Z', created_at: `2026-01-0${revision}T12:00:00.000000000Z` })
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/history')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [thesis(1, 'First summary'), thesis(2, 'Second summary')] }) } as Response)
+      if (url.includes('/holdings/lot-a/thesis')) { const { created_at: _createdAt, ...current } = thesis(2, 'Second summary'); return Promise.resolve({ ok: true, status: 200, json: async () => current } as Response) }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('Second summary')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Revision 1' })).toBeTruthy())
+    expect(screen.getByText('First summary')).toBeTruthy()
+    expect(screen.getAllByText('Second summary').length).toBeGreaterThan(0)
+    expect(screen.getByRole('link', { name: 'Source 1' }).getAttribute('rel')).toBe('noopener noreferrer')
+    const revisions = screen.getAllByRole('heading', { name: /Revision [12]/ }).filter((node) => /^Revision [12]$/.test(node.textContent || '')).map((node) => node.textContent)
+    expect(revisions).toEqual(['Revision 1', 'Revision 2'])
+  })
+
+  it('isolates same-symbol lots across endpoint identity and ignores a late lot response', async () => {
+    const sameSymbolOverview = {
+      ...completeOverview,
+      holdings: [
+        { ...completeOverview.holdings[0], lot_id: 'lot-a', symbol: 'SAME' },
+        { ...completeOverview.holdings[0], lot_id: 'lot-c', symbol: 'SAME' },
+      ],
+    }
+    let resolveLotA: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/holdings/lot-a/thesis')) return new Promise<Response>((resolve) => { resolveLotA = resolve })
+      if (url.endsWith('/holdings/lot-c/thesis')) return Promise.resolve({ ok: true, status: 200, json: async () => appThesis('lot-c', { summary: 'Lot C summary' }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => sameSymbolOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Open thesis for SAME lot lot-a' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/holdings/lot-a/thesis'))).toBe(true))
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open thesis for SAME lot lot-c' }))
+    await waitFor(() => expect(screen.getByDisplayValue('Lot C summary')).toBeTruthy())
+    resolveLotA?.({ ok: true, status: 200, json: async () => appThesis('lot-a', { summary: 'Stale lot A summary' }) } as Response)
+    await flushEffects()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/holdings/lot-a/thesis'))).toBe(true)
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/holdings/lot-c/thesis'))).toBe(true)
+    expect(screen.queryByDisplayValue('Stale lot A summary')).toBeNull()
+    expect(screen.getByDisplayValue('Lot C summary')).toBeTruthy()
+  })
+
+  it.each(['current', 'save', 'history'] as const)('fails closed for a thesis %s 401 response', async (lane) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/holdings/lot-a/thesis')) {
+        if (lane === 'current' && !init?.method) return Promise.resolve({ ok: false, status: 401, json: async () => ({}) } as Response)
+        if (lane === 'history' && url.endsWith('/history')) return Promise.resolve({ ok: false, status: 401, json: async () => ({}) } as Response)
+        if (lane === 'save' && init?.method === 'PUT') return Promise.resolve({ ok: false, status: 401, json: async () => ({}) } as Response)
+        return Promise.resolve({ ok: true, status: 200, json: async () => appThesis() } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    if (lane === 'save') {
+      await waitFor(() => expect(screen.getByDisplayValue('Summary lot-a')).toBeTruthy())
+      fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Private draft must disappear' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    } else if (lane === 'history') {
+      await waitFor(() => expect(screen.getByDisplayValue('Summary lot-a')).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    }
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(screen.queryByRole('heading', { name: /Investment thesis/ })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+    expect(screen.queryByDisplayValue('Private draft must disappear')).toBeNull()
+    expect(screen.queryByText(/Revision [0-9]+/)).toBeNull()
+    expect(document.activeElement).toBe(screen.getByLabelText('Username'))
+  })
+
+  it('aborts all thesis lanes on close and ignores late current, save, and history completions', async () => {
+    let resolveSave: ((response: Response) => void) | undefined
+    let resolveHistory: ((response: Response) => void) | undefined
+    let currentInit: RequestInit | undefined
+    let saveInit: RequestInit | undefined
+    let historyInit: RequestInit | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/history')) { historyInit = init; return new Promise<Response>((resolve) => { resolveHistory = resolve }) }
+      if (init?.method === 'PUT') { saveInit = init; return new Promise<Response>((resolve) => { resolveSave = resolve }) }
+      if (url.endsWith('/holdings/lot-a/thesis')) { currentInit = init; return Promise.resolve({ ok: true, status: 200, json: async () => appThesis() } as Response) }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('Summary lot-a')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(historyInit).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Stale draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(saveInit).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    expect(currentInit?.signal && (currentInit.signal as AbortSignal).aborted).toBe(true)
+    expect(saveInit?.signal && (saveInit.signal as AbortSignal).aborted).toBe(true)
+    expect(historyInit?.signal && (historyInit.signal as AbortSignal).aborted).toBe(true)
+    resolveSave?.({ ok: true, status: 200, json: async () => appThesis('lot-a', { summary: 'Late save' }) } as Response)
+    resolveHistory?.({ ok: true, status: 200, json: async () => ({ items: [] }) } as Response)
+    await flushEffects()
+    expect(screen.queryByText('Late save')).toBeNull()
+    expect(screen.queryByText(/No revision history/)).toBeNull()
+  })
+
+  it.each(['logout', 'simulated session expiry'] as const)('aborts thesis lanes on %s and leaves no private late completion', async (action) => {
+    const expiry = new Date(Date.now() + (action === 'simulated session expiry' ? 500 : 60 * 60 * 1000)).toISOString()
+    let resolveSave: ((response: Response) => void) | undefined
+    let resolveHistory: ((response: Response) => void) | undefined
+    let saveInit: RequestInit | undefined
+    let historyInit: RequestInit | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: expiry }) } as Response)
+      if (url.endsWith('/history')) { historyInit = init; return new Promise<Response>((resolve) => { resolveHistory = resolve }) }
+      if (init?.method === 'PUT') { saveInit = init; return new Promise<Response>((resolve) => { resolveSave = resolve }) }
+      if (url.endsWith('/holdings/lot-a/thesis')) return Promise.resolve({ ok: true, status: 200, json: async () => appThesis() } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('Summary lot-a')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(historyInit).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Private late draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(saveInit).toBeTruthy())
+    if (action === 'logout') fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(saveInit?.signal && (saveInit.signal as AbortSignal).aborted).toBe(true)
+    expect(historyInit?.signal && (historyInit.signal as AbortSignal).aborted).toBe(true)
+    resolveSave?.({ ok: true, status: 200, json: async () => appThesis('lot-a', { summary: 'Late private save' }) } as Response)
+    resolveHistory?.({ ok: true, status: 200, json: async () => ({ items: [] }) } as Response)
+    await flushEffects()
+    expect(screen.queryByText('Late private save')).toBeNull()
+    expect(screen.queryByText('Private late draft')).toBeNull()
+  })
+
+  it('keeps CSRF, draft, thesis responses, and history out of storage after a real thesis save', async () => {
+    globalThis.localStorage?.clear()
+    globalThis.sessionStorage?.clear()
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/holdings/lot-a/thesis') && init?.method === 'PUT') return Promise.resolve({ ok: true, status: 200, json: async () => appThesis('lot-a', { summary: 'Saved in memory', revision: 2, revision_id: 'revision-2' }) } as Response)
+      if (url.endsWith('/holdings/lot-a/thesis')) return Promise.resolve({ ok: true, status: 200, json: async () => appThesis() } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('Summary lot-a')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Saved in memory' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByDisplayValue('Saved in memory')).toBeTruthy())
+    expect(globalThis.localStorage?.length ?? 0).toBe(0)
+    expect(globalThis.sessionStorage?.length ?? 0).toBe(0)
+    expect(globalThis.localStorage?.getItem('csrf_token') ?? null).toBeNull()
+    expect(globalThis.sessionStorage?.getItem('thesis_draft') ?? null).toBeNull()
+    expect(globalThis.localStorage?.getItem('thesis_response') ?? null).toBeNull()
+    expect(globalThis.sessionStorage?.getItem('thesis_history') ?? null).toBeNull()
   })
 })
