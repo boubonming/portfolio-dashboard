@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, RefObject } from 'react'
 import { apiFetch, APIError, jsonResponse } from './api'
+import ThesisEditor from './ThesisEditor'
 
 export type Freshness = {
   status: 'fresh' | 'stale' | 'missing' | 'future' | 'invalid' | string
@@ -334,6 +335,7 @@ export default function App() {
   const [currency, setCurrency] = useState('MYR')
   const [view, setView] = useState<'overview' | 'activity'>('overview')
   const [data, setData] = useState<PortfolioOverview | null>(null)
+  const [thesisHolding, setThesisHolding] = useState<Holding | null>(null)
   const [activity, setActivity] = useState<ActivityPage | null>(null)
   const [activityState, setActivityState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [activityError, setActivityError] = useState('')
@@ -353,6 +355,7 @@ export default function App() {
   const activityControllerRef = useRef<AbortController | null>(null)
   const activityLoadMoreRef = useRef<HTMLButtonElement>(null)
   const activityStatusRef = useRef<HTMLParagraphElement>(null)
+  const thesisReturnRef = useRef<HTMLButtonElement>(null)
   const activityLoadingMoreRef = useRef(false)
   const activityItemsRef = useRef<ActivityItem[]>([])
   const authGeneration = useRef(0)
@@ -374,7 +377,7 @@ export default function App() {
     csrfToken.current = undefined
     activityLoadingMoreRef.current = false
     activityItemsRef.current = []
-    setData(null); setActivity(null); setError(''); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
+    setData(null); setThesisHolding(null); setActivity(null); setError(''); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -577,6 +580,16 @@ export default function App() {
     }
   }, [clearPrivateState])
 
+  const handleThesisUnauthorized = useCallback(() => {
+    clearPrivateState()
+    setAuthState('login')
+  }, [clearPrivateState])
+
+  const closeThesis = useCallback(() => {
+    setThesisHolding(null)
+    window.setTimeout(() => thesisReturnRef.current?.focus(), 0)
+  }, [])
+
   const visibleHoldings = useMemo(() => {
     if (!data) return []
     const needle = filter.trim().toLowerCase()
@@ -627,6 +640,7 @@ export default function App() {
         <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
       </nav>
 
+      {thesisHolding ? <ThesisEditor portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} /> : <>
       {view === 'overview' && <>
       <section className="toolbar" aria-label="Portfolio controls">
         <label htmlFor="currency">Reporting currency</label>
@@ -695,7 +709,7 @@ export default function App() {
                     <td className="numeric">{holding.latest_price || '—'}<span className="subline">{holding.latest_value || 'value unavailable'}</span></td>
                     <td className="numeric">{data.snapshot.complete ? (holding.reporting_value || '—') : 'Withheld'}</td>
                     <td><span className={`flag ${qualityClass(holding)}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
-                    <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span></td>
+                    <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button></td>
                   </tr>)}
                 </tbody>
               </table>
@@ -706,6 +720,7 @@ export default function App() {
       )}
       </>}
       {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={(keyboardActivated) => loadActivity(activity?.next_cursor, true, keyboardActivated)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
+      </>}
     </main>
   )
 }

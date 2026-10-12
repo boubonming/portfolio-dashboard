@@ -844,4 +844,131 @@ describe('Portfolio Dashboard', () => {
     expect(globalThis.localStorage?.length ?? 0).toBe(0)
     expect(globalThis.sessionStorage?.length ?? 0).toBe(0)
   })
+
+  it('opens the exact holding lot thesis and treats a missing thesis as revision zero', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/v1/portfolios/portfolio-default/holdings/lot-a/thesis')) {
+        if (init?.method === 'PUT') return Promise.resolve({ ok: true, status: 200, json: async () => ({
+          id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary: 'Hold', intended_holding_period: 'Long term',
+          allocation_limit: null, reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [], revision: 1, revision_id: 'revision-a', updated_at: '2026-01-02T12:00:00.000000000Z',
+        }) } as Response)
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: 'not found' }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: /investment thesis.*aaa/i })).toBeTruthy())
+    expect(screen.getByText(/No thesis has been reviewed for this lot yet/i)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Hold' } })
+    fireEvent.change(screen.getByLabelText('Intended holding period'), { target: { value: 'Long term' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByText(/Thesis saved as revision 1/i)).toBeTruthy())
+    const saveCall = fetchMock.mock.calls.find(([request, requestInit]) => String(request).includes('/holdings/lot-a/thesis') && requestInit?.method === 'PUT')
+    expect(saveCall?.[1]?.body).toContain('"expected_revision":0')
+  })
+
+  it('preserves a conflicting draft until an explicit reload adopts the latest thesis', async () => {
+    const canonical = { id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary: 'Server summary', intended_holding_period: 'Long term', allocation_limit: '12.50', reasons_to_hold: ['Evidence'], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [{ label: 'Source', url: 'https://example.com/source', publication_date: '2026-01-01' }], revision: 2, revision_id: 'revision-2', updated_at: '2026-01-02T12:00:00.000000000Z' }
+    let thesisGets = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/holdings/lot-a/thesis')) {
+        if (init?.method === 'PUT') return Promise.resolve({ ok: false, status: 409, json: async () => ({ error: 'conflict' }) } as Response)
+        thesisGets += 1
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ ...canonical, summary: thesisGets === 1 ? 'Original summary' : 'Latest summary', revision: thesisGets === 1 ? 1 : 2 }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('Original summary')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Unsaved draft' } })
+    fireEvent.change(screen.getByLabelText('Intended holding period'), { target: { value: 'Short term' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/newer revision exists/i))
+    expect(screen.getByDisplayValue('Unsaved draft')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Reload latest revision' }))
+    await waitFor(() => expect(screen.getByDisplayValue('Latest summary')).toBeTruthy())
+    expect(screen.queryByDisplayValue('Unsaved draft')).toBeNull()
+    expect(screen.getByText(/Revision expected on save: 2/)).toBeTruthy()
+  })
+
+  it('keeps canonical decimals and dynamic lists and sources in the actual PUT payload', async () => {
+    const canonical = { id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary: 'Existing', intended_holding_period: 'Long term', allocation_limit: '12.5', reasons_to_hold: ['First'], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [], revision: 3, revision_id: 'revision-3', updated_at: '2026-01-02T12:00:00.000000000Z' }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/holdings/lot-a/thesis') && init?.method === 'PUT') return Promise.resolve({ ok: true, status: 200, json: async () => ({ ...canonical, revision: 4, revision_id: 'revision-4' }) } as Response)
+      if (url.includes('/holdings/lot-a/thesis')) return Promise.resolve({ ok: true, status: 200, json: async () => canonical } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('12.5')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add reasons to hold' }))
+    const reasons = screen.getAllByLabelText(/Reasons to hold/i)
+    fireEvent.change(reasons[1], { target: { value: 'Second' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add source' }))
+    fireEvent.change(screen.getByLabelText('Source 1 label'), { target: { value: 'Research' } })
+    fireEvent.change(screen.getByLabelText('Source 1 URL'), { target: { value: 'https://example.com/research' } })
+    fireEvent.change(screen.getByLabelText('Source 1 publication date (optional)'), { target: { value: '2026-02-03' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByText(/Thesis saved as revision 4/i)).toBeTruthy())
+    const saveCall = fetchMock.mock.calls.find(([request, requestInit]) => String(request).includes('/holdings/lot-a/thesis') && requestInit?.method === 'PUT')
+    const payload = JSON.parse(String(saveCall?.[1]?.body)) as Record<string, unknown>
+    expect(payload.allocation_limit).toBe('12.5')
+    expect(payload.reasons_to_hold).toEqual(['First', 'Second'])
+    expect(payload.sources).toEqual([{ label: 'Research', url: 'https://example.com/research', publication_date: '2026-02-03' }])
+    expect(new Headers(saveCall?.[1]?.headers as HeadersInit).get('Content-Type')).toBe('application/json')
+    expect(new Headers(saveCall?.[1]?.headers as HeadersInit).get('X-CSRF-Token')).toBe('fixture-token')
+  })
+
+  it('validates allocation limits as exact text at inclusive boundaries', async () => {
+    const canonical = { id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary: 'Existing', intended_holding_period: 'Long term', allocation_limit: null, reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [], revision: 1, revision_id: 'revision-1', updated_at: '2026-01-02T12:00:00.000000000Z' }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).includes('/holdings/lot-a/thesis') ? Promise.resolve({ ok: true, status: 200, json: async () => canonical } as Response) : Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('Existing')).toBeTruthy())
+    const limit = screen.getByLabelText(/optional allocation limit/i)
+    for (const value of ['0', '0.00', '100', '100.00', '12.34']) {
+      fireEvent.change(limit, { target: { value } })
+      expect(screen.queryByText(/Enter a percentage/i)).toBeNull()
+    }
+    for (const value of ['-0.01', '100.01', '12.345', '001']) {
+      fireEvent.change(limit, { target: { value } })
+      expect(screen.getByText(/Enter a percentage/i)).toBeTruthy()
+    }
+    expect(fetchMock.mock.calls.some((call) => call[1]?.method === 'PUT')).toBe(false)
+  })
+
+  it('loads immutable history independently and renders safe source links oldest first', async () => {
+    const thesis = (revision: number, summary: string) => ({ id: `thesis-${revision}`, portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary, intended_holding_period: 'Long term', allocation_limit: null, reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [{ label: `Source ${revision}`, url: `https://example.com/${revision}`, publication_date: null }], revision, revision_id: `revision-${revision}`, updated_at: '2026-01-02T12:00:00.000000000Z', created_at: `2026-01-0${revision}T12:00:00.000000000Z` })
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/history')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [thesis(1, 'First summary'), thesis(2, 'Second summary')] }) } as Response)
+      if (url.includes('/holdings/lot-a/thesis')) { const { created_at: _createdAt, ...current } = thesis(2, 'Second summary'); return Promise.resolve({ ok: true, status: 200, json: async () => current } as Response) }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /open thesis for aaa lot lot-a/i }))
+    await waitFor(() => expect(screen.getByDisplayValue('Second summary')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Revision 1' })).toBeTruthy())
+    expect(screen.getByText('First summary')).toBeTruthy()
+    expect(screen.getAllByText('Second summary').length).toBeGreaterThan(0)
+    expect(screen.getByRole('link', { name: 'Source 1' }).getAttribute('rel')).toBe('noopener noreferrer')
+    const revisions = screen.getAllByRole('heading', { name: /Revision [12]/ }).map((node) => node.textContent)
+    expect(revisions).toEqual(['Revision 1', 'Revision 2'])
+  })
 })
