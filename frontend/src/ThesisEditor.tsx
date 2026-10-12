@@ -43,6 +43,13 @@ export type ThesisDraft = {
 
 type RequestState = 'idle' | 'loading' | 'ready' | 'error'
 
+type ThesisIdentity = { id: string; instrumentId: string }
+type ValidationScope = {
+  portfolioId: string
+  holdingId: string
+  identity?: ThesisIdentity
+}
+
 type Props = {
   portfolioId: string
   holding: Holding
@@ -55,7 +62,7 @@ type Props = {
 const thesisKeys = new Set(['id', 'portfolio_id', 'holding_id', 'instrument_id', 'summary', 'intended_holding_period', 'allocation_limit', 'reasons_to_hold', 'risks', 'reasons_to_sell', 'conditions_to_change', 'sources', 'revision', 'revision_id', 'updated_at'])
 const revisionKeys = new Set([...thesisKeys, 'created_at'])
 const sourceKeys = new Set(['label', 'url', 'publication_date'])
-const allocationPattern = /^(?:0|[1-9]?[0-9](?:\.[0-9]{1,2})?|100(?:\.0{1,2})?)$/
+const allocationPattern = /^(?:0|[1-9][0-9]{0,2})(?:\.[0-9]{1,2})?$/
 
 const emptyDraft = (): ThesisDraft => ({ summary: '', intended_holding_period: '', allocation_limit: '', reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [] })
 
@@ -63,36 +70,58 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
-function validString(value: unknown, max = Infinity): value is string {
-  return typeof value === 'string' && value.length <= max
+function validString(value: unknown, max = Infinity, required = false): value is string {
+  return typeof value === 'string' && value.length <= max && !value.includes('\0') && (!required || value.trim().length > 0)
 }
 
-function validateSource(value: unknown): ThesisSource {
+function validCalendarDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const parsed = Date.parse(`${value}T00:00:00.000Z`)
+  return isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value
+}
+
+function validTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{9}Z$/.test(value)) return false
+  const parsed = Date.parse(value)
+  return isFinite(parsed) && new Date(parsed).toISOString().slice(0, 19) === value.slice(0, 19)
+}
+
+function validAllocation(value: string): boolean {
+  if (!allocationPattern.test(value)) return false
+  const [integerPart, fractionPart = ''] = value.split('.')
+  if (integerPart.length === 3 && integerPart > '100') return false
+  return integerPart !== '100' || fractionPart.split('').every((digit) => digit === '0')
+}
+
+export function validateSource(value: unknown): ThesisSource {
   if (!isRecord(value) || [...Object.keys(value)].some((key) => !sourceKeys.has(key))) throw new Error('Malformed thesis source')
-  if (!validString(value.label, 256) || value.label.length < 1 || !validString(value.url, 2048) || value.url.length < 1) throw new Error('Malformed thesis source')
+  if (!validString(value.label, 256, true) || !validString(value.url, 2048, true) || value.url.includes('\r') || value.url.includes('\n')) throw new Error('Malformed thesis source')
   try {
-    if (!new URL(value.url).protocol) throw new Error('Malformed thesis source')
+    const sourceURL = new URL(value.url)
+    if ((sourceURL.protocol !== 'http:' && sourceURL.protocol !== 'https:') || !sourceURL.hostname || sourceURL.username || sourceURL.password) throw new Error('Malformed thesis source')
   } catch {
     throw new Error('Malformed thesis source')
   }
-  if (value.publication_date !== undefined && value.publication_date !== null && (typeof value.publication_date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value.publication_date))) throw new Error('Malformed thesis source')
+  if (value.publication_date !== undefined && value.publication_date !== null && !validCalendarDate(value.publication_date)) throw new Error('Malformed thesis source')
   return { label: value.label, url: value.url, publication_date: value.publication_date as string | null | undefined }
 }
 
-function validateThesis(value: unknown, includeCreatedAt = false): Thesis | ThesisRevision {
+function validateThesis(value: unknown, includeCreatedAt = false, scope?: ValidationScope): Thesis | ThesisRevision {
   if (!isRecord(value)) throw new Error('Malformed thesis response')
   const keys = includeCreatedAt ? revisionKeys : thesisKeys
   if (Object.keys(value).some((key) => !keys.has(key))) throw new Error('Malformed thesis response')
   const required = ['id', 'portfolio_id', 'holding_id', 'instrument_id', 'summary', 'intended_holding_period', 'reasons_to_hold', 'risks', 'reasons_to_sell', 'conditions_to_change', 'sources', 'revision', 'revision_id', 'updated_at']
   if (includeCreatedAt) required.push('created_at')
   if (required.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) throw new Error('Malformed thesis response')
-  if (!validString(value.id, 128) || !validString(value.portfolio_id, 128) || !validString(value.holding_id, 128) || !validString(value.instrument_id, 128) || !validString(value.summary, 4000) || value.summary.length < 1 || !validString(value.intended_holding_period, 256) || value.intended_holding_period.length < 1 || !validString(value.revision_id, 128) || !validString(value.updated_at, 128)) throw new Error('Malformed thesis response')
-  if (includeCreatedAt && !validString(value.created_at, 128)) throw new Error('Malformed thesis response')
-  if (typeof value.revision !== 'number' || Math.floor(value.revision) !== value.revision || value.revision < 1) throw new Error('Malformed thesis response')
-  if (value.allocation_limit !== undefined && value.allocation_limit !== null && (!validString(value.allocation_limit) || !allocationPattern.test(value.allocation_limit))) throw new Error('Malformed thesis response')
+  if (!validString(value.id, 128, true) || !validString(value.portfolio_id, 128, true) || !validString(value.holding_id, 128, true) || !validString(value.instrument_id, 128, true) || !validString(value.summary, 4000, true) || !validString(value.intended_holding_period, 256, true) || !validString(value.revision_id, 128, true) || !validTimestamp(value.updated_at)) throw new Error('Malformed thesis response')
+  if (includeCreatedAt && !validTimestamp(value.created_at)) throw new Error('Malformed thesis response')
+  if (typeof value.revision !== 'number' || !isFinite(value.revision) || Math.floor(value.revision) !== value.revision || value.revision < 1 || value.revision > 9007199254740991) throw new Error('Malformed thesis response')
+  if (value.allocation_limit !== undefined && value.allocation_limit !== null && (!validString(value.allocation_limit, 8, true) || !validAllocation(value.allocation_limit))) throw new Error('Malformed thesis response')
+  if (scope && (value.portfolio_id !== scope.portfolioId || value.holding_id !== scope.holdingId)) throw new Error('Malformed thesis response')
+  if (scope?.identity && (value.id !== scope.identity.id || value.instrument_id !== scope.identity.instrumentId)) throw new Error('Malformed thesis response')
   const arrays = ['reasons_to_hold', 'risks', 'reasons_to_sell', 'conditions_to_change']
-  if (arrays.some((key) => !Array.isArray(value[key]) || (value[key] as unknown[]).some((item) => !validString(item)))) throw new Error('Malformed thesis response')
-  if (!Array.isArray(value.sources)) throw new Error('Malformed thesis response')
+  if (arrays.some((key) => !Array.isArray(value[key]) || (value[key] as unknown[]).length > 32 || (value[key] as unknown[]).some((item) => !validString(item, 1000, true)))) throw new Error('Malformed thesis response')
+  if (!Array.isArray(value.sources) || value.sources.length > 16) throw new Error('Malformed thesis response')
   const reasonsToHold = value.reasons_to_hold as string[]
   const risks = value.risks as string[]
   const reasonsToSell = value.reasons_to_sell as string[]
@@ -139,7 +168,33 @@ function requestMessage(reason: unknown, action: string): string {
   return reason instanceof Error ? reason.message : `Unable to ${action}.`
 }
 
+function validateDraft(draft: ThesisDraft): void {
+  if (!validString(draft.summary, 4000, true) || !validString(draft.intended_holding_period, 256, true)) throw new Error('Complete the required thesis fields.')
+  if (draft.allocation_limit !== '' && (!validString(draft.allocation_limit, 8, true) || !validAllocation(draft.allocation_limit))) throw new Error('Enter a percentage from 0 to 100 with at most two decimal places.')
+  for (const values of [draft.reasons_to_hold, draft.risks, draft.reasons_to_sell, draft.conditions_to_change]) {
+    if (values.length > 32 || values.some((value) => !validString(value, 1000, true))) throw new Error('List fields must contain nonempty values no longer than 1000 characters.')
+  }
+  if (draft.sources.length > 16) throw new Error('You can add at most 16 sources.')
+  draft.sources.forEach(validateSource)
+}
+
+function rowSlug(label: string): string {
+  return label.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+}
+
 function ListEditor({ label, values, onChange }: { label: string; values: string[]; onChange: (values: string[]) => void }) {
+  const slug = rowSlug(label)
+  const keysRef = useRef<string[]>([])
+  const nextKeyRef = useRef(0)
+  const addButtonRef = useRef<HTMLButtonElement>(null)
+  while (keysRef.current.length < values.length) keysRef.current.push(`${slug}-${nextKeyRef.current++}`)
+  if (keysRef.current.length > values.length) keysRef.current = keysRef.current.slice(0, values.length)
+  const focusField = (key: string) => window.setTimeout(() => document.getElementById(`${slug}-${key}`)?.focus(), 0)
+  const focusAfterRemove = (index: number, keys: string[]) => window.setTimeout(() => {
+    const target = keys[index] || keys[index - 1]
+    if (target) document.getElementById(`${slug}-${target}`)?.focus()
+    else addButtonRef.current?.focus()
+  }, 0)
   const update = (index: number, value: string) => onChange(values.map((item, itemIndex) => itemIndex === index ? value : item))
   const move = (index: number, direction: -1 | 1) => {
     const target = index + direction
@@ -147,23 +202,39 @@ function ListEditor({ label, values, onChange }: { label: string; values: string
     const next = [...values]
     const [item] = next.splice(index, 1)
     next.splice(target, 0, item)
+    const keys = [...keysRef.current]
+    const [key] = keys.splice(index, 1)
+    keys.splice(target, 0, key)
+    keysRef.current = keys
     onChange(next)
+    focusField(key)
   }
   return <fieldset className="thesis-list-fieldset"><legend>{label}</legend>
-    {values.map((value, index) => <div className="thesis-list-row" key={`${label}-${index}`}>
-      <label htmlFor={`${label}-${index}`}>{label} {index + 1}</label>
-      <textarea id={`${label}-${index}`} value={value} onChange={(event) => update(index, event.target.value)} required maxLength={1000} />
+    {values.map((value, index) => <div className="thesis-list-row" key={keysRef.current[index]}>
+      <label htmlFor={`${slug}-${keysRef.current[index]}`}>{label} {index + 1}</label>
+      <textarea id={`${slug}-${keysRef.current[index]}`} value={value} onChange={(event) => update(index, event.target.value)} required maxLength={1000} />
       <div className="thesis-row-actions">
         <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Move ${label} ${index + 1} up`}>Move up</button>
         <button type="button" onClick={() => move(index, 1)} disabled={index === values.length - 1} aria-label={`Move ${label} ${index + 1} down`}>Move down</button>
-        <button type="button" onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${label} ${index + 1}`}>Remove</button>
+        <button type="button" onClick={() => { const keys = [...keysRef.current]; keys.splice(index, 1); keysRef.current = keys; onChange(values.filter((_, itemIndex) => itemIndex !== index)); focusAfterRemove(index, keys) }} aria-label={`Remove ${label} ${index + 1}`}>Remove</button>
       </div>
     </div>)}
-    <button type="button" onClick={() => onChange([...values, ''])}>Add {label.toLowerCase()}</button>
+    <button ref={addButtonRef} type="button" onClick={() => { const key = `${slug}-${nextKeyRef.current++}`; keysRef.current.push(key); onChange([...values, '']); focusField(key) }}>Add {label.toLowerCase()}</button>
   </fieldset>
 }
 
 function SourcesEditor({ sources, onChange }: { sources: ThesisSource[]; onChange: (sources: ThesisSource[]) => void }) {
+  const keysRef = useRef<string[]>([])
+  const nextKeyRef = useRef(0)
+  const addButtonRef = useRef<HTMLButtonElement>(null)
+  while (keysRef.current.length < sources.length) keysRef.current.push(`source-${nextKeyRef.current++}`)
+  if (keysRef.current.length > sources.length) keysRef.current = keysRef.current.slice(0, sources.length)
+  const focusField = (key: string) => window.setTimeout(() => document.getElementById(`source-label-${key}`)?.focus(), 0)
+  const focusAfterRemove = (index: number, keys: string[]) => window.setTimeout(() => {
+    const target = keys[index] || keys[index - 1]
+    if (target) document.getElementById(`source-label-${target}`)?.focus()
+    else addButtonRef.current?.focus()
+  }, 0)
   const update = (index: number, field: keyof ThesisSource, value: string) => onChange(sources.map((source, sourceIndex) => sourceIndex === index ? { ...source, [field]: value || (field === 'publication_date' ? null : '') } : source))
   const move = (index: number, direction: -1 | 1) => {
     const target = index + direction
@@ -171,28 +242,33 @@ function SourcesEditor({ sources, onChange }: { sources: ThesisSource[]; onChang
     const next = [...sources]
     const [source] = next.splice(index, 1)
     next.splice(target, 0, source)
+    const keys = [...keysRef.current]
+    const [key] = keys.splice(index, 1)
+    keys.splice(target, 0, key)
+    keysRef.current = keys
     onChange(next)
+    focusField(key)
   }
   return <fieldset className="thesis-list-fieldset"><legend>Sources</legend>
-    {sources.map((source, index) => <div className="source-editor" key={`source-${index}`}>
+    {sources.map((source, index) => <div className="source-editor" key={keysRef.current[index]}>
       <div className="source-fields">
-        <label htmlFor={`source-label-${index}`}>Source {index + 1} label</label><input id={`source-label-${index}`} value={source.label} onChange={(event) => update(index, 'label', event.target.value)} required maxLength={256} />
-        <label htmlFor={`source-url-${index}`}>Source {index + 1} URL</label><input id={`source-url-${index}`} type="url" value={source.url} onChange={(event) => update(index, 'url', event.target.value)} required maxLength={2048} />
-        <label htmlFor={`source-date-${index}`}>Source {index + 1} publication date (optional)</label><input id={`source-date-${index}`} type="date" value={source.publication_date ?? ''} onChange={(event) => update(index, 'publication_date', event.target.value)} />
+        <label htmlFor={`source-label-${keysRef.current[index]}`}>Source {index + 1} label</label><input id={`source-label-${keysRef.current[index]}`} value={source.label} onChange={(event) => update(index, 'label', event.target.value)} required maxLength={256} />
+        <label htmlFor={`source-url-${keysRef.current[index]}`}>Source {index + 1} URL</label><input id={`source-url-${keysRef.current[index]}`} type="url" value={source.url} onChange={(event) => update(index, 'url', event.target.value)} required maxLength={2048} />
+        <label htmlFor={`source-date-${keysRef.current[index]}`}>Source {index + 1} publication date (optional)</label><input id={`source-date-${keysRef.current[index]}`} type="date" value={source.publication_date ?? ''} onChange={(event) => update(index, 'publication_date', event.target.value)} />
       </div>
       <div className="thesis-row-actions">
         <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Move source ${index + 1} up`}>Move up</button>
         <button type="button" onClick={() => move(index, 1)} disabled={index === sources.length - 1} aria-label={`Move source ${index + 1} down`}>Move down</button>
-        <button type="button" onClick={() => onChange(sources.filter((_, sourceIndex) => sourceIndex !== index))} aria-label={`Remove source ${index + 1}`}>Remove</button>
+        <button type="button" onClick={() => { const keys = [...keysRef.current]; keys.splice(index, 1); keysRef.current = keys; onChange(sources.filter((_, sourceIndex) => sourceIndex !== index)); focusAfterRemove(index, keys) }} aria-label={`Remove source ${index + 1}`}>Remove</button>
       </div>
     </div>)}
-    <button type="button" onClick={() => onChange([...sources, { label: '', url: '', publication_date: null }])}>Add source</button>
+    <button ref={addButtonRef} type="button" onClick={() => { const key = `source-${nextKeyRef.current++}`; keysRef.current.push(key); onChange([...sources, { label: '', url: '', publication_date: null }]); focusField(key) }}>Add source</button>
   </fieldset>
 }
 
-function ThesisContent({ thesis, heading }: { thesis: Thesis | ThesisRevision; heading: string }) {
-  return <section className="thesis-content" aria-labelledby={heading}>
-    <h4 id={heading}>{heading}</h4>
+function ThesisContent({ thesis, headingId, headingLabel }: { thesis: Thesis | ThesisRevision; headingId: string; headingLabel: string }) {
+  return <section className="thesis-content" aria-labelledby={headingId}>
+    <h4 id={headingId}>{headingLabel}</h4>
     <dl className="thesis-content-grid">
       <div><dt>Summary</dt><dd>{thesis.summary}</dd></div>
       <div><dt>Intended holding period</dt><dd>{thesis.intended_holding_period}</dd></div>
@@ -216,8 +292,13 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
   const [history, setHistory] = useState<ThesisHistory | null>(null)
   const [historyError, setHistoryError] = useState('')
   const [saving, setSaving] = useState(false)
-  const requestGeneration = useRef(0)
-  const controllerRef = useRef<AbortController | null>(null)
+  const currentGeneration = useRef(0)
+  const saveGeneration = useRef(0)
+  const historyGeneration = useRef(0)
+  const currentControllerRef = useRef<AbortController | null>(null)
+  const saveControllerRef = useRef<AbortController | null>(null)
+  const historyControllerRef = useRef<AbortController | null>(null)
+  const identityRef = useRef<ThesisIdentity | undefined>(undefined)
   const savingRef = useRef(false)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const statusRef = useRef<HTMLParagraphElement>(null)
@@ -225,11 +306,18 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
   const formRef = useRef<HTMLFormElement>(null)
   const mountedRef = useRef(true)
   const endpoint = `/api/v1/portfolios/${encodeURIComponent(portfolioId)}/holdings/${encodeURIComponent(holding.lot_id)}/thesis`
+  const scope = { portfolioId, holdingId: holding.lot_id }
 
   const abortRequest = useCallback(() => {
-    requestGeneration.current += 1
-    controllerRef.current?.abort()
-    controllerRef.current = null
+    currentGeneration.current += 1
+    saveGeneration.current += 1
+    historyGeneration.current += 1
+    currentControllerRef.current?.abort()
+    saveControllerRef.current?.abort()
+    historyControllerRef.current?.abort()
+    currentControllerRef.current = null
+    saveControllerRef.current = null
+    historyControllerRef.current = null
   }, [])
 
   const handleUnauthorized = useCallback(() => {
@@ -238,10 +326,10 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
   }, [abortRequest, onUnauthorized])
 
   const loadCurrent = useCallback((replaceDraft: boolean) => {
-    const generation = ++requestGeneration.current
-    controllerRef.current?.abort()
+    const generation = ++currentGeneration.current
+    currentControllerRef.current?.abort()
     const controller = new AbortController()
-    controllerRef.current = controller
+    currentControllerRef.current = controller
     setLoadState('loading')
     setLoadError('')
     setSaveError('')
@@ -250,23 +338,29 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
       .then(async (response) => {
         if (response.status === 404) return null
         if (!response.ok) throw new APIError(response.status)
-        return validateThesis(await response.json()) as Thesis
+        return validateThesis(await response.json(), false, { ...scope, identity: identityRef.current }) as Thesis
       })
       .then((nextThesis) => {
-        if (controller.signal.aborted || generation !== requestGeneration.current || !mountedRef.current) return
+        if (controller.signal.aborted || generation !== currentGeneration.current || !mountedRef.current) return
         if (nextThesis === null) {
+          identityRef.current = undefined
           setHasThesis(false); setExpectedRevision(0); setDraft(emptyDraft()); setLoadState('ready'); setAnnouncement('Thesis editor ready for a new thesis.')
         } else {
+          identityRef.current = { id: nextThesis.id, instrumentId: nextThesis.instrument_id }
           setHasThesis(true); setExpectedRevision(nextThesis.revision); setDraft(draftFromThesis(nextThesis)); setLoadState('ready'); setAnnouncement(`Loaded thesis revision ${nextThesis.revision}.`)
         }
         setConflict(false)
       })
       .catch((reason: unknown) => {
-        if (controller.signal.aborted || generation !== requestGeneration.current || !mountedRef.current) return
+        if (controller.signal.aborted || generation !== currentGeneration.current || !mountedRef.current) return
         if (reason instanceof APIError && reason.status === 401) { handleUnauthorized(); return }
         setLoadState('error'); setLoadError(requestMessage(reason, 'load the thesis'))
       })
-  }, [endpoint, handleUnauthorized])
+  }, [endpoint, handleUnauthorized, portfolioId, holding.lot_id])
+
+  useEffect(() => {
+    identityRef.current = undefined
+  }, [portfolioId, holding.lot_id])
 
   useEffect(() => {
     mountedRef.current = true
@@ -279,17 +373,24 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
 
   const updateDraft = <K extends keyof ThesisDraft>(field: K, value: ThesisDraft[K]) => setDraft((current) => ({ ...current, [field]: value }))
 
-  const allocationError = draft.allocation_limit !== '' && !allocationPattern.test(draft.allocation_limit) ? 'Enter a percentage from 0 to 100 with at most two decimal places.' : ''
+  const allocationError = draft.allocation_limit !== '' && !validAllocation(draft.allocation_limit) ? 'Enter a percentage from 0 to 100 with at most two decimal places.' : ''
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (savingRef.current || loadState !== 'ready' || allocationError) return
+    try {
+      validateDraft(draft)
+    } catch (reason) {
+      setSaveError(reason instanceof Error ? reason.message : 'The thesis draft is invalid.')
+      setAnnouncement('The thesis was not saved. Your draft is preserved.')
+      return
+    }
     savingRef.current = true
     setSaving(true); setSaveError(''); setConflict(false); setAnnouncement('Saving thesis…')
     const controller = new AbortController()
-    controllerRef.current?.abort()
-    controllerRef.current = controller
-    const generation = ++requestGeneration.current
+    saveControllerRef.current?.abort()
+    saveControllerRef.current = controller
+    const generation = ++saveGeneration.current
     const payload = {
       summary: draft.summary,
       intended_holding_period: draft.intended_holding_period,
@@ -303,18 +404,19 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
     }
     try {
       const response = await apiFetch(endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), csrfToken, signal: controller.signal })
-      if (response.status === 409) { if (generation === requestGeneration.current && mountedRef.current) { setConflict(true); setSaveError('A newer revision exists. Your unsaved changes were preserved. Reload the latest revision only if you choose to replace this draft.'); setAnnouncement('Save conflict. Unsaved changes preserved.') }; return }
+      if (response.status === 409) { if (generation === saveGeneration.current && mountedRef.current) { setConflict(true); setSaveError('A newer revision exists. Your unsaved changes were preserved. Reload the latest revision only if you choose to replace this draft.'); setAnnouncement('Save conflict. Unsaved changes preserved.') }; return }
       if (!response.ok) throw new APIError(response.status)
-      const canonical = validateThesis(await response.json()) as Thesis
-      if (generation !== requestGeneration.current || !mountedRef.current) return
+      const canonical = validateThesis(await response.json(), false, { ...scope, identity: identityRef.current }) as Thesis
+      if (generation !== saveGeneration.current || !mountedRef.current) return
+      identityRef.current = { id: canonical.id, instrumentId: canonical.instrument_id }
       setHasThesis(true); setExpectedRevision(canonical.revision); setDraft(draftFromThesis(canonical)); setSaveError(''); setConflict(false); setAnnouncement(`Thesis saved as revision ${canonical.revision}.`)
     } catch (reason) {
-      if (controller.signal.aborted || generation !== requestGeneration.current || !mountedRef.current) return
+      if (controller.signal.aborted || generation !== saveGeneration.current || !mountedRef.current) return
       if (reason instanceof APIError && reason.status === 401) { handleUnauthorized(); return }
       setSaveError(requestMessage(reason, 'save the thesis'))
       setAnnouncement('The thesis was not saved. Your draft is preserved.')
     } finally {
-      if (generation === requestGeneration.current && mountedRef.current) { savingRef.current = false; setSaving(false) }
+      if (generation === saveGeneration.current && mountedRef.current) { savingRef.current = false; setSaving(false); if (saveControllerRef.current === controller) saveControllerRef.current = null }
     }
   }
 
@@ -325,11 +427,11 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
   }, [conflict])
 
   const loadHistory = () => {
-    if (historyState === 'loading' || savingRef.current) return
-    const generation = ++requestGeneration.current
-    controllerRef.current?.abort()
+    if (historyState === 'loading') return
+    const generation = ++historyGeneration.current
+    historyControllerRef.current?.abort()
     const controller = new AbortController()
-    controllerRef.current = controller
+    historyControllerRef.current = controller
     setHistoryState('loading'); setHistoryError('')
     apiFetch(`${endpoint}/history`, { signal: controller.signal })
       .then(async (response) => {
@@ -337,14 +439,24 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
         if (!response.ok) throw new APIError(response.status)
         const value = await response.json()
         if (!isRecord(value) || Object.keys(value).some((key) => key !== 'items') || !Array.isArray(value.items)) throw new Error('Malformed thesis history response')
-        return { items: value.items.map((item) => validateThesis(item, true) as ThesisRevision) }
+        const items = value.items.map((item) => validateThesis(item, true, { ...scope, identity: identityRef.current }) as ThesisRevision)
+        const revisionIDs = new Set<string>()
+        for (let index = 1; index < items.length; index += 1) {
+          if (items[index].revision <= items[index - 1].revision || items[index].id !== items[0].id || items[index].instrument_id !== items[0].instrument_id) throw new Error('Malformed thesis history response')
+        }
+        for (const item of items) {
+          if (revisionIDs.has(item.revision_id)) throw new Error('Malformed thesis history response')
+          revisionIDs.add(item.revision_id)
+        }
+        return { items }
       })
       .then((nextHistory) => {
-        if (controller.signal.aborted || generation !== requestGeneration.current || !mountedRef.current) return
+        if (controller.signal.aborted || generation !== historyGeneration.current || !mountedRef.current) return
+        if (nextHistory.items[0] && !identityRef.current) identityRef.current = { id: nextHistory.items[0].id, instrumentId: nextHistory.items[0].instrument_id }
         setHistory(nextHistory); setHistoryState('ready'); setAnnouncement(`Loaded ${nextHistory.items.length} thesis revision${nextHistory.items.length === 1 ? '' : 's'}.`)
       })
       .catch((reason: unknown) => {
-        if (controller.signal.aborted || generation !== requestGeneration.current || !mountedRef.current) return
+        if (controller.signal.aborted || generation !== historyGeneration.current || !mountedRef.current) return
         if (reason instanceof APIError && reason.status === 401) { handleUnauthorized(); return }
         setHistoryState('error'); setHistoryError(requestMessage(reason, 'load thesis history'))
       })
@@ -374,9 +486,9 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
         {saveError && <p ref={conflict ? conflictRef : undefined} className="notice error" role="alert" tabIndex={-1}>{saveError}{conflict ? <button type="button" onClick={reloadLatest}>Reload latest revision</button> : <button type="button" onClick={() => formRef.current?.requestSubmit()}>Retry save</button>}</p>}
         <div className="thesis-form-actions"><button type="submit" disabled={saving || Boolean(allocationError)} aria-busy={saving}>{saving ? 'Saving thesis…' : 'Save thesis'}</button><button type="button" onClick={onClose}>Cancel</button></div>
       </form>
-      <section className="thesis-history" aria-labelledby="thesis-history-title"><div className="section-heading"><h3 id="thesis-history-title">Revision history</h3><button type="button" onClick={loadHistory} disabled={historyState === 'loading' || saving}>{historyState === 'loading' ? 'Loading history…' : history ? 'Refresh history' : 'View revision history'}</button></div>
+      <section className="thesis-history" aria-labelledby="thesis-history-title"><div className="section-heading"><h3 id="thesis-history-title">Revision history</h3><button type="button" onClick={loadHistory} disabled={historyState === 'loading'}>{historyState === 'loading' ? 'Loading history…' : history ? 'Refresh history' : 'View revision history'}</button></div>
         {historyState === 'error' && <p className="notice error" role="alert">{historyError}<br /><button type="button" onClick={loadHistory}>Try again</button></p>}
-        {historyState === 'ready' && history && (history.items.length ? <div className="history-list">{history.items.map((item) => <article className="history-item" key={item.revision_id}><h4>Revision {item.revision}</h4><p className="muted"><time dateTime={item.created_at}>{item.created_at}</time> · updated {item.updated_at}</p><ThesisContent thesis={item} heading={`history-revision-${item.revision}`} /></article>)}</div> : <p className="empty">No revision history is available for this lot.</p>)}
+        {historyState === 'ready' && history && (history.items.length ? <div className="history-list">{history.items.map((item) => <article className="history-item" key={item.revision_id}><h4>Revision {item.revision}</h4><p className="muted"><time dateTime={item.created_at}>{item.created_at}</time> · updated {item.updated_at}</p><ThesisContent thesis={item} headingId={`history-revision-${item.revision}-content`} headingLabel={`Revision ${item.revision} content`} /></article>)}</div> : <p className="empty">No revision history is available for this lot.</p>)}
       </section>
     </>}
   </section>

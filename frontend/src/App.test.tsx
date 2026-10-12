@@ -951,7 +951,7 @@ describe('Portfolio Dashboard', () => {
   })
 
   it('loads immutable history independently and renders safe source links oldest first', async () => {
-    const thesis = (revision: number, summary: string) => ({ id: `thesis-${revision}`, portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary, intended_holding_period: 'Long term', allocation_limit: null, reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [{ label: `Source ${revision}`, url: `https://example.com/${revision}`, publication_date: null }], revision, revision_id: `revision-${revision}`, updated_at: '2026-01-02T12:00:00.000000000Z', created_at: `2026-01-0${revision}T12:00:00.000000000Z` })
+    const thesis = (revision: number, summary: string) => ({ id: 'thesis-a', portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'AAA', summary, intended_holding_period: 'Long term', allocation_limit: null, reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [{ label: `Source ${revision}`, url: `https://example.com/${revision}`, publication_date: null }], revision, revision_id: `revision-${revision}`, updated_at: '2026-01-02T12:00:00.000000000Z', created_at: `2026-01-0${revision}T12:00:00.000000000Z` })
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.includes('/history')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [thesis(1, 'First summary'), thesis(2, 'Second summary')] }) } as Response)
@@ -968,7 +968,7 @@ describe('Portfolio Dashboard', () => {
     expect(screen.getByText('First summary')).toBeTruthy()
     expect(screen.getAllByText('Second summary').length).toBeGreaterThan(0)
     expect(screen.getByRole('link', { name: 'Source 1' }).getAttribute('rel')).toBe('noopener noreferrer')
-    const revisions = screen.getAllByRole('heading', { name: /Revision [12]/ }).map((node) => node.textContent)
+    const revisions = screen.getAllByRole('heading', { name: /Revision [12]/ }).filter((node) => /^Revision [12]$/.test(node.textContent || '')).map((node) => node.textContent)
     expect(revisions).toEqual(['Revision 1', 'Revision 2'])
   })
 })

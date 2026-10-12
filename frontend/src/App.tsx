@@ -640,7 +640,7 @@ export default function App() {
         <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
       </nav>
 
-      {thesisHolding ? <ThesisEditor portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} /> : <>
+      {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} /> : <>
       {view === 'overview' && <>
       <section className="toolbar" aria-label="Portfolio controls">
         <label htmlFor="currency">Reporting currency</label>
