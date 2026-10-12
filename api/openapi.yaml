@@ -101,6 +101,54 @@ paths:
         '404': { description: Portfolio or API route not found }
         '405': { description: Read-only endpoint does not accept mutation methods }
         '500': { description: Internal server error }
+  /api/v1/portfolios/{portfolioId}/export.csv:
+    get:
+      summary: Download a portfolio-scoped CSV overview
+      description: >-
+        Returns the same immutable, source-traceable overview read model as the
+        authenticated overview endpoint, encoded as deterministic RFC 4180 CSV.
+        Each lot is one row, including duplicate symbols. Decimal fields are
+        copied as exact strings and blank optional values remain blank. Text
+        cells beginning with spreadsheet formula characters or leading
+        whitespace/control characters are prefixed with an apostrophe; decimal
+        and canonical date fields are classified separately. Columns, in
+        order, are portfolio_id, portfolio_name, reporting_currency,
+        snapshot_state, snapshot_id, calculation_version, snapshot_as_of,
+        snapshot_created_at, snapshot_complete, lot_id, symbol, name,
+        description, quantity, source_currency, unit_cost, cost_basis,
+        latest_price, latest_value, reporting_value, quote_source,
+        market_timestamp, freshness_state, freshness_age, broker,
+        acquisition_date, source_row, missing_broker,
+        missing_acquisition_date, and data_quality_flags. The response is
+        private and never cacheable; it contains no thesis, credentials,
+        account secrets, session/CSRF values, or raw audit metadata.
+      operationId: exportPortfolioCSV
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: portfolioId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - name: currency
+          in: query
+          required: true
+          description: Supported uppercase reporting currency. Duplicate and unknown query parameters are rejected.
+          schema: { type: string, enum: [MYR, USD, SGD, JPY], pattern: '^(MYR|USD|SGD|JPY)$' }
+      responses:
+        '200':
+          description: UTF-8 RFC 4180 CSV attachment, one row per holding lot.
+          headers:
+            Content-Disposition: { description: Safe deterministic attachment filename, schema: { type: string } }
+            Cache-Control: { description: Always no-store for private data, schema: { type: string, enum: [no-store] } }
+            X-Content-Type-Options: { description: MIME sniffing protection, schema: { type: string, enum: [nosniff] } }
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+        '400': { description: Missing, unsupported, duplicate, unknown, or non-canonical currency query }
+        '401': { description: Authentication is required; response is never cacheable }
+        '404': { description: Portfolio or API route not found }
+        '405': { description: Read-only endpoint does not accept mutation methods }
+        '500': { description: Internal server error before any CSV bytes are sent }
   /api/v1/portfolios/{portfolioId}/holdings/{holdingId}/thesis:
     get:
       summary: Read the current investment thesis for a holding

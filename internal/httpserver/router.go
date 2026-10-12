@@ -196,6 +196,9 @@ func portfolioRoutes(database *store.Store) http.Handler {
 		}
 		if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[3] != "" {
 			switch parts[4] {
+			case "export.csv":
+				portfolioExport(database).ServeHTTP(w, r)
+				return
 			case "overview":
 				portfolioOverview(database).ServeHTTP(w, r)
 				return

@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import App, { compareDecimalStrings, type PortfolioOverview } from './App'
+import App, { compareDecimalStrings, safeCSVFilename, type PortfolioOverview } from './App'
 
 const completeOverview: PortfolioOverview = {
   portfolio: { id: 'portfolio-default', name: 'Personal Portfolio', default_reporting_currency: 'MYR' },
@@ -79,9 +79,68 @@ async function flushEffects() {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('Portfolio Dashboard', () => {
+	it('accepts only a safe server CSV filename and falls back for malformed values', () => {
+		expect(safeCSVFilename('attachment; filename="portfolio-export-USD.csv"', 'USD')).toBe('portfolio-export-USD.csv')
+		expect(safeCSVFilename('attachment; filename="../../private.csv"', 'USD')).toBe('portfolio-export-USD.csv')
+		expect(safeCSVFilename('attachment; filename="evil\r\nX.csv"', 'USD')).toBe('portfolio-export-USD.csv')
+	})
+
+	it('downloads the selected reporting currency using the server filename and revokes its blob URL', async () => {
+		vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+		const createObjectURL = vi.fn(() => 'blob:fixture')
+		const revokeObjectURL = vi.fn()
+		Object.assign(URL, { createObjectURL, revokeObjectURL })
+		const fetchMock = vi.fn((input: RequestInfo | URL) => {
+			const url = String(input)
+			if (url.includes('/api/v1/portfolios/') && url.includes('/export.csv')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ 'Content-Disposition': 'attachment; filename="portfolio-export-USD.csv"' }), blob: async () => new Blob(['portfolio_id\n']) } as Response)
+			return Promise.resolve({ ok: true, status: 200, json: async () => url.includes('currency=USD') ? { ...completeOverview, reporting_currency: 'USD' } : completeOverview } as Response)
+		})
+		vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+		render(<App />)
+		await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+		fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+		await waitFor(() => expect(screen.getByRole('button', { name: /download csv/i })).toBeTruthy())
+		fireEvent.click(screen.getByRole('button', { name: /download csv/i }))
+		await waitFor(() => expect(createObjectURL).toHaveBeenCalledOnce())
+		const exportCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/export.csv'))
+		expect(String(exportCall?.[0])).toContain('currency=USD')
+		await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith('blob:fixture'))
+	})
+
+	it('prevents duplicate CSV requests while an export is pending', async () => {
+		vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+		let resolveExport: ((response: Response) => void) | undefined
+		const fetchMock = vi.fn((input: RequestInfo | URL) => {
+			if (String(input).includes('/export.csv')) return new Promise<Response>((resolve) => { resolveExport = resolve })
+			return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+		})
+		vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+		render(<App />)
+		await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+		const button = screen.getByRole('button', { name: /download csv/i })
+		fireEvent.click(button)
+		fireEvent.click(button)
+		expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/export.csv'))).toHaveLength(1)
+		expect(button.getAttribute('aria-busy')).toBe('true')
+		resolveExport?.({ ok: true, status: 200, headers: new Headers(), blob: async () => new Blob(['ok']) } as Response)
+	})
+
+	it('clears private data and focuses login when CSV export returns 401', async () => {
+		const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/export.csv')
+			? Promise.resolve({ ok: false, status: 401, headers: new Headers(), blob: async () => new Blob() } as Response)
+			: Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+		vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+		render(<App />)
+		await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+		fireEvent.click(screen.getByRole('button', { name: /download csv/i }))
+		await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+		expect(document.activeElement).toBe(screen.getByLabelText('Username'))
+	})
+
   it('restores focus to the exact remounted same-symbol lot button after closing its thesis', async () => {
     const sameSymbolOverview = {
       ...completeOverview,
