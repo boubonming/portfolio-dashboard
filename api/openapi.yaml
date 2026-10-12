@@ -10,6 +10,7 @@ paths:
     post:
       summary: Start an authenticated session
       operationId: login
+      security: []
       requestBody:
         required: true
         content:
@@ -111,7 +112,7 @@ paths:
       responses:
         '200': { description: Current thesis, content: { application/json: { schema: { $ref: '#/components/schemas/Thesis' } } } }
         '401': { description: Authentication is required; response is never cacheable }
-        '404': { description: Portfolio, holding, or thesis not found }
+        '404': { description: 'Portfolio, holding, or thesis not found' }
     put:
       summary: Create or replace a holding investment thesis
       operationId: putHoldingThesis
@@ -143,7 +144,7 @@ paths:
       responses:
         '200': { description: Oldest-first immutable revisions, content: { application/json: { schema: { $ref: '#/components/schemas/ThesisHistory' } } } }
         '401': { description: Authentication is required }
-        '404': { description: Portfolio, holding, or thesis not found }
+        '404': { description: 'Portfolio, holding, or thesis not found' }
 components:
   securitySchemes:
     sessionCookie:
@@ -237,7 +238,7 @@ components:
       properties:
         instrument_id: { type: string }
         symbol: { type: string }
-        source_currency: { type: string, description: Original holding currency, included to distinguish same-symbol instruments. }
+        source_currency: { type: string, description: 'Original holding currency, included to distinguish same-symbol instruments.' }
         value: { type: string, description: Exact decimal reporting-currency value. }
         percentage: { type: string, description: Exact two-decimal percentage apportioned by largest remainder; displayed percentages reconcile to 100. }
     CurrencyAllocation:
@@ -355,13 +356,10 @@ components:
         revision_id: { type: string }
         updated_at: { type: string, format: date-time }
     AllocationLimit:
+      type: string
       nullable: true
       description: Exact decimal percentage, inclusive from 0 to 100. Canonical responses remove insignificant zeroes.
-      oneOf:
-        - type: string
-          pattern: '^(0|[1-9][0-9]?)([.][0-9]{1,2})?$'
-        - type: string
-          pattern: '^100([.]0{1,2})?$'
+      pattern: '^(?:0|[1-9]?[0-9](?:[.][0-9]{1,2})?|100(?:[.]0{1,2})?)$'
     ThesisRevision:
       type: object
       additionalProperties: false

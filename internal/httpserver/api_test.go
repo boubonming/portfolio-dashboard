@@ -397,3 +397,138 @@ func TestPortfolioActivityAPIIsAuthenticatedScopedAndRedacted(t *testing.T) {
 		t.Fatalf("unknown=%d %s", unknown.Code, unknown.Body.String())
 	}
 }
+
+type thesisAPISession struct {
+	handler http.Handler
+	cookie  *http.Cookie
+	csrf    string
+}
+
+func newThesisAPISession(t *testing.T, database *store.Store) thesisAPISession {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandlerWithAuth(database, auth.Config{
+		Username: "fixture-user", PasswordHash: string(hash),
+		SessionSecret: base64.StdEncoding.EncodeToString([]byte("thesis-api-session-secret-with-diversity-123")),
+		PublicOrigin:  "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRequest(http.MethodPost, "https://example.test/api/v1/auth/login", strings.NewReader("{"+`"username":"fixture-user","password":"fixture-only-value"`+"}"))
+	login.Header.Set("Content-Type", "application/json")
+	login.Header.Set("Origin", "https://example.test")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, login)
+	if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
+		t.Fatalf("login status=%d body=%s", response.Code, response.Body.String())
+	}
+	var session struct{ CSRF string `json:"csrf_token"` }
+	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil || session.CSRF == "" {
+		t.Fatalf("login session=%s err=%v", response.Body.String(), err)
+	}
+	return thesisAPISession{handler: handler, cookie: response.Result().Cookies()[0], csrf: session.CSRF}
+}
+
+func (s thesisAPISession) thesisRequest(method, path, body string, csrf bool) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "https://example.test"+path, strings.NewReader(body))
+	request.AddCookie(s.cookie)
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if csrf {
+		request.Header.Set("Origin", "https://example.test")
+		request.Header.Set("X-CSRF-Token", s.csrf)
+	}
+	response := httptest.NewRecorder()
+	s.handler.ServeHTTP(response, request)
+	return response
+}
+
+func thesisAPIRequestBody(summary string, revision int) string {
+	encoded, _ := json.Marshal(map[string]any{
+		"summary": summary, "intended_holding_period": "long term", "allocation_limit": "100.00",
+		"reasons_to_hold": []string{}, "risks": []string{}, "reasons_to_sell": []string{},
+		"conditions_to_change": []string{}, "sources": []any{}, "expected_revision": revision,
+	})
+	return string(encoded)
+}
+
+func TestHoldingThesisProductionHandlerContract(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	session := newThesisAPISession(t, database)
+	path := "/api/v1/portfolios/portfolio-api/holdings/lot-api/thesis"
+
+	anonymous := httptest.NewRecorder()
+	anonymousHandler, err := NewHandlerWithAuth(database, auth.Config{
+		Username: "fixture-user", PasswordHash: sessionPasswordHash(t),
+		SessionSecret: base64.StdEncoding.EncodeToString([]byte("anonymous-thesis-session-secret-diversity-123")),
+		PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	anonymousHandler.ServeHTTP(anonymous, httptest.NewRequest(http.MethodGet, path, nil))
+	if anonymous.Code != http.StatusUnauthorized || anonymous.Header().Get("Cache-Control") != "no-store" || anonymous.Header().Get("Vary") != "Cookie" {
+		t.Fatalf("anonymous=%d cache=%q vary=%q", anonymous.Code, anonymous.Header().Get("Cache-Control"), anonymous.Header().Get("Vary"))
+	}
+	noCSRF := session.thesisRequest(http.MethodPut, path, thesisAPIRequestBody("no csrf", 0), false)
+	if noCSRF.Code != http.StatusForbidden || noCSRF.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("no csrf=%d body=%s", noCSRF.Code, noCSRF.Body.String())
+	}
+	create := session.thesisRequest(http.MethodPut, path, thesisAPIRequestBody("first", 0), true)
+	if create.Code != http.StatusOK || create.Header().Get("Vary") != "Cookie" {
+		t.Fatalf("create=%d body=%s", create.Code, create.Body.String())
+	}
+	retry := session.thesisRequest(http.MethodPut, path, thesisAPIRequestBody("first", 0), true)
+	if retry.Code != http.StatusOK || retry.Body.String() != create.Body.String() {
+		t.Fatalf("retry=%d body=%s want=%s", retry.Code, retry.Body.String(), create.Body.String())
+	}
+	update := session.thesisRequest(http.MethodPut, path, thesisAPIRequestBody("second", 1), true)
+	if update.Code != http.StatusOK {
+		t.Fatalf("update=%d body=%s", update.Code, update.Body.String())
+	}
+	stale := session.thesisRequest(http.MethodPut, path, thesisAPIRequestBody("sensitive-marker", 0), true)
+	if stale.Code != http.StatusConflict || contains(stale.Body.String(), "sensitive-marker") {
+		t.Fatalf("stale=%d body=%s", stale.Code, stale.Body.String())
+	}
+	post := session.thesisRequest(http.MethodPost, path, thesisAPIRequestBody("post", 2), true)
+	if post.Code != http.StatusMethodNotAllowed || post.Header().Get("Allow") != "GET, PUT" {
+		t.Fatalf("post=%d allow=%q", post.Code, post.Header().Get("Allow"))
+	}
+	history := session.thesisRequest(http.MethodGet, path+"/history", "", false)
+	if history.Code != http.StatusOK || !contains(history.Body.String(), `"items":[`) {
+		t.Fatalf("history=%d body=%s", history.Code, history.Body.String())
+	}
+	for name, body := range map[string]string{
+		"missing revision":       `{"summary":"x","intended_holding_period":"long","reasons_to_hold":[],"risks":[],"reasons_to_sell":[],"conditions_to_change":[],"sources":[]}`,
+		"null revision":          strings.Replace(thesisAPIRequestBody("x", 2), `"expected_revision":2`, `"expected_revision":null`, 1),
+		"wrong revision":         strings.Replace(thesisAPIRequestBody("x", 2), `"expected_revision":2`, `"expected_revision":"2"`, 1),
+		"duplicate nested field": `{"summary":"x","intended_holding_period":"long","reasons_to_hold":[],"risks":[],"reasons_to_sell":[],"conditions_to_change":[],"sources":[{"label":"a","label":"b","url":"https://example.test"}],"expected_revision":2}`,
+		"unknown nested field":   `{"summary":"x","intended_holding_period":"long","reasons_to_hold":[],"risks":[],"reasons_to_sell":[],"conditions_to_change":[],"sources":[{"label":"a","url":"https://example.test","unknown":true}],"expected_revision":2}`,
+	} {
+		bad := session.thesisRequest(http.MethodPut, path, body, true)
+		if bad.Code != http.StatusBadRequest || bad.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("%s=%d cache=%q body=%s", name, bad.Code, bad.Header().Get("Cache-Control"), bad.Body.String())
+		}
+	}
+	for _, target := range []string{"/api/v1/portfolios/missing/holdings/lot-api/thesis", "/api/v1/portfolios/portfolio-api/holdings/missing/thesis"} {
+		notFound := session.thesisRequest(http.MethodGet, target, "", false)
+		if notFound.Code != http.StatusNotFound || notFound.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("%s=%d cache=%q", target, notFound.Code, notFound.Header().Get("Cache-Control"))
+		}
+	}
+}
+
+func sessionPasswordHash(t *testing.T) string {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(hash)
+}

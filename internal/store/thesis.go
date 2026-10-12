@@ -281,11 +281,54 @@ func nullableThesisString(value *string) any {
 func mustJSON(value any) string { encoded, _ := json.Marshal(value); return string(encoded) }
 
 func decodeThesisArrays(raw string, target any) error {
-	if strings.TrimSpace(raw) == "null" || !strings.HasPrefix(strings.TrimSpace(raw), "[") {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "null" || !strings.HasPrefix(trimmed, "[") {
 		return fmt.Errorf("%w: invalid stored array", ErrInvalidThesis)
 	}
 	if err := json.Unmarshal([]byte(raw), target); err != nil {
 		return fmt.Errorf("%w: invalid stored array", ErrInvalidThesis)
+	}
+	switch values := target.(type) {
+	case *[]string:
+		if len(*values) > MaxThesisListItems {
+			return fmt.Errorf("%w: invalid stored array", ErrInvalidThesis)
+		}
+		for _, value := range *values {
+			if strings.IndexByte(value, 0) >= 0 || len(value) > MaxThesisListText || strings.TrimSpace(value) == "" {
+				return fmt.Errorf("%w: invalid stored array", ErrInvalidThesis)
+			}
+		}
+	case *[]domain.ThesisSource:
+		if len(*values) > MaxThesisSources {
+			return fmt.Errorf("%w: invalid stored array", ErrInvalidThesis)
+		}
+		for _, source := range *values {
+			if err := validateStoredThesisSource(source); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("%w: invalid stored array target", ErrInvalidThesis)
+	}
+	return nil
+}
+
+func validateStoredThesisSource(source domain.ThesisSource) error {
+	if strings.TrimSpace(source.Label) == "" || len(source.Label) > MaxSourceLabel || strings.IndexByte(source.Label, 0) >= 0 || len(source.URL) > MaxSourceURL {
+		return fmt.Errorf("%w: invalid stored source", ErrInvalidThesis)
+	}
+	u, parseErr := url.Parse(source.URL)
+	if parseErr != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || strings.ContainsAny(source.URL, "\r\n") {
+		return fmt.Errorf("%w: invalid stored source URL", ErrInvalidThesis)
+	}
+	if source.PublicationDate != nil {
+		if !isoDatePattern.MatchString(*source.PublicationDate) {
+			return fmt.Errorf("%w: invalid stored publication date", ErrInvalidThesis)
+		}
+		parsed, parseErr := time.Parse("2006-01-02", *source.PublicationDate)
+		if parseErr != nil || parsed.Format("2006-01-02") != *source.PublicationDate {
+			return fmt.Errorf("%w: invalid stored publication date", ErrInvalidThesis)
+		}
 	}
 	return nil
 }

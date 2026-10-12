@@ -139,6 +139,22 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 }
 
 func verifyThesisSchema(ctx context.Context, db *sql.DB) error {
+	if err := verifyThesisTableDefinition(ctx, db, "portfolio_theses", []string{
+		"current_revision integer not null check (current_revision >= 1)",
+		"unique(portfolio_id, holding_id)",
+		"unique(id, portfolio_id, holding_id, instrument_id)",
+		"foreign key (portfolio_id, holding_id) references lots(portfolio_id, id)",
+	}); err != nil {
+		return err
+	}
+	if err := verifyThesisTableDefinition(ctx, db, "thesis_revisions", []string{
+		"revision integer not null check (revision >= 1)",
+		"unique(thesis_id, revision)",
+		"unique(thesis_id, request_hash)",
+		"foreign key (thesis_id, portfolio_id, holding_id, instrument_id) references portfolio_theses(id, portfolio_id, holding_id, instrument_id)",
+	}); err != nil {
+		return err
+	}
 	if err := verifyTableColumns(ctx, db, "portfolio_theses", []string{
 		"id TEXT 0 1", "portfolio_id TEXT 1 0", "holding_id TEXT 1 0", "instrument_id TEXT 1 0",
 		"summary TEXT 1 0", "intended_holding_period TEXT 1 0", "allocation_limit TEXT 0 0",
@@ -224,8 +240,72 @@ func verifyThesisSchema(ctx context.Context, db *sql.DB) error {
 				return fmt.Errorf("thesis trigger %s is missing %q", trigger.name, fragment)
 			}
 		}
+		if canonicalSQLiteSQL(definition) != canonicalSQLiteSQL(thesisTriggerDefinition(trigger.name)) {
+			return fmt.Errorf("thesis trigger %s has an unexpected definition", trigger.name)
+		}
 	}
 	return nil
+}
+
+func thesisTriggerDefinition(name string) string {
+	switch name {
+	case "portfolio_theses_scope_insert":
+		return `CREATE TRIGGER portfolio_theses_scope_insert
+BEFORE INSERT ON portfolio_theses BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM lots WHERE id = NEW.holding_id AND portfolio_id = NEW.portfolio_id AND instrument_id = NEW.instrument_id
+    ) THEN RAISE(ABORT, 'thesis holding scope mismatch') END;
+END`
+	case "portfolio_theses_scope_update":
+		return `CREATE TRIGGER portfolio_theses_scope_update
+BEFORE UPDATE OF portfolio_id, holding_id, instrument_id ON portfolio_theses BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM lots WHERE id = NEW.holding_id AND portfolio_id = NEW.portfolio_id AND instrument_id = NEW.instrument_id
+    ) THEN RAISE(ABORT, 'thesis holding scope mismatch') END;
+END`
+	case "thesis_revisions_scope_insert":
+		return `CREATE TRIGGER thesis_revisions_scope_insert
+BEFORE INSERT ON thesis_revisions BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM lots WHERE id = NEW.holding_id AND portfolio_id = NEW.portfolio_id AND instrument_id = NEW.instrument_id
+    ) THEN RAISE(ABORT, 'thesis revision holding scope mismatch') END;
+END`
+	case "portfolio_theses_append_only_delete":
+		return `CREATE TRIGGER portfolio_theses_append_only_delete
+BEFORE DELETE ON portfolio_theses BEGIN
+    SELECT RAISE(ABORT, 'theses are append-only');
+END`
+	case "thesis_revisions_append_only_update":
+		return `CREATE TRIGGER thesis_revisions_append_only_update
+BEFORE UPDATE ON thesis_revisions BEGIN
+    SELECT RAISE(ABORT, 'thesis revisions are append-only');
+END`
+	case "thesis_revisions_append_only_delete":
+		return `CREATE TRIGGER thesis_revisions_append_only_delete
+BEFORE DELETE ON thesis_revisions BEGIN
+    SELECT RAISE(ABORT, 'thesis revisions are append-only');
+END`
+	default:
+		return ""
+	}
+}
+
+func verifyThesisTableDefinition(ctx context.Context, db *sql.DB, table string, fragments []string) error {
+	var definition string
+	if err := db.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition); err != nil {
+		return fmt.Errorf("thesis table %s: %w", table, err)
+	}
+	definition = canonicalSQLiteSQL(definition)
+	for _, fragment := range fragments {
+		if !strings.Contains(definition, canonicalSQLiteSQL(fragment)) {
+			return fmt.Errorf("thesis table %s is missing %q", table, fragment)
+		}
+	}
+	return nil
+}
+
+func canonicalSQLiteSQL(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
 }
 
 func verifyTableColumns(ctx context.Context, db *sql.DB, table string, expected []string) error {

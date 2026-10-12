@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,7 +15,12 @@ import (
 
 func thesisFixture(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "thesis.sqlite"))
+	return thesisFixtureAt(t, filepath.Join(t.TempDir(), "thesis.sqlite"))
+}
+
+func thesisFixtureAt(t *testing.T, databasePath string) *Store {
+	t.Helper()
+	s, err := Open(context.Background(), databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,5 +189,192 @@ func TestThesisEmptyArraysRemainJSONArrays(t *testing.T) {
 	}
 	if len(history) != 1 || history[0].UpdatedAt == "" || history[0].ReasonsToHold == nil || history[0].Sources == nil {
 		t.Fatalf("history wire data invalid: %+v", history)
+	}
+}
+
+func TestThesisSeparateStoresSerializeCreateAndUpdateRaces(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "race.sqlite")
+	firstStore := thesisFixtureAt(t, databasePath)
+	secondStore, err := Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstStore.Close()
+	defer secondStore.Close()
+
+	type outcome struct {
+		thesis domain.Thesis
+		err    error
+	}
+	runRace := func(first, second domain.ThesisUpdate) [2]outcome {
+		start := make(chan struct{})
+		results := make(chan outcome, 2)
+		var wait sync.WaitGroup
+		for _, input := range []struct {
+			store *Store
+			input domain.ThesisUpdate
+		}{{firstStore, first}, {secondStore, second}} {
+			wait.Add(1)
+			go func(s *Store, request domain.ThesisUpdate) {
+				defer wait.Done()
+				<-start
+				thesis, saveErr := s.SaveThesis(context.Background(), request)
+				results <- outcome{thesis: thesis, err: saveErr}
+			}(input.store, input.input)
+		}
+		close(start)
+		wait.Wait()
+		close(results)
+		var all [2]outcome
+		index := 0
+		for result := range results {
+			all[index] = result
+			index++
+		}
+		return all
+	}
+
+	created := runRace(
+		thesisInput("portfolio-a", "holding-a", "race create one", 0),
+		thesisInput("portfolio-a", "holding-a", "race create two", 0),
+	)
+	var accepted domain.Thesis
+	conflicts := 0
+	for _, result := range created {
+		if result.err == nil {
+			accepted = result.thesis
+		} else if errors.Is(result.err, ErrThesisConflict) {
+			conflicts++
+		} else {
+			t.Fatalf("create race error = %v", result.err)
+		}
+	}
+	if accepted.Revision != 1 || conflicts != 1 {
+		t.Fatalf("create race accepted=%+v conflicts=%d", accepted, conflicts)
+	}
+
+	updated := runRace(
+		thesisInput("portfolio-a", "holding-a", "race update one", 1),
+		thesisInput("portfolio-a", "holding-a", "race update two", 1),
+	)
+	conflicts = 0
+	for _, result := range updated {
+		if result.err == nil {
+			if result.thesis.Revision != 2 {
+				t.Fatalf("update race revision = %d", result.thesis.Revision)
+			}
+		} else if errors.Is(result.err, ErrThesisConflict) {
+			conflicts++
+		} else {
+			t.Fatalf("update race error = %v", result.err)
+		}
+	}
+	if conflicts != 1 {
+		t.Fatalf("update race conflicts=%d", conflicts)
+	}
+	for _, table := range []string{"portfolio_theses", "thesis_revisions", "audit_events", "activity_events"} {
+		var count int
+		if err := firstStore.DB.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		want := 2
+		if table == "portfolio_theses" {
+			want = 1
+		}
+		if count != want {
+			t.Errorf("%s rows=%d, want %d", table, count, want)
+		}
+	}
+}
+
+func TestThesisCorruptStoredArraysFailClosed(t *testing.T) {
+	s := thesisFixture(t)
+	defer s.Close()
+	input := thesisInput("portfolio-a", "holding-a", "stored corruption", 0)
+	if _, err := s.SaveThesis(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`UPDATE portfolio_theses SET reasons_to_hold='{"not":"an array"}' WHERE id=?`, deterministicID("thesis", "portfolio-a", "holding-a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetThesis(context.Background(), "portfolio-a", "holding-a"); !errors.Is(err, ErrInvalidThesis) {
+		t.Fatalf("corrupt current error = %v", err)
+	}
+}
+
+func TestThesisAuditAndActivityFailuresRollBackMutation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		create string
+	}{
+		{name: "audit", create: `CREATE TRIGGER fail_thesis_audit BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT, 'forced audit failure'); END`},
+		{name: "activity", create: `CREATE TRIGGER fail_thesis_activity BEFORE INSERT ON activity_events WHEN NEW.action='portfolio.thesis.updated' BEGIN SELECT RAISE(ABORT, 'forced activity failure'); END`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := thesisFixture(t)
+			defer s.Close()
+			if _, err := s.DB.Exec(test.create); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.SaveThesis(context.Background(), thesisInput("portfolio-a", "holding-a", "must roll back", 0)); err == nil {
+				t.Fatal("SaveThesis unexpectedly succeeded")
+			}
+			for _, table := range []string{"portfolio_theses", "thesis_revisions", "audit_events", "activity_events"} {
+				var count int
+				if err := s.DB.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				if count != 0 {
+					t.Errorf("%s rows=%d after rollback", table, count)
+				}
+			}
+		})
+	}
+}
+
+func TestThesisSchemaVerificationRejectsCorruption(t *testing.T) {
+	corruptions := []struct {
+		name string
+		stmt string
+	}{
+		{name: "portfolio table", stmt: `PRAGMA foreign_keys=OFF; DROP TABLE portfolio_theses`},
+		{name: "revision table", stmt: `PRAGMA foreign_keys=OFF; DROP TABLE thesis_revisions`},
+		{name: "portfolio index", stmt: `DROP INDEX idx_portfolio_theses_portfolio`},
+		{name: "instrument index", stmt: `DROP INDEX idx_portfolio_theses_instrument`},
+		{name: "history index direction", stmt: `DROP INDEX idx_thesis_revisions_history; CREATE INDEX idx_thesis_revisions_history ON thesis_revisions(thesis_id, revision ASC)`},
+		{name: "portfolio index direction", stmt: `DROP INDEX idx_thesis_revisions_portfolio; CREATE INDEX idx_thesis_revisions_portfolio ON thesis_revisions(portfolio_id DESC, holding_id, revision DESC)`},
+		{name: "lot unique index", stmt: `DROP INDEX idx_lots_portfolio_id_id`},
+		{name: "composite unique definition", stmt: "PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql, '    UNIQUE(portfolio_id, holding_id),\\n', '') WHERE type='table' AND name='portfolio_theses'; PRAGMA schema_version=999; PRAGMA writable_schema=OFF"},
+		{name: "scope insert trigger", stmt: `DROP TRIGGER portfolio_theses_scope_insert`},
+		{name: "scope update trigger", stmt: `DROP TRIGGER portfolio_theses_scope_update`},
+		{name: "revision scope trigger", stmt: `DROP TRIGGER thesis_revisions_scope_insert`},
+		{name: "thesis delete trigger", stmt: `DROP TRIGGER portfolio_theses_append_only_delete`},
+		{name: "revision update trigger", stmt: `DROP TRIGGER thesis_revisions_append_only_update`},
+		{name: "revision delete trigger", stmt: `DROP TRIGGER thesis_revisions_append_only_delete`},
+	}
+	for _, corruption := range corruptions {
+		t.Run(corruption.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "corrupt.sqlite")
+			clean := thesisFixtureAt(t, path)
+			if err := clean.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(corruption.stmt); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			opened, err := Open(context.Background(), path)
+			if err == nil {
+				opened.Close()
+				t.Fatal("Open accepted a corrupted thesis schema")
+			}
+		})
 	}
 }
