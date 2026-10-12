@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,8 +14,11 @@ import (
 
 const futureTimestampTolerance = domain.DefaultFutureTolerance
 
+var ErrObservationIDConflict = errors.New("observation id conflicts with existing immutable row")
+
 type QuoteInput struct {
 	ID           string
+	PortfolioIDs []string
 	InstrumentID string
 	Symbol       string
 	Currency     string
@@ -28,6 +32,7 @@ type QuoteInput struct {
 
 type FXInput struct {
 	ID            string
+	PortfolioIDs  []string
 	BaseCurrency  string
 	QuoteCurrency string
 	Rate          string
@@ -38,24 +43,57 @@ type FXInput struct {
 	Provenance    string
 }
 
-func normalizeObservation(value string, allowEmpty bool) (string, error) {
+func quotePersistenceEqual(left, right domain.Quote) bool {
+	return left.ID == right.ID && left.InstrumentID == right.InstrumentID && left.Price == right.Price &&
+		left.Currency == right.Currency && left.Source == right.Source && left.MarketAt == right.MarketAt &&
+		left.FetchedAt == right.FetchedAt && left.Basis == right.Basis && left.Provenance == right.Provenance
+}
+
+func fxPersistenceEqual(left, right domain.FXRate) bool {
+	return left.ID == right.ID && left.BaseCurrency == right.BaseCurrency && left.QuoteCurrency == right.QuoteCurrency &&
+		left.Rate == right.Rate && left.Source == right.Source && left.MarketAt == right.MarketAt &&
+		left.FetchedAt == right.FetchedAt && left.Basis == right.Basis && left.Provenance == right.Provenance
+}
+
+func readExistingQuote(ctx context.Context, tx *sql.Tx, id string) (domain.Quote, error) {
+	var quote domain.Quote
+	err := tx.QueryRowContext(ctx, `SELECT id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance FROM quotes WHERE id = ?`, id).
+		Scan(&quote.ID, &quote.InstrumentID, &quote.Price, &quote.Currency, &quote.Source, &quote.MarketAt, &quote.FetchedAt, &quote.Basis, &quote.Provenance)
+	return quote, err
+}
+
+func readExistingFX(ctx context.Context, tx *sql.Tx, id string) (domain.FXRate, error) {
+	var fx domain.FXRate
+	err := tx.QueryRowContext(ctx, `SELECT id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance FROM fx_rates WHERE id = ?`, id).
+		Scan(&fx.ID, &fx.BaseCurrency, &fx.QuoteCurrency, &fx.Rate, &fx.Source, &fx.MarketAt, &fx.FetchedAt, &fx.Basis, &fx.Provenance)
+	return fx, err
+}
+
+func normalizeObservation(value string, allowEmpty bool, now time.Time) (string, error) {
 	if strings.TrimSpace(value) == "" && allowEmpty {
-		return time.Now().UTC().Format(time.RFC3339Nano), nil
+		value = now.UTC().Format(activityTimestampFormat)
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	parsed, err := domain.ValidateObservationTimestamp(value)
 	if err != nil {
 		return "", fmt.Errorf("invalid timestamp %q", value)
 	}
-	return parsed.UTC().Format(time.RFC3339Nano), nil
+	return parsed.UTC().Format(activityTimestampFormat), nil
 }
 
-func validateMarketTime(value string) error {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return err
+func validateObservationTimes(now time.Time, marketAt, fetchedAt string) error {
+	market, marketErr := domain.ValidateObservationTimestamp(marketAt)
+	fetched, fetchedErr := domain.ValidateObservationTimestamp(fetchedAt)
+	if marketErr != nil || fetchedErr != nil {
+		return errors.Join(marketErr, fetchedErr)
 	}
-	if parsed.After(time.Now().UTC().Add(futureTimestampTolerance)) {
+	if market.After(fetched) {
+		return fmt.Errorf("market timestamp must not be after fetched timestamp")
+	}
+	if market.After(now.UTC().Add(futureTimestampTolerance)) {
 		return fmt.Errorf("market timestamp is in the future beyond %s tolerance", futureTimestampTolerance)
+	}
+	if fetched.After(now.UTC().Add(futureTimestampTolerance)) {
+		return fmt.Errorf("fetched timestamp is in the future beyond %s tolerance", futureTimestampTolerance)
 	}
 	return nil
 }
@@ -68,15 +106,16 @@ func (s *Store) AddQuote(ctx context.Context, input QuoteInput) (domain.Quote, e
 	if strings.TrimSpace(input.Source) == "" || strings.TrimSpace(input.Basis) == "" || strings.TrimSpace(input.Provenance) == "" {
 		return domain.Quote{}, fmt.Errorf("quote source, basis and provenance are required")
 	}
-	marketAt, err := normalizeObservation(input.MarketAt, false)
+	now := s.now()
+	marketAt, err := normalizeObservation(input.MarketAt, false, now)
 	if err != nil {
 		return domain.Quote{}, err
 	}
-	if err = validateMarketTime(marketAt); err != nil {
+	fetchedAt, err := normalizeObservation(input.FetchedAt, true, now)
+	if err != nil {
 		return domain.Quote{}, err
 	}
-	fetchedAt, err := normalizeObservation(input.FetchedAt, true)
-	if err != nil {
+	if err = validateObservationTimes(now, marketAt, fetchedAt); err != nil {
 		return domain.Quote{}, err
 	}
 	currency := strings.ToUpper(strings.TrimSpace(input.Currency))
@@ -114,14 +153,25 @@ func (s *Store) AddQuote(ctx context.Context, input QuoteInput) (domain.Quote, e
 		return domain.Quote{}, err
 	}
 	defer tx.Rollback()
+	portfolioIDs, err := portfoliosForInstrument(ctx, tx, quote.InstrumentID)
+	if err != nil {
+		return domain.Quote{}, fmt.Errorf("find quote portfolios: %w", err)
+	}
+	if err := validatePortfolioAssociations(input.PortfolioIDs, portfolioIDs); err != nil {
+		return domain.Quote{}, err
+	}
 	result, insertErr := tx.ExecContext(ctx, `INSERT INTO quotes(id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, quote.ID, quote.InstrumentID, quote.Price, quote.Currency, quote.Source, quote.MarketAt, quote.FetchedAt, quote.Basis, quote.Provenance)
 	if insertErr != nil {
 		return domain.Quote{}, fmt.Errorf("persist quote: %w", insertErr)
 	}
 	inserted, _ := result.RowsAffected()
 	if inserted == 0 {
-		if err = tx.QueryRowContext(ctx, `SELECT id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance FROM quotes WHERE id = ?`, quote.ID).Scan(&quote.ID, &quote.InstrumentID, &quote.Price, &quote.Currency, &quote.Source, &quote.MarketAt, &quote.FetchedAt, &quote.Basis, &quote.Provenance); err != nil {
-			return domain.Quote{}, fmt.Errorf("read existing quote: %w", err)
+		existing, readErr := readExistingQuote(ctx, tx, quote.ID)
+		if readErr != nil {
+			return domain.Quote{}, fmt.Errorf("read existing quote: %w", readErr)
+		}
+		if !quotePersistenceEqual(quote, existing) {
+			return domain.Quote{}, fmt.Errorf("%w: quote %s", ErrObservationIDConflict, quote.ID)
 		}
 		if err = tx.Commit(); err != nil {
 			return domain.Quote{}, err
@@ -131,6 +181,10 @@ func (s *Store) AddQuote(ctx context.Context, input QuoteInput) (domain.Quote, e
 	payload, _ := json.Marshal(quote)
 	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, deterministicID("audit", "quote", quote.ID), "administrative-quote", "market.quote.added", "quote", quote.ID, payload, fetchedAt); err != nil {
 		return domain.Quote{}, fmt.Errorf("audit quote: %w", err)
+	}
+	auditID := deterministicID("audit", "quote", quote.ID)
+	if err := s.recordActivityForPortfolios(ctx, tx, portfolioIDs, "administrative", "market.quote.added", "quote", quote.ID, fetchedAt, auditID); err != nil {
+		return domain.Quote{}, fmt.Errorf("activity quote: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
 		return domain.Quote{}, err
@@ -153,15 +207,16 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	if strings.TrimSpace(input.Source) == "" || strings.TrimSpace(input.Basis) == "" || strings.TrimSpace(input.Provenance) == "" {
 		return domain.FXRate{}, fmt.Errorf("FX source, basis and provenance are required")
 	}
-	marketAt, err := normalizeObservation(input.MarketAt, false)
+	now := s.now()
+	marketAt, err := normalizeObservation(input.MarketAt, false, now)
 	if err != nil {
 		return domain.FXRate{}, err
 	}
-	if err = validateMarketTime(marketAt); err != nil {
+	fetchedAt, err := normalizeObservation(input.FetchedAt, true, now)
+	if err != nil {
 		return domain.FXRate{}, err
 	}
-	fetchedAt, err := normalizeObservation(input.FetchedAt, true)
-	if err != nil {
+	if err = validateObservationTimes(now, marketAt, fetchedAt); err != nil {
 		return domain.FXRate{}, err
 	}
 	id := strings.TrimSpace(input.ID)
@@ -174,6 +229,21 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 		return domain.FXRate{}, err
 	}
 	defer tx.Rollback()
+	portfolioIDs, err := portfoliosForFX(ctx, tx, fx.BaseCurrency, fx.QuoteCurrency)
+	if err != nil {
+		return domain.FXRate{}, fmt.Errorf("find FX portfolios: %w", err)
+	}
+	if err := validatePortfolioAssociations(input.PortfolioIDs, portfolioIDs); err != nil {
+		return domain.FXRate{}, err
+	}
+	if existing, readErr := readExistingFX(ctx, tx, fx.ID); readErr == nil {
+		if !fxPersistenceEqual(fx, existing) {
+			return domain.FXRate{}, fmt.Errorf("%w: FX rate %s", ErrObservationIDConflict, fx.ID)
+		}
+		return fx, tx.Commit()
+	} else if readErr != sql.ErrNoRows {
+		return domain.FXRate{}, fmt.Errorf("read existing FX rate: %w", readErr)
+	}
 	var reverseCount int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM fx_rates WHERE base_currency = ? AND quote_currency = ?`, fx.QuoteCurrency, fx.BaseCurrency).Scan(&reverseCount); err != nil {
 		return domain.FXRate{}, fmt.Errorf("check FX pair orientation: %w", err)
@@ -187,8 +257,12 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	}
 	inserted, _ := result.RowsAffected()
 	if inserted == 0 {
-		if err = tx.QueryRowContext(ctx, `SELECT id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance FROM fx_rates WHERE id = ?`, fx.ID).Scan(&fx.ID, &fx.BaseCurrency, &fx.QuoteCurrency, &fx.Rate, &fx.Source, &fx.MarketAt, &fx.FetchedAt, &fx.Basis, &fx.Provenance); err != nil {
-			return domain.FXRate{}, fmt.Errorf("read existing FX rate: %w", err)
+		existing, readErr := readExistingFX(ctx, tx, fx.ID)
+		if readErr != nil {
+			return domain.FXRate{}, fmt.Errorf("read existing FX rate: %w", readErr)
+		}
+		if !fxPersistenceEqual(fx, existing) {
+			return domain.FXRate{}, fmt.Errorf("%w: FX rate %s", ErrObservationIDConflict, fx.ID)
 		}
 		if err = tx.Commit(); err != nil {
 			return domain.FXRate{}, err
@@ -199,10 +273,120 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, deterministicID("audit", "fx", fx.ID), "administrative-fx", "market.fx.added", "fx_rate", fx.ID, payload, fetchedAt); err != nil {
 		return domain.FXRate{}, fmt.Errorf("audit FX rate: %w", err)
 	}
+	auditID := deterministicID("audit", "fx", fx.ID)
+	if err := s.recordActivityForPortfolios(ctx, tx, portfolioIDs, "administrative", "market.fx.added", "fx_rate", fx.ID, fetchedAt, auditID); err != nil {
+		return domain.FXRate{}, fmt.Errorf("activity FX: %w", err)
+	}
 	if err = tx.Commit(); err != nil {
 		return domain.FXRate{}, err
 	}
 	return fx, nil
+}
+
+// persistQuoteTx and persistFXTx are used by refresh apply transactions. They
+// deliberately do not open or commit a transaction; all source, audit, and
+// activity rows therefore share one atomic boundary.
+func (s *Store) persistQuoteTx(ctx context.Context, tx *sql.Tx, quote domain.Quote, provided []string) error {
+	portfolioIDs, err := portfoliosForInstrument(ctx, tx, quote.InstrumentID)
+	if err != nil {
+		return fmt.Errorf("find quote portfolios: %w", err)
+	}
+	activityIDs := portfolioIDs
+	if len(provided) > 0 {
+		if err := validatePortfolioAssociationsSubset(provided, portfolioIDs); err != nil {
+			return err
+		}
+		activityIDs = provided
+	}
+	if len(activityIDs) == 0 {
+		return errors.New("no portfolio association")
+	}
+	if err := validatePortfolioAssociationsSubset(activityIDs, portfolioIDs); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO quotes(id,instrument_id,price,currency,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, quote.ID, quote.InstrumentID, quote.Price, quote.Currency, quote.Source, quote.MarketAt, quote.FetchedAt, quote.Basis, quote.Provenance)
+	if err != nil {
+		return fmt.Errorf("persist quote: %w", err)
+	}
+	inserted, _ := result.RowsAffected()
+	if inserted == 0 {
+		existing, readErr := readExistingQuote(ctx, tx, quote.ID)
+		if readErr != nil {
+			return fmt.Errorf("read existing quote: %w", readErr)
+		}
+		if !quotePersistenceEqual(quote, existing) {
+			return fmt.Errorf("%w: quote %s", ErrObservationIDConflict, quote.ID)
+		}
+		return nil
+	}
+	payload, _ := json.Marshal(quote)
+	auditID := deterministicID("audit", "quote", quote.ID)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, auditID, "administrative-quote", "market.quote.added", "quote", quote.ID, payload, quote.FetchedAt); err != nil {
+		return fmt.Errorf("audit quote: %w", err)
+	}
+	if err := s.recordActivityForPortfolios(ctx, tx, activityIDs, "administrative", "market.quote.added", "quote", quote.ID, quote.FetchedAt, auditID); err != nil {
+		return fmt.Errorf("activity quote: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) persistFXTx(ctx context.Context, tx *sql.Tx, fx domain.FXRate, provided []string) error {
+	portfolioIDs, err := portfoliosForFX(ctx, tx, fx.BaseCurrency, fx.QuoteCurrency)
+	if err != nil {
+		return fmt.Errorf("find FX portfolios: %w", err)
+	}
+	activityIDs := portfolioIDs
+	if len(provided) > 0 {
+		if err := validatePortfolioAssociationsSubset(provided, portfolioIDs); err != nil {
+			return err
+		}
+		activityIDs = provided
+	}
+	if len(activityIDs) == 0 {
+		return errors.New("no portfolio association")
+	}
+	if err := validatePortfolioAssociationsSubset(activityIDs, portfolioIDs); err != nil {
+		return err
+	}
+	if existing, readErr := readExistingFX(ctx, tx, fx.ID); readErr == nil {
+		if !fxPersistenceEqual(fx, existing) {
+			return fmt.Errorf("%w: FX rate %s", ErrObservationIDConflict, fx.ID)
+		}
+		return nil
+	} else if readErr != sql.ErrNoRows {
+		return fmt.Errorf("read existing FX rate: %w", readErr)
+	}
+	var reverseCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM fx_rates WHERE base_currency=? AND quote_currency=?`, fx.QuoteCurrency, fx.BaseCurrency).Scan(&reverseCount); err != nil {
+		return err
+	}
+	if reverseCount != 0 {
+		return fmt.Errorf("FX pair orientation is already established as %s/%s", fx.QuoteCurrency, fx.BaseCurrency)
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO fx_rates(id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, fx.ID, fx.BaseCurrency, fx.QuoteCurrency, fx.Rate, fx.Source, fx.MarketAt, fx.FetchedAt, fx.Basis, fx.Provenance)
+	if err != nil {
+		return fmt.Errorf("persist FX rate: %w", err)
+	}
+	inserted, _ := result.RowsAffected()
+	if inserted == 0 {
+		existing, readErr := readExistingFX(ctx, tx, fx.ID)
+		if readErr != nil {
+			return fmt.Errorf("read existing FX rate: %w", readErr)
+		}
+		if !fxPersistenceEqual(fx, existing) {
+			return fmt.Errorf("%w: FX rate %s", ErrObservationIDConflict, fx.ID)
+		}
+		return nil
+	}
+	payload, _ := json.Marshal(fx)
+	auditID := deterministicID("audit", "fx", fx.ID)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, auditID, "administrative-fx", "market.fx.added", "fx_rate", fx.ID, payload, fx.FetchedAt); err != nil {
+		return fmt.Errorf("audit FX rate: %w", err)
+	}
+	if err := s.recordActivityForPortfolios(ctx, tx, activityIDs, "administrative", "market.fx.added", "fx_rate", fx.ID, fx.FetchedAt, auditID); err != nil {
+		return fmt.Errorf("activity FX: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) loadValuationInput(ctx context.Context, portfolioID, reportingCurrency string, asOf time.Time, maxAge time.Duration) (domain.ValuationInput, error) {

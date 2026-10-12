@@ -34,6 +34,42 @@ type refreshMappingPlan struct {
 	mappingAmbiguous map[marketdata.Provider]int
 }
 
+type refreshObservations struct {
+	quotes []domain.Quote
+	fx     []domain.FXRate
+}
+
+var errRefreshProviderContract = errors.New("provider response does not match request")
+
+func markRefreshObservationConflict(result *domain.RefreshResult, provider, observationID string) {
+	for index := range result.Providers {
+		status := &result.Providers[index]
+		if status.Provider != provider {
+			continue
+		}
+		if status.SucceededCount > 0 {
+			status.SucceededCount--
+		}
+		status.FailedCount++
+		status.Status = "incomplete"
+		status.Errors = append(status.Errors, "persistence")
+		for idIndex, id := range status.ObservationIDs {
+			if id == observationID {
+				status.ObservationIDs = append(status.ObservationIDs[:idIndex], status.ObservationIDs[idIndex+1:]...)
+				break
+			}
+		}
+		break
+	}
+	for index, id := range result.ObservationIDs {
+		if id == observationID {
+			result.ObservationIDs = append(result.ObservationIDs[:index], result.ObservationIDs[index+1:]...)
+			break
+		}
+	}
+	result.Status = "incomplete"
+}
+
 func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.RefreshResult, error) {
 	if options.PortfolioID == "" {
 		options.PortfolioID = defaultPortfolioID
@@ -72,24 +108,57 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 	}
 	started := time.Now().UTC()
 	result := domain.RefreshResult{RefreshID: deterministicID("refresh", options.PortfolioID, started.Format(time.RFC3339Nano)), PortfolioID: options.PortfolioID, Status: "complete", StartedAt: started.Format(time.RFC3339Nano)}
+	observations := refreshObservations{}
 	for _, provider := range providers {
-		status := s.refreshProvider(ctx, provider, options, targets, plan)
+		status := s.refreshProvider(ctx, provider, options, targets, plan, &observations)
 		result.Providers = append(result.Providers, status)
 		result.ObservationIDs = append(result.ObservationIDs, status.ObservationIDs...)
 		if status.Status != "complete" {
 			result.Status = "incomplete"
 		}
-		if err := s.persistRefreshRun(ctx, result.RefreshID, options.PortfolioID, status, started); err != nil {
+	}
+	result.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.RefreshResult{}, err
+	}
+	defer tx.Rollback()
+	for _, quote := range observations.quotes {
+		if err := s.persistQuoteTx(ctx, tx, quote, []string{options.PortfolioID}); err != nil {
+			if errors.Is(err, ErrObservationIDConflict) {
+				markRefreshObservationConflict(&result, quote.Source, quote.ID)
+				continue
+			}
 			return domain.RefreshResult{}, err
 		}
 	}
-	result.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	for _, fx := range observations.fx {
+		if err := s.persistFXTx(ctx, tx, fx, []string{options.PortfolioID}); err != nil {
+			if errors.Is(err, ErrObservationIDConflict) {
+				markRefreshObservationConflict(&result, fx.Source, fx.ID)
+				continue
+			}
+			return domain.RefreshResult{}, err
+		}
+	}
 	payload, _ := json.Marshal(struct {
 		RefreshID string                         `json:"refresh_id"`
 		Status    string                         `json:"status"`
 		Providers []domain.ProviderRefreshStatus `json:"providers"`
 	}{result.RefreshID, result.Status, result.Providers})
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, deterministicID("audit", "refresh", result.RefreshID), "administrative-refresh", "market.refresh.completed", "refresh_run", result.RefreshID, payload, result.EndedAt); err != nil {
+	for _, status := range result.Providers {
+		if err := s.persistRefreshRunTx(ctx, tx, result.RefreshID, options.PortfolioID, status, started); err != nil {
+			return domain.RefreshResult{}, err
+		}
+	}
+	auditID := deterministicID("audit", "refresh", result.RefreshID)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, auditID, "administrative-refresh", "market.refresh.completed", "refresh_run", result.RefreshID, payload, result.EndedAt); err != nil {
+		return domain.RefreshResult{}, err
+	}
+	if err := recordActivity(ctx, tx, options.PortfolioID, "administrative", "market.refresh.completed", "market", "refresh_run", result.RefreshID, "Market refresh completed", "A market-data refresh completed.", result.EndedAt, auditID); err != nil {
+		return domain.RefreshResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return domain.RefreshResult{}, err
 	}
 	return result, nil
@@ -186,7 +255,7 @@ func (s *Store) planRefreshMappings(ctx context.Context, targets []refreshTarget
 	return plan, nil
 }
 
-func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provider, options RefreshOptions, targets []refreshTarget, plan refreshMappingPlan) domain.ProviderRefreshStatus {
+func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provider, options RefreshOptions, targets []refreshTarget, plan refreshMappingPlan, observations *refreshObservations) domain.ProviderRefreshStatus {
 	status := domain.ProviderRefreshStatus{Provider: provider.String(), Status: "complete"}
 	status.MissingMapping = plan.missing[provider]
 	if ambiguousMappings := plan.mappingAmbiguous[provider]; ambiguousMappings > 0 {
@@ -234,6 +303,19 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 		status.Errors = append(status.Errors, "configuration")
 		return status
 	}
+	if client.Name() != provider {
+		requested := len(quoteRequests)
+		if provider == marketdata.ProviderOpenExchangeRates {
+			requested = len(fxRequests)
+		}
+		if requested > 0 {
+			status.RequestCount = requested
+			status.FailedCount += requested
+			status.Status = "incomplete"
+			status.Errors = append(status.Errors, "provider_error")
+		}
+		return status
+	}
 	if provider == marketdata.ProviderOpenExchangeRates {
 		if len(fxRequests) == 0 {
 			return status
@@ -256,14 +338,14 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 					status.Errors = append(status.Errors, "provider_error")
 					continue
 				}
-				stored, storeErr := s.AddFXRate(ctx, FXInput{ID: rate.ID, BaseCurrency: rate.BaseCurrency, QuoteCurrency: rate.QuoteCurrency, Rate: rate.Rate, Source: rate.Source, MarketAt: rate.MarketAt, FetchedAt: rate.FetchedAt, Basis: rate.Basis, Provenance: rate.Provenance})
-				if storeErr != nil {
+				if storeErr := validateRefreshFX(s, request, provider, rate); storeErr != nil {
 					status.FailedCount++
 					status.Status = "incomplete"
-					status.Errors = append(status.Errors, "persistence")
+					status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 				} else {
 					status.SucceededCount++
-					status.ObservationIDs = append(status.ObservationIDs, stored.ID)
+					status.ObservationIDs = append(status.ObservationIDs, rate.ID)
+					observations.fx = append(observations.fx, rate)
 				}
 			}
 			return status
@@ -277,14 +359,14 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 				status.Errors = append(status.Errors, refreshErrorClass(callErr))
 				continue
 			}
-			stored, storeErr := s.AddFXRate(ctx, FXInput{ID: rate.ID, BaseCurrency: rate.BaseCurrency, QuoteCurrency: rate.QuoteCurrency, Rate: rate.Rate, Source: rate.Source, MarketAt: rate.MarketAt, FetchedAt: rate.FetchedAt, Basis: rate.Basis, Provenance: rate.Provenance})
-			if storeErr != nil {
+			if storeErr := validateRefreshFX(s, request, provider, rate); storeErr != nil {
 				status.FailedCount++
 				status.Status = "incomplete"
-				status.Errors = append(status.Errors, "persistence")
+				status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 			} else {
 				status.SucceededCount++
-				status.ObservationIDs = append(status.ObservationIDs, stored.ID)
+				status.ObservationIDs = append(status.ObservationIDs, rate.ID)
+				observations.fx = append(observations.fx, rate)
 			}
 		}
 		return status
@@ -312,14 +394,14 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 				status.Errors = append(status.Errors, "provider_error")
 				continue
 			}
-			stored, storeErr := s.AddQuote(ctx, QuoteInput{ID: quote.ID, InstrumentID: quote.InstrumentID, Symbol: quote.Symbol, Currency: quote.Currency, Price: quote.Price, Source: quote.Source, MarketAt: quote.MarketAt, FetchedAt: quote.FetchedAt, Basis: quote.Basis, Provenance: quote.Provenance})
-			if storeErr != nil {
+			if storeErr := validateRefreshQuote(s, request, provider, quote); storeErr != nil {
 				status.FailedCount++
 				status.Status = "incomplete"
-				status.Errors = append(status.Errors, "persistence")
+				status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 			} else {
 				status.SucceededCount++
-				status.ObservationIDs = append(status.ObservationIDs, stored.ID)
+				status.ObservationIDs = append(status.ObservationIDs, quote.ID)
+				observations.quotes = append(observations.quotes, quote)
 			}
 		}
 		return status
@@ -333,14 +415,14 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 			status.Errors = append(status.Errors, refreshErrorClass(callErr))
 			continue
 		}
-		stored, storeErr := s.AddQuote(ctx, QuoteInput{ID: quote.ID, InstrumentID: quote.InstrumentID, Symbol: quote.Symbol, Currency: quote.Currency, Price: quote.Price, Source: quote.Source, MarketAt: quote.MarketAt, FetchedAt: quote.FetchedAt, Basis: quote.Basis, Provenance: quote.Provenance})
-		if storeErr != nil {
+		if storeErr := validateRefreshQuote(s, request, provider, quote); storeErr != nil {
 			status.FailedCount++
 			status.Status = "incomplete"
-			status.Errors = append(status.Errors, "persistence")
+			status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 		} else {
 			status.SucceededCount++
-			status.ObservationIDs = append(status.ObservationIDs, stored.ID)
+			status.ObservationIDs = append(status.ObservationIDs, quote.ID)
+			observations.quotes = append(observations.quotes, quote)
 		}
 	}
 	return status
@@ -362,6 +444,46 @@ func refreshErrorClass(err error) string {
 		return providerErr.Classification
 	}
 	return "provider_error"
+}
+
+func validateRefreshQuote(s *Store, request marketdata.QuoteRequest, provider marketdata.Provider, quote domain.Quote) error {
+	if quote.InstrumentID != request.InstrumentID || quote.Symbol != request.Symbol || !strings.EqualFold(quote.Currency, request.Currency) || quote.Source != provider.String() {
+		return fmt.Errorf("%w: quote identity mismatch", errRefreshProviderContract)
+	}
+	price, err := domain.ParseDecimal(quote.Price)
+	if err != nil || price.Sign() <= 0 || strings.TrimSpace(quote.ID) == "" || strings.TrimSpace(quote.InstrumentID) == "" {
+		return errors.New("invalid provider quote")
+	}
+	return validateObservationTimes(s.now(), quote.MarketAt, quote.FetchedAt)
+}
+
+func validateRefreshFX(s *Store, request marketdata.FXRequest, provider marketdata.Provider, fx domain.FXRate) error {
+	if !strings.EqualFold(fx.BaseCurrency, request.BaseCurrency) || !strings.EqualFold(fx.QuoteCurrency, request.QuoteCurrency) || fx.Source != provider.String() {
+		return fmt.Errorf("%w: FX identity mismatch", errRefreshProviderContract)
+	}
+	rate, err := domain.ParseDecimal(fx.Rate)
+	if err != nil || rate.Sign() <= 0 || strings.TrimSpace(fx.ID) == "" || fx.BaseCurrency == "" || fx.QuoteCurrency == "" {
+		return errors.New("invalid provider FX rate")
+	}
+	return validateObservationTimes(s.now(), fx.MarketAt, fx.FetchedAt)
+}
+
+func refreshValidationErrorClass(err error) string {
+	if errors.Is(err, errRefreshProviderContract) {
+		return "provider_error"
+	}
+	return "persistence"
+}
+
+func (s *Store) persistRefreshRunTx(ctx context.Context, tx *sql.Tx, refreshID, portfolioID string, status domain.ProviderRefreshStatus, started time.Time) error {
+	ended := s.now()
+	classification := ""
+	if len(status.Errors) > 0 {
+		classification = status.Errors[0]
+	}
+	id := deterministicID("refresh-run", refreshID, status.Provider)
+	_, err := tx.ExecContext(ctx, `INSERT INTO refresh_runs(id,portfolio_id,provider,status,started_at,ended_at,request_count,succeeded_count,failed_count,missing_mapping_count,error_classification) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, portfolioID, status.Provider, status.Status, started.Format(time.RFC3339Nano), ended.Format(time.RFC3339Nano), status.RequestCount, status.SucceededCount, status.FailedCount, status.MissingMapping, classification)
+	return err
 }
 
 func (s *Store) persistRefreshRun(ctx context.Context, refreshID, portfolioID string, status domain.ProviderRefreshStatus, started time.Time) error {

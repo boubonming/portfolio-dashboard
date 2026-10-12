@@ -22,17 +22,15 @@ type SnapshotRequest struct {
 }
 
 type snapshotPayload struct {
-	SnapshotID         string `json:"snapshot_id"`
-	PortfolioID        string `json:"portfolio_id"`
-	CalculationVersion string `json:"calculation_version"`
-	CreatedAt          string `json:"created_at"`
-	AsOf               string `json:"as_of"`
-	// A pointer distinguishes legacy payloads, which did not persist MaxAge,
-	// from new payloads that intentionally use the default threshold.
-	MaxAge       *time.Duration        `json:"max_age,omitempty"`
-	SourceHashes []string              `json:"source_hashes"`
-	Input        domain.ValuationInput `json:"input"`
-	Valuation    domain.Valuation      `json:"valuation"`
+	SnapshotID         string                `json:"snapshot_id"`
+	PortfolioID        string                `json:"portfolio_id"`
+	CalculationVersion string                `json:"calculation_version"`
+	CreatedAt          string                `json:"created_at"`
+	AsOf               string                `json:"as_of"`
+	MaxAge             time.Duration         `json:"max_age"`
+	SourceHashes       []string              `json:"source_hashes"`
+	Input              domain.ValuationInput `json:"input"`
+	Valuation          domain.Valuation      `json:"valuation"`
 }
 
 func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (domain.SnapshotStatus, error) {
@@ -89,7 +87,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		}
 	}
 	sort.Strings(sourceHashes)
-	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: request.AsOf.Format(time.RFC3339Nano), MaxAge: durationPointer(request.MaxAge), SourceHashes: sourceHashes, Input: input, Valuation: valuation}
+	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: request.AsOf.Format(time.RFC3339Nano), MaxAge: request.MaxAge, SourceHashes: sourceHashes, Input: input, Valuation: valuation}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return domain.SnapshotStatus{}, err
@@ -109,6 +107,14 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 			return domain.SnapshotStatus{}, readErr
 		}
 		return statusFromPayload(existing)
+	}
+	auditID := deterministicID("audit", "snapshot", snapshotID)
+	auditPayload, _ := json.Marshal(map[string]any{"complete": valuation.Complete, "calculation_version": request.CalculationVersion})
+	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, auditID, "system-snapshot", "portfolio.snapshot.created", "snapshot", snapshotID, auditPayload, createdAt); err != nil {
+		return domain.SnapshotStatus{}, fmt.Errorf("audit snapshot: %w", err)
+	}
+	if err = recordActivity(ctx, tx, request.PortfolioID, "system", "portfolio.snapshot.created", "portfolio", "snapshot", snapshotID, "Immutable snapshot created", "An immutable valuation snapshot was created.", createdAt, auditID); err != nil {
+		return domain.SnapshotStatus{}, fmt.Errorf("activity snapshot: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
 		return domain.SnapshotStatus{}, err

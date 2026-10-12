@@ -68,7 +68,7 @@ func (c *FinnhubClient) Quote(ctx context.Context, request QuoteRequest) (domain
 		return domain.Quote{}, err
 	}
 	var epoch int64
-	if err := json.Unmarshal(payload.Epoch, &epoch); err != nil || epoch <= 0 {
+	if err := json.Unmarshal(payload.Epoch, &epoch); err != nil || epoch < 0 {
 		return domain.Quote{}, providerErr(c.Name(), "invalid_timestamp", "provider timestamp is invalid")
 	}
 	marketAt, err := parseProviderTimestamp(c.Name(), time.Unix(epoch, 0), c.now())

@@ -11,6 +11,22 @@ const DefaultFreshness = 36 * time.Hour
 const DefaultFutureTolerance = 5 * time.Minute
 const CalculationVersion = "phase-b.decimal.v1"
 
+// Observation timestamps are shared by ingestion, persistence, and provider
+// adapters. Keeping the lower bound here prevents one boundary from accepting
+// dates that another boundary later rejects.
+var EarliestObservation = time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+func ValidateObservationTimestamp(value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	if err != nil {
+		return time.Time{}, err
+	}
+	if parsed.Before(EarliestObservation) {
+		return time.Time{}, fmt.Errorf("observation timestamp is before %s", EarliestObservation.Format(time.RFC3339))
+	}
+	return parsed.UTC(), nil
+}
+
 // ClassifyFreshness uses UTC timestamps. Presentation layers may render these
 // timestamps in SGT; the accounting decision is always made in UTC.
 func ClassifyFreshness(marketAt string, asOf time.Time, maxAge time.Duration) Freshness {

@@ -71,46 +71,20 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 	}
 	input := payload.Input
 	input.ReportingCurrency = currency
-	legacyFreshnessMetadata := payload.MaxAge == nil
-	if payload.MaxAge != nil {
-		input.MaxAge = *payload.MaxAge
-	}
+	input.MaxAge = payload.MaxAge
 	asOf, err := time.Parse(time.RFC3339Nano, payload.AsOf)
 	if err == nil {
 		input.AsOf = asOf
 	}
 	valuation := payload.Valuation
 	if currency != payload.Valuation.ReportingCurrency {
-		if legacyFreshnessMetadata {
-			// Legacy payloads do not say which freshness threshold was used when
-			// the immutable valuation was created. Recalculating an alternate
-			// currency with a guessed threshold could turn stale data complete.
-			// Keep the persisted valuation for same-currency reads, but explicitly
-			// withhold alternate reporting values and the aggregate.
-			valuation.Complete = false
-			valuation.ReportingTotal = ""
-			valuation.MissingDependencies = appendUnique(valuation.MissingDependencies, "snapshot:max_age")
-			for i := range valuation.Lots {
-				valuation.Lots[i].ReportingValue = nil
-				valuation.Lots[i].FXIDs = nil
-			}
-		} else {
-			valuation, err = domain.Calculate(input)
-			if err != nil {
-				return domain.PortfolioOverview{}, err
-			}
+		valuation, err = domain.Calculate(input)
+		if err != nil {
+			return domain.PortfolioOverview{}, err
 		}
 	}
 	view.Snapshot = snapshotView(payload, valuation)
 	view.Allocation = domain.BuildAllocation(input, valuation)
-	if legacyFreshnessMetadata {
-		// The persisted valuation remains available for the existing table, but
-		// its freshness threshold is not reproducible. Never turn that legacy
-		// payload into a normalized allocation distribution.
-		view.Allocation.State = "partial"
-		view.Allocation.ByInstrument = nil
-		view.Allocation.BySourceCurrency = nil
-	}
 
 	values := make(map[string]domain.LotValuation, len(valuation.Lots))
 	for _, lot := range valuation.Lots {

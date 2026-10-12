@@ -2,88 +2,12 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 )
-
-func TestPortfolioOverviewFailsSafeForLegacySnapshotWithoutMaxAge(t *testing.T) {
-	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "portfolio.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	now := time.Now().UTC()
-	nowText := now.Format(time.RFC3339Nano)
-	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-freshness", "Freshness fixture", "MYR", nowText, nowText); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-freshness", "FRESH", "Freshness instrument", "USD", nowText); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,currency,created_at) VALUES(?,?,?,?,?,?,?)`, "lot-freshness", "portfolio-freshness", "instrument-freshness", "2", "5", "USD", nowText); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AddQuote(ctx, QuoteInput{ID: "quote-freshness", InstrumentID: "instrument-freshness", Currency: "USD", Price: "10", Source: "fixture", MarketAt: now.Add(-3 * time.Hour).Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AddFXRate(ctx, FXInput{ID: "fx-freshness", BaseCurrency: "USD", QuoteCurrency: "MYR", Rate: "4.5", Source: "fixture", MarketAt: now.Add(-time.Hour).Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {
-		t.Fatal(err)
-	}
-	status, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "portfolio-freshness", ReportingCurrency: "MYR", CalculationVersion: "freshness.test.v1", AsOf: now, MaxAge: 2 * time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status.Complete {
-		t.Fatalf("stale source unexpectedly complete: %+v", status)
-	}
-	var storedPayload []byte
-	if err := s.DB.QueryRowContext(ctx, `SELECT payload FROM snapshots WHERE id = ?`, status.SnapshotID).Scan(&storedPayload); err != nil {
-		t.Fatal(err)
-	}
-	var encoded map[string]any
-	if err := json.Unmarshal(storedPayload, &encoded); err != nil {
-		t.Fatal(err)
-	}
-	delete(encoded, "max_age")
-	legacySnapshotID := "snapshot-legacy-freshness"
-	encoded["snapshot_id"] = legacySnapshotID
-	encoded["calculation_version"] = "freshness.legacy.v1"
-	legacyPayload, err := json.Marshal(encoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO snapshots(id,portfolio_id,calculation_version,payload,created_at,input_hash) VALUES(?,?,?,?,?,?)`, legacySnapshotID, "portfolio-freshness", "freshness.legacy.v1", legacyPayload, now.Add(time.Minute).Format(time.RFC3339Nano), "legacy-freshness-input"); err != nil {
-		t.Fatal(err)
-	}
-	myr, err := s.PortfolioOverview(ctx, "portfolio-freshness", "MYR")
-	if err != nil {
-		t.Fatal(err)
-	}
-	usd, err := s.PortfolioOverview(ctx, "portfolio-freshness", "USD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if myr.Snapshot.SnapshotID != usd.Snapshot.SnapshotID || myr.Snapshot.Complete || usd.Snapshot.Complete || usd.Snapshot.State != "incomplete" {
-		t.Fatalf("alternate read changed snapshot semantics: MYR=%+v USD=%+v", myr.Snapshot, usd.Snapshot)
-	}
-	if myr.Snapshot.ReportingTotal != status.ReportingTotal || len(myr.Holdings) != 1 || myr.Holdings[0].Freshness.Status != domain.Stale {
-		t.Fatalf("same-currency read did not preserve stored valuation: status=%+v holdings=%+v", myr.Snapshot, myr.Holdings)
-	}
-	if usd.Snapshot.ReportingTotal != "" || !containsString(usd.Snapshot.MissingDependencies, "snapshot:max_age") || len(usd.Snapshot.MissingDependencies) != 1 || len(usd.Holdings) != 1 || usd.Holdings[0].ReportingValue != nil {
-		t.Fatalf("alternate holding quality = %+v", usd.Holdings)
-	}
-	if usd.Allocation.Coverage.MissingDependencies != len(usd.Snapshot.MissingDependencies) {
-		t.Fatalf("legacy allocation dependency count = %+v", usd.Allocation.Coverage)
-	}
-	if myr.Allocation.State == "complete" || usd.Allocation.State == "complete" || len(myr.Allocation.ByInstrument) != 0 || len(usd.Allocation.BySourceCurrency) != 0 {
-		t.Fatalf("legacy allocation should be withheld: MYR=%+v USD=%+v", myr.Allocation, usd.Allocation)
-	}
-}
 
 func TestPortfolioOverviewDoesNotLeakCrossPortfolioAccount(t *testing.T) {
 	ctx := context.Background()

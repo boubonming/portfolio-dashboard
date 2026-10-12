@@ -165,7 +165,7 @@ func buildURL(base, path string, query url.Values) string {
 }
 
 func parseProviderTimestamp(provider Provider, timestamp time.Time, now time.Time) (string, error) {
-	if timestamp.IsZero() || timestamp.After(now.Add(5*time.Minute)) {
+	if timestamp.IsZero() || timestamp.Before(domain.EarliestObservation) || timestamp.After(now.Add(5*time.Minute)) {
 		return "", providerErr(provider, "invalid_timestamp", "provider timestamp is missing or in the future")
 	}
 	return timestamp.UTC().Format(time.RFC3339Nano), nil

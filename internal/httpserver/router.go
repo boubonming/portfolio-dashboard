@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 
@@ -26,6 +27,11 @@ func NewHandlerWithAuth(database *store.Store, config auth.Config) (http.Handler
 	if err != nil {
 		return nil, err
 	}
+	if database != nil {
+		if err := database.SetActivityCursorSecret(authenticator.ActivityCursorSecret()); err != nil {
+			return nil, err
+		}
+	}
 	return newHandler(database, authenticator)
 }
 
@@ -44,7 +50,7 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 	mux.HandleFunc("/api/v1/auth", apiNotFound)
 	mux.HandleFunc("/api/v1/portfolios", apiNotFound)
 	mux.HandleFunc("/api/v1/auth/", authRoutes(authenticator))
-	portfolio := http.Handler(portfolioOverview(database))
+	portfolio := http.Handler(portfolioRoutes(database))
 	if authenticator != nil {
 		portfolio = authenticator.RequireAuth(authenticator.RequireCSRF(portfolio))
 	}
@@ -175,6 +181,71 @@ func portfolioOverview(database *store.Store) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, view)
+	}
+}
+
+func portfolioRoutes(database *store.Store) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[3] != "" {
+			switch parts[4] {
+			case "overview":
+				portfolioOverview(database).ServeHTTP(w, r)
+				return
+			case "activity":
+				portfolioActivity(database).ServeHTTP(w, r)
+				return
+			}
+		}
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+	})
+}
+
+func portfolioActivity(database *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if len(parts) != 5 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "portfolios" || parts[4] != "activity" || parts[3] == "" || r.URL.Path != "/api/v1/portfolios/"+parts[3]+"/activity" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+			return
+		}
+		if database == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
+		query, parseErr := url.ParseQuery(r.URL.RawQuery)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_pagination"})
+			return
+		}
+		for key, values := range query {
+			if (key != "limit" && key != "cursor") || len(values) != 1 || values[0] == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_pagination"})
+				return
+			}
+		}
+		options, err := store.ParseActivityPagination(query.Get("limit"), query.Get("cursor"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_pagination"})
+			return
+		}
+		page, err := database.Activity(r.Context(), parts[3], options)
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrPortfolioNotFound):
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "portfolio_not_found"})
+			case errors.Is(err, store.ErrInvalidActivityPagination):
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_pagination"})
+			default:
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
 	}
 }
 

@@ -120,6 +120,9 @@ func (s *Store) Apply(ctx context.Context, preview domain.Preview, sourcePath, e
 		VALUES (?, 'approved-import', 'portfolio.import.approved', 'import_run', ?, ?, ?)`, auditID, runID, auditPayload, now); err != nil {
 		return result, fmt.Errorf("persist audit event: %w", err)
 	}
+	if err := recordActivity(ctx, tx, defaultPortfolioID, "approved-import", "portfolio.import.approved", "import", "import_run", runID, "Approved portfolio import", "An approved import was recorded.", now, auditID); err != nil {
+		return result, fmt.Errorf("persist activity event: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return result, fmt.Errorf("commit import transaction: %w", err)
 	}

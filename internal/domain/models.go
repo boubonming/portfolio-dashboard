@@ -226,3 +226,24 @@ type SnapshotStatus struct {
 	SourceTimestamps     []string           `json:"source_timestamps"`
 	PresentationTimezone string             `json:"presentation_timezone"`
 }
+
+// Activity is the safe, portfolio-scoped summary read model. It intentionally
+// contains no raw audit payload or monetary/holding values.
+type Activity struct {
+	ID            string `json:"id"`
+	PortfolioID   string `json:"portfolio_id"`
+	Action        string `json:"action"`
+	Category      string `json:"category"`
+	ActorCategory string `json:"actor_category"`
+	EntityType    string `json:"entity_type,omitempty"`
+	EntityID      string `json:"entity_id,omitempty"`
+	OccurredAt    string `json:"occurred_at"`
+	Summary       string `json:"summary"`
+	Details       string `json:"details,omitempty"`
+}
+
+type ActivityPage struct {
+	Items      []Activity `json:"items"`
+	NextCursor *string    `json:"next_cursor,omitempty"`
+	HasMore    bool       `json:"has_more"`
+}

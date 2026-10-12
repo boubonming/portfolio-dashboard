@@ -193,6 +193,7 @@ func TestProviderHTTPFailuresAreBoundedAndRedacted(t *testing.T) {
 			return failures["EUR/MYR"]
 		}},
 	}
+
 	cases := []struct {
 		name        string
 		status      int
@@ -225,6 +226,37 @@ func TestProviderHTTPFailuresAreBoundedAndRedacted(t *testing.T) {
 	}
 }
 
+func TestProviderAdaptersAcceptExactEpochBoundary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/quote":
+			_, _ = w.Write([]byte(`{"c":12,"t":0}`))
+		case "/", "/query":
+			_, _ = w.Write([]byte(`{"Global Quote":{"01. symbol":"LSE:FIX","05. price":"4.2","07. latest trading day":"1970-01-01"}}`))
+		case "/simple/price", "/api/v3/simple/price":
+			_, _ = w.Write([]byte(`{"bitcoin":{"usd":1,"last_updated_at":0}}`))
+		default:
+			_, _ = w.Write([]byte(`{"timestamp":0,"base":"USD","rates":{"EUR":"2"}}`))
+		}
+	}))
+	defer server.Close()
+	if _, err := NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: server.URL, Now: fixtureNow}).Quote(context.Background(), QuoteRequest{InstrumentID: "fixture", Symbol: "FIX", ProviderSymbol: "NYSE:FIX", Currency: "USD"}); err != nil {
+		t.Fatalf("Finnhub epoch boundary: %v", err)
+	}
+	if _, err := NewAlphaVantageClient("fixture-secret", ClientOptions{BaseURL: server.URL, Now: fixtureNow}).Quote(context.Background(), QuoteRequest{InstrumentID: "fixture", Symbol: "FIX", ProviderSymbol: "LSE:FIX", Currency: "GBP"}); err != nil {
+		t.Fatalf("Alpha Vantage epoch boundary: %v", err)
+	}
+	quotes, failures := NewCoinGeckoClient(ClientOptions{BaseURL: server.URL, Now: fixtureNow}).QuoteBatch(context.Background(), []QuoteRequest{{InstrumentID: "fixture", Symbol: "BTC", ProviderSymbol: "bitcoin", Currency: "USD"}})
+	if len(quotes) != 1 || len(failures) != 0 {
+		t.Fatalf("CoinGecko epoch boundary quotes=%v failures=%v", quotes, failures)
+	}
+	rates, failures := NewOpenExchangeRatesClient("fixture-secret", ClientOptions{BaseURL: server.URL, Now: fixtureNow}).FXBatch(context.Background(), []FXRequest{{BaseCurrency: "EUR", QuoteCurrency: "USD"}})
+	if len(rates) != 1 || len(failures) != 0 {
+		t.Fatalf("Open Exchange Rates epoch boundary rates=%v failures=%v", rates, failures)
+	}
+}
+
 func TestProviderPayloadValidation(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -232,7 +264,7 @@ func TestProviderPayloadValidation(t *testing.T) {
 		call  func(context.Context, string) error
 		class string
 	}{
-		{name: "finnhub_timestamp", body: func() string { return `{"c":12,"t":0}` }, call: func(ctx context.Context, baseURL string) error {
+		{name: "finnhub_timestamp", body: func() string { return `{"c":12,"t":-1}` }, call: func(ctx context.Context, baseURL string) error {
 			_, err := NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: baseURL, Now: fixtureNow}).Quote(ctx, QuoteRequest{InstrumentID: "fixture", ProviderSymbol: "NYSE:FIX", Currency: "USD"})
 			return err
 		}, class: "invalid_timestamp"},

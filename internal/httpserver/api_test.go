@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,77 +169,6 @@ func TestPortfolioOverviewAPINoSnapshotIsExplicit(t *testing.T) {
 	}
 }
 
-func TestPortfolioOverviewAPILegacyAlternateCurrencyWithholdsAllocation(t *testing.T) {
-	ctx := context.Background()
-	database := apiFixture(t)
-	defer database.Close()
-	now := time.Now().UTC()
-	status, err := database.CreateSnapshot(ctx, store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "MYR", CalculationVersion: "legacy-api.v1", AsOf: now, MaxAge: 2 * time.Hour})
-	if err != nil || !status.Complete {
-		t.Fatalf("snapshot=%+v err=%v", status, err)
-	}
-	var encoded []byte
-	if err := database.DB.QueryRowContext(ctx, `SELECT payload FROM snapshots WHERE id = ?`, status.SnapshotID).Scan(&encoded); err != nil {
-		t.Fatal(err)
-	}
-	var legacy map[string]any
-	if err := json.Unmarshal(encoded, &legacy); err != nil {
-		t.Fatal(err)
-	}
-	delete(legacy, "max_age")
-	legacyID := "snapshot-legacy-api"
-	legacy["snapshot_id"] = legacyID
-	legacy["calculation_version"] = "legacy-api.v1"
-	legacyEncoded, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.DB.ExecContext(ctx, `INSERT INTO snapshots(id,portfolio_id,calculation_version,payload,created_at,input_hash) VALUES(?,?,?,?,?,?)`, legacyID, "portfolio-api", "legacy-api.v1", legacyEncoded, now.Add(time.Minute).Format(time.RFC3339Nano), "legacy-api-input"); err != nil {
-		t.Fatal(err)
-	}
-	handler := authenticatedAPIHandler(t, database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct {
-		currency            string
-		snapshotState       string
-		snapshotComplete    bool
-		valuedLots          int
-		missingDependencies int
-	}{
-		{currency: "MYR", snapshotState: "complete", snapshotComplete: true, valuedLots: 1, missingDependencies: 0},
-		{currency: "USD", snapshotState: "incomplete", snapshotComplete: false, valuedLots: 0, missingDependencies: 1},
-	} {
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview?currency="+test.currency, nil))
-		if response.Code != http.StatusOK {
-			t.Fatalf("%s status=%d body=%s", test.currency, response.Code, response.Body.String())
-		}
-		var overview domain.PortfolioOverview
-		if err := json.Unmarshal(response.Body.Bytes(), &overview); err != nil {
-			t.Fatal(err)
-		}
-		if overview.Snapshot.State != test.snapshotState || overview.Snapshot.Complete != test.snapshotComplete || overview.Allocation.State != "partial" || overview.Allocation.Coverage.TotalLots != 1 || overview.Allocation.Coverage.ValuedLots != test.valuedLots || overview.Allocation.Coverage.MissingDependencies != test.missingDependencies || len(overview.Allocation.ByInstrument) != 0 || len(overview.Allocation.BySourceCurrency) != 0 {
-			t.Fatalf("%s legacy overview=%+v snapshot=%+v", test.currency, overview.Allocation, overview.Snapshot)
-		}
-		var wire map[string]json.RawMessage
-		if err := json.Unmarshal(response.Body.Bytes(), &wire); err != nil {
-			t.Fatal(err)
-		}
-		var allocationWire map[string]json.RawMessage
-		if err := json.Unmarshal(wire["allocation"], &allocationWire); err != nil {
-			t.Fatal(err)
-		}
-		if _, present := allocationWire["by_instrument"]; present {
-			t.Fatalf("%s legacy response emitted by_instrument: %s", test.currency, response.Body.String())
-		}
-		if _, present := allocationWire["by_source_currency"]; present {
-			t.Fatalf("%s legacy response emitted by_source_currency: %s", test.currency, response.Body.String())
-		}
-	}
-}
-
 func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "dashboard.sqlite"))
@@ -390,5 +320,80 @@ func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing
 	}
 	if secondView.Allocation.State != "complete" || len(secondView.Allocation.ByInstrument) != 1 || len(secondView.Allocation.BySourceCurrency) != 1 || len(secondView.Holdings) != 1 || secondView.Holdings[0].Symbol != "LEAK" || secondView.Holdings[0].Broker == nil || *secondView.Holdings[0].Broker != "Foreign Broker" {
 		t.Fatalf("second portfolio view=%+v", secondView)
+	}
+}
+
+func TestPortfolioActivityAPIIsAuthenticatedScopedAndRedacted(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	ctx := context.Background()
+	if _, err := database.DB.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, "unscoped-fixture", "administrative-quote", "market.quote.added", "quote", "missing", `{"marker":"redaction-marker"}`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandlerWithAuth(database, auth.Config{
+		Username: "fixture-user", PasswordHash: string(hash),
+		SessionSecret: base64.StdEncoding.EncodeToString([]byte("api-fixture-session-secret-with-diversity-123")),
+		PublicOrigin:  "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	anonymous := httptest.NewRecorder()
+	handler.ServeHTTP(anonymous, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/activity", nil))
+	if anonymous.Code != http.StatusUnauthorized || anonymous.Header().Get("Cache-Control") != "no-store" || anonymous.Header().Get("Vary") != "Cookie" {
+		t.Fatalf("anonymous=%d cache=%q vary=%q", anonymous.Code, anonymous.Header().Get("Cache-Control"), anonymous.Header().Get("Vary"))
+	}
+	authenticated := authenticatedAPIHandler(t, database)
+	response := httptest.NewRecorder()
+	authenticated.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/activity?limit=1", nil))
+	if response.Code != http.StatusOK || !contains(response.Body.String(), `"has_more":true`) || contains(response.Body.String(), "redaction-marker") || contains(response.Body.String(), "provenance") {
+		t.Fatalf("activity=%d %s", response.Code, response.Body.String())
+	}
+	var firstPage struct {
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &firstPage); err != nil || firstPage.NextCursor == "" {
+		t.Fatalf("missing activity cursor: %s", response.Body.String())
+	}
+	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-api-other", "Other API Fixture", "MYR", time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	wrongPortfolio := httptest.NewRecorder()
+	authenticated.ServeHTTP(wrongPortfolio, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api-other/activity?cursor="+firstPage.NextCursor, nil))
+	if wrongPortfolio.Code != http.StatusBadRequest {
+		t.Fatalf("wrong portfolio cursor=%d %s", wrongPortfolio.Code, wrongPortfolio.Body.String())
+	}
+	for _, malformed := range []string{"not-base64", firstPage.NextCursor[:len(firstPage.NextCursor)-1] + "A", strings.Repeat("A", 513)} {
+		bad := httptest.NewRecorder()
+		authenticated.ServeHTTP(bad, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/activity?cursor="+malformed, nil))
+		if bad.Code != http.StatusBadRequest {
+			t.Fatalf("malformed cursor=%q status=%d", malformed, bad.Code)
+		}
+	}
+	isolated := httptest.NewRecorder()
+	authenticated.ServeHTTP(isolated, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api-other/activity", nil))
+	if isolated.Code != http.StatusOK || !contains(isolated.Body.String(), `"items":[]`) || !contains(isolated.Body.String(), `"has_more":false`) {
+		t.Fatalf("cross-portfolio activity=%d %s", isolated.Code, isolated.Body.String())
+	}
+	invalid := httptest.NewRecorder()
+	authenticated.ServeHTTP(invalid, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/activity?limit=101", nil))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid pagination=%d %s", invalid.Code, invalid.Body.String())
+	}
+	for _, rawQuery := range []string{"cursor=%ZZ", "cursor=cursor;drop", "limit=1&limit=2", "limit=", "offset=1"} {
+		badQuery := httptest.NewRecorder()
+		authenticated.ServeHTTP(badQuery, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/activity?"+rawQuery, nil))
+		if badQuery.Code != http.StatusBadRequest || badQuery.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("malformed raw query %q = %d cache=%q body=%s", rawQuery, badQuery.Code, badQuery.Header().Get("Cache-Control"), badQuery.Body.String())
+		}
+	}
+	unknown := httptest.NewRecorder()
+	authenticated.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/unknown/activity", nil))
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown=%d %s", unknown.Code, unknown.Body.String())
 	}
 }

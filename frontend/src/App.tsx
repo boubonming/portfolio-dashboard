@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, RefObject } from 'react'
 import { apiFetch, APIError, jsonResponse } from './api'
 
 export type Freshness = {
@@ -81,6 +81,25 @@ export type PortfolioOverview = {
   }
   allocation?: Allocation
   holdings: Holding[]
+}
+
+export type ActivityItem = {
+  id: string
+  portfolio_id: string
+  action: string
+  category: string
+  actor_category: string
+  entity_type?: string
+  entity_id?: string
+  occurred_at: string
+  summary: string
+  details?: string
+}
+
+export type ActivityPage = {
+  items: ActivityItem[]
+  next_cursor?: string
+  has_more: boolean
 }
 
 type SortKey = 'symbol' | 'quantity' | 'currency' | 'cost_basis' | 'latest_price' | 'reporting_value' | 'freshness'
@@ -214,7 +233,63 @@ function AllocationSection({ data }: { data: PortfolioOverview }) {
   )
 }
 
+function ActivityView({ page, state, error, loadingMore, appendError, announcement, loadMoreRef, statusRef, onLoadMore, onRetry }: { page: ActivityPage | null; state: 'loading' | 'ready' | 'error'; error: string; loadingMore: boolean; appendError: string; announcement: string; loadMoreRef: RefObject<HTMLButtonElement | null>; statusRef: RefObject<HTMLParagraphElement | null>; onLoadMore: (keyboardActivated: boolean) => void; onRetry: () => void }) {
+  const keyboardActivationRef = useRef(false)
+  return (
+    <section className="activity-card" aria-labelledby="activity-title">
+      <div className="section-heading"><div><span className="eyebrow">Audit-safe timeline</span><h2 id="activity-title">Activity</h2></div><span className="muted">Newest first</span></div>
+      {state === 'loading' && !page && <p role="status" aria-live="polite">Loading activity…</p>}
+      {state === 'error' && !page && <p className="notice error" role="alert">{error}<br /><button type="button" onClick={onRetry}>Try again</button></p>}
+      {page && page.items.length === 0 && state !== 'loading' && <p className="empty">No activity recorded for this portfolio.</p>}
+      {page && page.items.length > 0 && <ol className="activity-list" aria-label="Portfolio activity">
+        {page.items.map((item) => <li className="activity-item" tabIndex={-1} data-activity-id={item.id} key={item.id}>
+          <div className="activity-heading"><strong>{item.summary}</strong><time dateTime={item.occurred_at}>{displayDate(item.occurred_at)}</time></div>
+          <div className="activity-meta"><span>{item.action}</span><span>Actor: {item.actor_category}</span></div>
+          {item.details && <p>{item.details}</p>}
+        </li>)}
+      </ol>}
+      <p ref={statusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}>{announcement}</p>
+      {appendError && <p className="notice error" role="alert">{appendError} <button type="button" onClick={onRetry}>Retry loading activity</button></p>}
+      {page?.has_more && !appendError && <button ref={loadMoreRef} type="button" onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') keyboardActivationRef.current = true }} onClick={() => { const keyboardActivated = keyboardActivationRef.current; keyboardActivationRef.current = false; onLoadMore(keyboardActivated) }} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more activity…' : 'Load more activity'}</button>}
+    </section>
+  )
+}
+
 type AuthSession = { authenticated: boolean; csrf_token?: string; expires_at?: string }
+
+const activityPortfolioID = 'portfolio-default'
+
+function validateActivityPage(value: unknown): ActivityPage {
+  if (!value || typeof value !== 'object') throw new Error('Invalid activity pagination response')
+  const page = value as ActivityPage & Record<string, unknown>
+  const pageKeys = new Set(['items', 'has_more', 'next_cursor'])
+  if (Object.keys(page).some((key) => !pageKeys.has(key))) throw new Error('Invalid activity pagination response')
+  if (!Array.isArray(page.items) || typeof page.has_more !== 'boolean') throw new Error('Invalid activity pagination response')
+  const hasCursor = Object.prototype.hasOwnProperty.call(page, 'next_cursor')
+  if (page.has_more) {
+    if (!hasCursor || typeof page.next_cursor !== 'string' || page.next_cursor.length < 16 || page.next_cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(page.next_cursor)) throw new Error('Invalid activity pagination response')
+  } else if (hasCursor) {
+    throw new Error('Invalid activity pagination response')
+  }
+  const canonicalDateTime = (candidate: unknown) => {
+    if (typeof candidate !== 'string' || !/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{9}Z$/.test(candidate) || !Number.isFinite(Date.parse(candidate))) return false
+    const year = Number(candidate.slice(0, 4)); const month = Number(candidate.slice(5, 7)); const day = Number(candidate.slice(8, 10))
+    return day <= new Date(Date.UTC(year, month, 0)).getUTCDate()
+  }
+  for (const item of page.items) {
+    if (!item || typeof item !== 'object') throw new Error('Invalid activity item')
+    const candidate = item as ActivityItem & Record<string, unknown>
+    const allowed = new Set(['id', 'portfolio_id', 'action', 'category', 'actor_category', 'entity_type', 'entity_id', 'occurred_at', 'summary', 'details'])
+    if (Object.keys(candidate).some((key) => !allowed.has(key))) throw new Error('Invalid activity item')
+    const bounded = (candidate: unknown, max: number) => typeof candidate === 'string' && candidate.length >= 1 && candidate.length <= max
+    if (!bounded(candidate.id, 128) || candidate.portfolio_id !== activityPortfolioID || !bounded(candidate.portfolio_id, 128) || !canonicalDateTime(candidate.occurred_at)) throw new Error('Invalid activity item')
+    if (!bounded(candidate.action, 128) || !bounded(candidate.category, 64) || !bounded(candidate.actor_category, 64) || !bounded(candidate.summary, 256)) throw new Error('Invalid activity item')
+    if (!bounded(candidate.entity_type, 128) && candidate.entity_type !== undefined) throw new Error('Invalid activity item')
+    if (!bounded(candidate.entity_id, 128) && candidate.entity_id !== undefined) throw new Error('Invalid activity item')
+    if (!bounded(candidate.details, 2000) && candidate.details !== undefined) throw new Error('Invalid activity item')
+  }
+  return page
+}
 
 function Login({ onLogin, externalError = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; externalError?: string }) {
   const [username, setUsername] = useState('')
@@ -257,7 +332,14 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
 
 export default function App() {
   const [currency, setCurrency] = useState('MYR')
+  const [view, setView] = useState<'overview' | 'activity'>('overview')
   const [data, setData] = useState<PortfolioOverview | null>(null)
+  const [activity, setActivity] = useState<ActivityPage | null>(null)
+  const [activityState, setActivityState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [activityError, setActivityError] = useState('')
+  const [activityLoadingMore, setActivityLoadingMore] = useState(false)
+  const [activityAppendError, setActivityAppendError] = useState('')
+  const [activityAnnouncement, setActivityAnnouncement] = useState('')
   const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState('')
@@ -268,20 +350,31 @@ export default function App() {
   const [sortDirection, setSortDirection] = useState<SortDirection>('ascending')
   const authControllerRef = useRef<AbortController | null>(null)
   const loadControllerRef = useRef<AbortController | null>(null)
+  const activityControllerRef = useRef<AbortController | null>(null)
+  const activityLoadMoreRef = useRef<HTMLButtonElement>(null)
+  const activityStatusRef = useRef<HTMLParagraphElement>(null)
+  const activityLoadingMoreRef = useRef(false)
+  const activityItemsRef = useRef<ActivityItem[]>([])
   const authGeneration = useRef(0)
   const loadGeneration = useRef(0)
+  const activityGeneration = useRef(0)
   const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const clearPrivateState = useCallback(() => {
     authGeneration.current += 1
     loadGeneration.current += 1
+    activityGeneration.current += 1
     authControllerRef.current?.abort()
     authControllerRef.current = null
     loadControllerRef.current?.abort()
     loadControllerRef.current = null
+    activityControllerRef.current?.abort()
+    activityControllerRef.current = null
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
-    setData(null); setError(''); setState('loading')
+    activityLoadingMoreRef.current = false
+    activityItemsRef.current = []
+    setData(null); setActivity(null); setError(''); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -308,7 +401,7 @@ export default function App() {
     loadControllerRef.current = controller
     setState('loading')
     setError('')
-    const url = `/api/v1/portfolios/portfolio-default/overview?currency=${encodeURIComponent(currency)}`
+    const url = `/api/v1/portfolios/${activityPortfolioID}/overview?currency=${encodeURIComponent(currency)}`
     apiFetch(url, { signal: controller.signal })
       .then((response) => jsonResponse<PortfolioOverview>(response))
       .then((overview) => {
@@ -323,6 +416,74 @@ export default function App() {
         setState('error')
       })
   }, [authState, clearPrivateState, currency])
+
+  const loadActivity = useCallback((cursor: string | undefined, append: boolean, keyboardActivated = false) => {
+    if (authState !== 'authenticated' || (append && activityLoadingMoreRef.current)) return
+    const hadKeyboardFocus = append && keyboardActivated && document.activeElement === activityLoadMoreRef.current
+    const authGenerationAtStart = authGeneration.current
+    const generation = ++activityGeneration.current
+    activityControllerRef.current?.abort()
+    const controller = new AbortController()
+    activityControllerRef.current = controller
+    if (append) { activityLoadingMoreRef.current = true; setActivityLoadingMore(true); setActivityAppendError('') } else { setActivity(null); setActivityState('loading'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement('') }
+    const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
+    apiFetch(`/api/v1/portfolios/${activityPortfolioID}/activity?limit=20${query}`, { signal: controller.signal })
+      .then((response) => jsonResponse<ActivityPage>(response))
+      .then((nextPage) => {
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
+        validateActivityPage(nextPage)
+        const previousItems = activityItemsRef.current
+        const combined = append ? [...previousItems, ...nextPage.items] : nextPage.items
+        const previousIDs = new Set(previousItems.map((item) => item.id))
+        const unique = new Map<string, ActivityItem>()
+        for (const item of combined) if (!unique.has(item.id)) unique.set(item.id, item)
+        const appendedItems = append ? [...unique.values()].filter((item) => !previousIDs.has(item.id)) : []
+        const appendedCount = appendedItems.length
+        const items = [...unique.values()].sort((left, right) => Date.parse(right.occurred_at) - Date.parse(left.occurred_at) || right.id.localeCompare(left.id))
+        activityItemsRef.current = items
+        setActivity(() => {
+          return { ...nextPage, items }
+        })
+        activityLoadingMoreRef.current = false
+        setActivityLoadingMore(false)
+        setActivityAppendError('')
+        setActivityState('ready')
+        if (append) {
+          setActivityAnnouncement(`Loaded ${appendedCount} more activit${appendedCount === 1 ? 'y' : 'ies'}.`)
+          window.setTimeout(() => {
+            if (!hadKeyboardFocus) return
+            if (!nextPage.has_more && appendedItems[0]) {
+              Array.from(document.querySelectorAll<HTMLElement>('[data-activity-id]')).find((node) => node.dataset.activityId === appendedItems[0].id)?.focus()
+            } else if (!nextPage.has_more) {
+              activityStatusRef.current?.focus()
+            } else {
+              activityLoadMoreRef.current?.focus()
+            }
+          }, 0)
+        }
+        if (!append) {
+          activityItemsRef.current = items
+        }
+      })
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== activityGeneration.current) return
+        if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+        if (append) { activityLoadingMoreRef.current = false; setActivityLoadingMore(false); setActivityAppendError(reason instanceof Error ? reason.message : 'Unable to load activity') }
+        else { setActivityError(reason instanceof Error ? reason.message : 'Unable to load activity'); setActivityState('error') }
+      })
+  }, [authState, clearPrivateState])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || view !== 'activity') return
+    loadActivity(undefined, false)
+    return () => {
+      activityGeneration.current += 1
+      activityControllerRef.current?.abort()
+      activityControllerRef.current = null
+      activityLoadingMoreRef.current = false
+      setActivityLoadingMore(false)
+    }
+  }, [authState, loadActivity, view])
 
   useEffect(() => {
     const generation = ++authGeneration.current
@@ -352,8 +513,11 @@ export default function App() {
       authControllerRef.current = null
       authGeneration.current += 1
       loadGeneration.current += 1
+      activityGeneration.current += 1
       loadControllerRef.current?.abort()
       loadControllerRef.current = null
+      activityControllerRef.current?.abort()
+      activityControllerRef.current = null
       if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     }
   }, [clearPrivateState, scheduleExpiry])
@@ -458,7 +622,12 @@ export default function App() {
         <p className="muted">Read-only holdings and immutable valuation snapshots.</p>
         <button type="button" onClick={logout}>Sign out</button>
       </header>
+      <nav className="view-nav" aria-label="Portfolio views">
+        <button type="button" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Overview</button>
+        <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
+      </nav>
 
+      {view === 'overview' && <>
       <section className="toolbar" aria-label="Portfolio controls">
         <label htmlFor="currency">Reporting currency</label>
         <select id="currency" value={currency} onChange={(event) => setCurrency(event.target.value)}>
@@ -535,6 +704,8 @@ export default function App() {
           </section>
         </>
       )}
+      </>}
+      {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={(keyboardActivated) => loadActivity(activity?.next_cursor, true, keyboardActivated)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
     </main>
   )
 }
