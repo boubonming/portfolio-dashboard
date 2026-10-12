@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,62 @@ func (f *fakeRefreshClient) Quote(_ context.Context, request marketdata.QuoteReq
 		return domain.Quote{}, errors.New("fixture provider failure")
 	}
 	return domain.Quote{ID: "fixture-" + request.InstrumentID, InstrumentID: request.InstrumentID, Symbol: request.Symbol, Price: "2.5", Currency: request.Currency, Source: "finnhub", MarketAt: "2026-01-02T10:00:00Z", FetchedAt: "2026-01-02T12:00:00Z", Basis: "close", Provenance: "local fixture"}, nil
+}
+
+type collisionFXClient struct{}
+
+func (collisionFXClient) Name() marketdata.Provider { return marketdata.ProviderOpenExchangeRates }
+func (collisionFXClient) Quote(context.Context, marketdata.QuoteRequest) (domain.Quote, error) {
+	return domain.Quote{}, marketdata.ErrUnsupportedOperation
+}
+func (collisionFXClient) FX(_ context.Context, request marketdata.FXRequest) (domain.FXRate, error) {
+	return domain.FXRate{ID: "collision-fx", BaseCurrency: request.BaseCurrency, QuoteCurrency: request.QuoteCurrency, Rate: "2", Source: marketdata.ProviderOpenExchangeRates.String(), MarketAt: "2026-01-02T10:00:00Z", FetchedAt: "2026-01-02T12:00:00Z", Basis: "close", Provenance: "local fixture"}, nil
+}
+
+type preEpochQuoteClient struct{}
+
+func (preEpochQuoteClient) Name() marketdata.Provider { return marketdata.ProviderFinnhub }
+func (preEpochQuoteClient) FX(context.Context, marketdata.FXRequest) (domain.FXRate, error) {
+	return domain.FXRate{}, marketdata.ErrUnsupportedOperation
+}
+func preEpochQuote(request marketdata.QuoteRequest) domain.Quote {
+	return domain.Quote{ID: "pre-epoch-" + request.InstrumentID, InstrumentID: request.InstrumentID, Symbol: request.Symbol, Price: "2", Currency: request.Currency, Source: marketdata.ProviderFinnhub.String(), MarketAt: "1969-12-31T23:59:59Z", FetchedAt: "1969-12-31T23:59:59Z", Basis: "close", Provenance: "pre-epoch fixture"}
+}
+func (preEpochQuoteClient) Quote(_ context.Context, request marketdata.QuoteRequest) (domain.Quote, error) {
+	return preEpochQuote(request), nil
+}
+
+type preEpochBatchQuoteClient struct{ preEpochQuoteClient }
+
+func (preEpochBatchQuoteClient) QuoteBatch(_ context.Context, requests []marketdata.QuoteRequest) (map[string]domain.Quote, map[string]error) {
+	quotes := make(map[string]domain.Quote, len(requests))
+	for _, request := range requests {
+		quotes[request.InstrumentID] = preEpochQuote(request)
+	}
+	return quotes, nil
+}
+
+type preEpochFXClient struct{}
+
+func (preEpochFXClient) Name() marketdata.Provider { return marketdata.ProviderOpenExchangeRates }
+func (preEpochFXClient) Quote(context.Context, marketdata.QuoteRequest) (domain.Quote, error) {
+	return domain.Quote{}, marketdata.ErrUnsupportedOperation
+}
+func preEpochFX(request marketdata.FXRequest) domain.FXRate {
+	return domain.FXRate{ID: "pre-epoch-fx", BaseCurrency: request.BaseCurrency, QuoteCurrency: request.QuoteCurrency, Rate: "2", Source: marketdata.ProviderOpenExchangeRates.String(), MarketAt: "1969-12-31T23:59:59Z", FetchedAt: "1969-12-31T23:59:59Z", Basis: "close", Provenance: "pre-epoch fixture"}
+}
+func (preEpochFXClient) FX(_ context.Context, request marketdata.FXRequest) (domain.FXRate, error) {
+	return preEpochFX(request), nil
+}
+
+type preEpochBatchFXClient struct{ preEpochFXClient }
+
+func (preEpochBatchFXClient) FXBatch(_ context.Context, requests []marketdata.FXRequest) (map[string]domain.FXRate, map[string]error) {
+	rates := make(map[string]domain.FXRate, len(requests))
+	for _, request := range requests {
+		rates[strings.ToUpper(request.BaseCurrency)+"/"+strings.ToUpper(request.QuoteCurrency)] = preEpochFX(request)
+	}
+	return rates, nil
 }
 
 type assignedRefreshClient struct {
@@ -64,6 +121,157 @@ func openRefreshFixture(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func TestRefreshRejectsPreEpochScalarAndBatchObservationsWithoutAborting(t *testing.T) {
+	ctx := context.Background()
+	for _, testCase := range []struct {
+		name   string
+		client marketdata.ProviderClient
+	}{
+		{name: "scalar quote", client: preEpochQuoteClient{}},
+		{name: "batch quote", client: preEpochBatchQuoteClient{}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			s := openRefreshFixture(t)
+			defer s.Close()
+			if _, err := s.AddProviderMapping(ctx, ProviderMappingInput{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", Providers: []marketdata.Provider{marketdata.ProviderFinnhub}, Clients: map[marketdata.Provider]marketdata.ProviderClient{marketdata.ProviderFinnhub: testCase.client}, AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)})
+			if err != nil || result.Status != "incomplete" || result.Providers[0].SucceededCount != 0 || result.Providers[0].FailedCount != 1 {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			var quotes int
+			if err := s.DB.QueryRow(`SELECT COUNT(*) FROM quotes`).Scan(&quotes); err != nil {
+				t.Fatal(err)
+			}
+			if quotes != 0 {
+				t.Fatalf("pre-epoch quote was persisted: %d", quotes)
+			}
+		})
+	}
+	for _, testCase := range []struct {
+		name   string
+		client marketdata.ProviderClient
+	}{
+		{name: "scalar FX", client: preEpochFXClient{}},
+		{name: "batch FX", client: preEpochBatchFXClient{}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			s := openRefreshFixture(t)
+			defer s.Close()
+			now := "2026-01-02T12:00:00Z"
+			if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-eur','EURREL','EUR',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,source_ref,source_sha256,created_at) VALUES('refresh-eur-lot','refresh-portfolio','refresh-eur','1','EUR','fixture','fixture-eur',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+			result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", ReportingCurrency: "USD", Providers: []marketdata.Provider{marketdata.ProviderOpenExchangeRates}, Clients: map[marketdata.Provider]marketdata.ProviderClient{marketdata.ProviderOpenExchangeRates: testCase.client}, AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)})
+			if err != nil || result.Status != "incomplete" || result.Providers[0].SucceededCount != 0 || result.Providers[0].FailedCount != 1 {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			var rates int
+			if err := s.DB.QueryRow(`SELECT COUNT(*) FROM fx_rates`).Scan(&rates); err != nil {
+				t.Fatal(err)
+			}
+			if rates != 0 {
+				t.Fatalf("pre-epoch FX rate was persisted: %d", rates)
+			}
+		})
+	}
+}
+
+func TestRefreshQuoteCollisionDowngradesOnlyTheConflictingProviderAtomically(t *testing.T) {
+	ctx := context.Background()
+	s := openRefreshFixture(t)
+	defer s.Close()
+	now := "2026-01-02T12:00:00Z"
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('unrelated-instrument','UNRELATED','USD',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddQuote(ctx, QuoteInput{ID: "fixture-refresh-instrument", InstrumentID: "unrelated-instrument", Currency: "USD", Price: "99", Source: "fixture", MarketAt: "2026-01-02T10:00:00Z", FetchedAt: now, Basis: "close", Provenance: "unrelated"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddProviderMapping(ctx, ProviderMappingInput{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", Providers: []marketdata.Provider{marketdata.ProviderFinnhub}, Clients: map[marketdata.Provider]marketdata.ProviderClient{marketdata.ProviderFinnhub: &fakeRefreshClient{}}, AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "incomplete" || len(result.ObservationIDs) != 0 || result.Providers[0].SucceededCount != 0 || result.Providers[0].FailedCount != 1 {
+		t.Fatalf("collision result=%+v", result)
+	}
+	var price string
+	if err := s.DB.QueryRow(`SELECT price FROM quotes WHERE id='fixture-refresh-instrument'`).Scan(&price); err != nil || price != "99" {
+		t.Fatalf("unrelated quote price=%q err=%v", price, err)
+	}
+	var quoteActivity, refreshActivity int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM activity_events WHERE portfolio_id='refresh-portfolio' AND action='market.quote.added'`).Scan(&quoteActivity); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM activity_events WHERE portfolio_id='refresh-portfolio' AND action='market.refresh.completed'`).Scan(&refreshActivity); err != nil {
+		t.Fatal(err)
+	}
+	if quoteActivity != 0 || refreshActivity != 1 {
+		t.Fatalf("quote activity=%d refresh activity=%d", quoteActivity, refreshActivity)
+	}
+}
+
+func TestRefreshFXCollisionDowngradesProviderAndExactReplayRemainsComplete(t *testing.T) {
+	ctx := context.Background()
+	s := openRefreshFixture(t)
+	defer s.Close()
+	now := "2026-01-02T12:00:00Z"
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-eur','EURREL','EUR',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,source_ref,source_sha256,created_at) VALUES('refresh-eur-lot','refresh-portfolio','refresh-eur','1','EUR','fixture','fixture-eur',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO fx_rates(id,base_currency,quote_currency,rate,source,market_at,fetched_at,basis,provenance) VALUES('collision-fx','EUR','USD','9',?,?,?, ?,?)`, marketdata.ProviderOpenExchangeRates.String(), "2026-01-02T10:00:00Z", now, "close", "unrelated"); err != nil {
+		t.Fatal(err)
+	}
+	options := RefreshOptions{PortfolioID: "refresh-portfolio", ReportingCurrency: "USD", Providers: []marketdata.Provider{marketdata.ProviderOpenExchangeRates}, Clients: map[marketdata.Provider]marketdata.ProviderClient{marketdata.ProviderOpenExchangeRates: collisionFXClient{}}, AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)}
+	result, err := s.Refresh(ctx, options)
+	if err != nil || result.Status != "incomplete" || len(result.ObservationIDs) != 0 || result.Providers[0].SucceededCount != 0 || result.Providers[0].FailedCount != 1 {
+		t.Fatalf("FX collision result=%+v err=%v", result, err)
+	}
+	var rate string
+	if err := s.DB.QueryRow(`SELECT rate FROM fx_rates WHERE id='collision-fx'`).Scan(&rate); err != nil || rate != "9" {
+		t.Fatalf("unrelated FX rate=%q err=%v", rate, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = openRefreshFixture(t)
+	defer s.Close()
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-eur','EURREL','EUR',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,source_ref,source_sha256,created_at) VALUES('refresh-eur-lot','refresh-portfolio','refresh-eur','1','EUR','fixture','fixture-eur',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.Refresh(ctx, options)
+	if err != nil || result.Status != "complete" || result.Providers[0].SucceededCount != 1 || len(result.ObservationIDs) != 1 {
+		t.Fatalf("first coherent FX refresh=%+v err=%v", result, err)
+	}
+	result, err = s.Refresh(ctx, options)
+	if err != nil || result.Status != "complete" || result.Providers[0].SucceededCount != 1 || len(result.ObservationIDs) != 1 {
+		t.Fatalf("exact FX replay=%+v err=%v", result, err)
+	}
+	var fxCount, fxActivity int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM fx_rates WHERE id='collision-fx'`).Scan(&fxCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM activity_events WHERE portfolio_id='refresh-portfolio' AND action='market.fx.added'`).Scan(&fxActivity); err != nil {
+		t.Fatal(err)
+	}
+	if fxCount != 1 || fxActivity != 1 {
+		t.Fatalf("FX replay count=%d activity=%d", fxCount, fxActivity)
+	}
 }
 
 func TestRefreshRequiresExplicitMappingAndIsIdempotent(t *testing.T) {

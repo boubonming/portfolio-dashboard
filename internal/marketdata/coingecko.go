@@ -120,7 +120,7 @@ func (c *CoinGeckoClient) QuoteBatch(ctx context.Context, requests []QuoteReques
 				continue
 			}
 			var unixTimestamp int64
-			if err := json.Unmarshal(rawTimestamp, &unixTimestamp); err != nil || unixTimestamp <= 0 {
+			if err := json.Unmarshal(rawTimestamp, &unixTimestamp); err != nil || unixTimestamp < 0 {
 				failures[request.InstrumentID] = providerErr(c.Name(), "invalid_timestamp", "mapped coin timestamp was invalid")
 				continue
 			}

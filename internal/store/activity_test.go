@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,6 +132,67 @@ func TestActivityCursorIsBoundCanonicalAndStableAcrossReopen(t *testing.T) {
 	stable, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Limit: 1, Cursor: cursor})
 	if err != nil || len(stable.Items) != 1 || stable.Items[0].ID != "event-old" {
 		t.Fatalf("reopened cursor page=%+v err=%v", stable, err)
+	}
+}
+
+func TestActivityDeepTupleRangePlanIsIndependentOfCursorDepth(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "deep.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := "2026-01-02T12:00:00.000000000Z"
+	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "deep-portfolio", "Deep", "USD", now, now); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 2000; index++ {
+		id := fmt.Sprintf("deep-event-%04d", index)
+		if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time) VALUES(?,?,?,?,?,?,?,?,?)`, id, "deep-portfolio", "system", "portfolio.snapshot.created", "portfolio", id, "", now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := s.Activity(ctx, "deep-portfolio", ActivityPageOptions{Limit: 20})
+	if err != nil || first.NextCursor == nil {
+		t.Fatalf("first page=%+v err=%v", first, err)
+	}
+	shallow := *first.NextCursor
+	deep := first
+	for depth := 0; depth < 90; depth++ {
+		deep, err = s.Activity(ctx, "deep-portfolio", ActivityPageOptions{Limit: 20, Cursor: *deep.NextCursor})
+		if err != nil || deep.NextCursor == nil {
+			t.Fatalf("deep page %d=%+v err=%v", depth, deep, err)
+		}
+	}
+	deepCursor := *deep.NextCursor
+	plan := func(encoded string) string {
+		cursor, decodeErr := decodeActivityCursorWithKey(s.cursorKey, encoded, "deep-portfolio")
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		rows, queryErr := s.DB.Query(`EXPLAIN QUERY PLAN SELECT id FROM activity_events WHERE portfolio_id=? AND (sort_time,id) < (?,?) ORDER BY sort_time DESC,id DESC LIMIT ?`, "deep-portfolio", cursor.SortTime, cursor.ID, 21)
+		if queryErr != nil {
+			t.Fatal(queryErr)
+		}
+		defer rows.Close()
+		var detail string
+		for rows.Next() {
+			var id, parent, unused string
+			if scanErr := rows.Scan(&id, &parent, &unused, &detail); scanErr != nil {
+				t.Fatal(scanErr)
+			}
+		}
+		if rows.Err() != nil {
+			t.Fatal(rows.Err())
+		}
+		return detail
+	}
+	shallowPlan, deepPlan := plan(shallow), plan(deepCursor)
+	if shallowPlan != deepPlan || !strings.Contains(deepPlan, "idx_activity_portfolio_order") || !strings.Contains(deepPlan, "sort_time") {
+		t.Fatalf("shallow plan=%q deep plan=%q", shallowPlan, deepPlan)
+	}
+	if len(deep.Items) != 20 {
+		t.Fatalf("deep page item count=%d", len(deep.Items))
 	}
 }
 

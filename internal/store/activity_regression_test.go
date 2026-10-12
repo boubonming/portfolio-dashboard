@@ -2,12 +2,102 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func corruptActivitySchema(t *testing.T, path, body string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(body); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func activitySchemaReplacement(includeForeignKeys, includeTimestampCheck bool) string {
+	foreignKeys := ""
+	if includeForeignKeys {
+		foreignKeys = " REFERENCES portfolios(id)"
+	}
+	auditForeignKey := ""
+	if includeForeignKeys {
+		auditForeignKey = " REFERENCES audit_events(id)"
+	}
+	check := ""
+	if includeTimestampCheck {
+		check = " CHECK (length(occurred_at) = 30 AND occurred_at >= '1970-01-01T00:00:00.000000000Z')"
+	}
+	return `PRAGMA foreign_keys=OFF;
+DROP TRIGGER IF EXISTS activity_events_append_only_update;
+DROP TRIGGER IF EXISTS activity_events_append_only_delete;
+DROP INDEX IF EXISTS idx_activity_source_portfolio;
+DROP INDEX IF EXISTS idx_activity_portfolio_order;
+ALTER TABLE activity_events RENAME TO activity_events_original;
+CREATE TABLE activity_events (
+ id TEXT PRIMARY KEY,
+ portfolio_id TEXT NOT NULL` + foreignKeys + `,
+ actor_category TEXT NOT NULL,
+ action TEXT NOT NULL,
+ category TEXT NOT NULL,
+ entity_type TEXT,
+ entity_id TEXT,
+ summary TEXT NOT NULL,
+ details TEXT NOT NULL DEFAULT '',
+ occurred_at TEXT NOT NULL` + check + `,
+ sort_time TEXT NOT NULL CHECK (sort_time = occurred_at),
+ source_audit_event_id TEXT` + auditForeignKey + `
+);
+CREATE UNIQUE INDEX idx_activity_source_portfolio ON activity_events(source_audit_event_id, portfolio_id);
+CREATE INDEX idx_activity_portfolio_order ON activity_events(portfolio_id, sort_time DESC, id DESC);`
+}
+
+func TestMigrateRejectsLedgeredActivitySchemaCorruption(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func() string
+	}{
+		{name: "missing table", mutate: func() string {
+			return `PRAGMA foreign_keys=OFF; DROP TRIGGER IF EXISTS activity_events_append_only_update; DROP TRIGGER IF EXISTS activity_events_append_only_delete; DROP INDEX IF EXISTS idx_activity_source_portfolio; DROP INDEX IF EXISTS idx_activity_portfolio_order; DROP TABLE activity_events;`
+		}},
+		{name: "wrong index columns and uniqueness", mutate: func() string {
+			return `DROP INDEX idx_activity_source_portfolio; CREATE INDEX idx_activity_source_portfolio ON activity_events(portfolio_id, source_audit_event_id);`
+		}},
+		{name: "wrong index direction", mutate: func() string {
+			return `DROP INDEX idx_activity_portfolio_order; CREATE INDEX idx_activity_portfolio_order ON activity_events(portfolio_id, sort_time ASC, id ASC);`
+		}},
+		{name: "missing trigger", mutate: func() string { return `DROP TRIGGER activity_events_append_only_update;` }},
+		{name: "bad foreign key", mutate: func() string { return activitySchemaReplacement(false, true) }},
+		{name: "bad timestamp check", mutate: func() string { return activitySchemaReplacement(true, false) }},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "corrupt.sqlite")
+			database, err := Open(context.Background(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			corruptActivitySchema(t, path, testCase.mutate())
+			if reopened, reopenErr := Open(context.Background(), path); reopenErr == nil {
+				reopened.Close()
+				t.Fatal("corrupted ledgered schema was accepted")
+			}
+		})
+	}
+}
 
 func TestObservationIDCollisionRequiresExactImmutableReplay(t *testing.T) {
 	ctx := context.Background()

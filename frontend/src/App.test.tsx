@@ -45,6 +45,22 @@ function authenticatedFetch(handler: (input: RequestInfo | URL, init?: RequestIn
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).includes('/api/v1/auth/session') ? Promise.resolve(authenticatedSession) : handler(input, init))
 }
 
+const activityCursor = 'Y3Vyc29yLW9uZS0xMjM'
+function activityItem(id: string, occurredAt = '2026-01-02T11:00:00.000000000Z', overrides: Record<string, unknown> = {}) {
+  return { id, portfolio_id: 'portfolio-default', action: 'market.quote.added', category: 'market', actor_category: 'administrative', occurred_at: occurredAt, summary: `Activity ${id}`, ...overrides }
+}
+function activityResponse(items: unknown[], hasMore = false, nextCursor?: string, status = 200) {
+  const body = hasMore ? { items, has_more: true, next_cursor: nextCursor } : { items, has_more: false }
+  return Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body } as Response)
+}
+async function openActivity(fetchMock: (input: RequestInfo | URL, init?: RequestInit) => Response | Promise<Response>) {
+  vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+  render(<App />)
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+  fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Activity' })).toBeTruthy())
+}
+
 async function flushEffects() {
   await act(async () => {
     for (let index = 0; index < 10; index += 1) await Promise.resolve()
@@ -535,5 +551,297 @@ describe('Portfolio Dashboard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
     expect(document.activeElement).toBe(screen.getByLabelText('Username'))
+  })
+
+  it('announces the exact deduplicated keyboard append count and focuses the first new row on the final page', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity') && url.includes('cursor=')) return activityResponse([activityItem('two')])
+      if (url.includes('/activity')) return activityResponse([activityItem('one')], true, activityCursor)
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    const loadMore = screen.getByRole('button', { name: 'Load more activity' })
+    loadMore.focus()
+    fireEvent.keyDown(loadMore, { key: 'Enter' })
+    fireEvent.click(loadMore)
+    await waitFor(() => expect(screen.getByText('Activity two')).toBeTruthy())
+    expect(screen.getByText('Loaded 1 more activity.')).toBeTruthy()
+    expect(document.activeElement?.getAttribute('data-activity-id')).toBe('two')
+  })
+
+  it('announces zero deduplicated keyboard additions and focuses stable status', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity') && url.includes('cursor=')) return activityResponse([activityItem('one')])
+      if (url.includes('/activity')) return activityResponse([activityItem('one')], true, activityCursor)
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    const loadMore = screen.getByRole('button', { name: 'Load more activity' })
+    loadMore.focus()
+    fireEvent.keyDown(loadMore, { key: ' ' })
+    fireEvent.click(loadMore)
+    await waitFor(() => expect(screen.getByText('Loaded 0 more activities.')).toBeTruthy())
+    expect(document.activeElement).toBe(screen.getByText('Loaded 0 more activities.'))
+  })
+
+  it('does not move focus for a pointer-triggered append', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity') && url.includes('cursor=')) return activityResponse([activityItem('two')])
+      if (url.includes('/activity')) return activityResponse([activityItem('one')], true, activityCursor)
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    const overview = screen.getByRole('button', { name: 'Overview' })
+    overview.focus()
+    fireEvent.click(screen.getByRole('button', { name: 'Load more activity' }))
+    await waitFor(() => expect(screen.getByText('Activity two')).toBeTruthy())
+    expect(document.activeElement).toBe(overview)
+  })
+
+  it('covers Activity loading, empty, initial failure, and successful retry states', async () => {
+    let resolveActivity: ((response: Response) => void) | undefined
+    const pendingFetch = vi.fn((input: RequestInfo | URL) => String(input).includes('/activity')
+      ? new Promise<Response>((resolve) => { resolveActivity = resolve })
+      : Promise.resolve({ ok: true, json: async () => completeOverview } as Response))
+    vi.stubGlobal('fetch', authenticatedFetch(pendingFetch))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    expect(screen.getAllByRole('status').some((node) => node.textContent?.match(/loading activity/i))).toBe(true)
+    resolveActivity?.({ ok: true, status: 200, json: async () => ({ items: [], has_more: false }) } as Response)
+    await waitFor(() => expect(screen.getByText(/no activity recorded/i)).toBeTruthy())
+
+    cleanup()
+    let activityCalls = 0
+    const retryFetch = vi.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/activity')) {
+        activityCalls += 1
+        return activityCalls === 1
+          ? Promise.reject(new Error('activity fixture unavailable'))
+          : activityResponse([activityItem('retry')])
+      }
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(retryFetch)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/activity fixture unavailable/i))
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(screen.getByText('Activity retry')).toBeTruthy())
+    expect(activityCalls).toBe(2)
+  })
+
+  it('retains rows after append failure, retries the same cursor, and coalesces pending activation', async () => {
+    let resolveAppend: ((response: Response) => void) | undefined
+    let activityCalls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity') && url.includes('cursor=')) {
+        activityCalls += 1
+        if (activityCalls === 1) return Promise.reject(new Error('append unavailable'))
+        if (activityCalls === 2) return activityResponse([activityItem('two')], true, activityCursor)
+        return new Promise<Response>((resolve) => { resolveAppend = resolve })
+      }
+      if (url.includes('/activity')) return activityResponse([activityItem('one')], true, activityCursor)
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    fireEvent.click(screen.getByRole('button', { name: 'Load more activity' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/append unavailable/i))
+    expect(screen.getByText('Activity one')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading activity' }))
+    await waitFor(() => expect(screen.getByText('Activity two')).toBeTruthy())
+    expect(String(fetchMock.mock.calls.find(([input]) => String(input).includes('cursor='))?.[0])).toContain(`cursor=${activityCursor}`)
+
+    const pendingButton = screen.getByRole('button', { name: 'Load more activity' })
+    fireEvent.click(pendingButton)
+    fireEvent.click(pendingButton)
+    expect(activityCalls).toBe(3)
+    resolveAppend?.({ ok: true, status: 200, json: async () => ({ items: [], has_more: false }) } as Response)
+  })
+
+  it('clears all private Activity state and focuses username after append-time 401', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity') && url.includes('cursor=')) return activityResponse([], false, undefined, 401)
+      if (url.includes('/activity')) return activityResponse([activityItem('one')], true, activityCursor)
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    fireEvent.click(screen.getByRole('button', { name: 'Load more activity' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(screen.queryByText('Activity one')).toBeNull()
+    expect(document.activeElement).toBe(screen.getByLabelText('Username'))
+  })
+
+  it('aborts Activity requests on navigation and unmount and ignores stale completions', async () => {
+    const requests: Array<{ input: string; init?: RequestInit; resolve: (response: Response) => void }> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/activity')) return new Promise<Response>((resolve) => { requests.push({ input: url, init, resolve }) })
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    const app = render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    await waitFor(() => expect(requests).toHaveLength(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
+    expect((requests[0].init?.signal as AbortSignal).aborted).toBe(true)
+    requests[0].resolve({ ok: true, status: 200, json: async () => ({ items: [activityItem('stale')], has_more: false }) } as Response)
+    await flushEffects()
+    expect(screen.queryByText('Activity stale')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    await waitFor(() => expect(requests).toHaveLength(2))
+    app.unmount()
+    expect((requests[1].init?.signal as AbortSignal).aborted).toBe(true)
+  })
+
+  it('removes old Activity rows and controls during Activity page-one reload and exposes retry after reload failure', async () => {
+    let activityCalls = 0
+    let rejectReload: ((reason?: unknown) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity')) {
+        activityCalls += 1
+        if (activityCalls === 1) return activityResponse([activityItem('old')], true, activityCursor)
+        return new Promise<Response>((_resolve, reject) => { rejectReload = reject })
+      }
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    expect(screen.getByText('Activity old')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    await waitFor(() => expect(activityCalls).toBe(2))
+    expect(screen.queryByText('Activity old')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Load more activity' })).toBeNull()
+    expect(screen.getAllByRole('status').some((node) => node.textContent?.match(/loading activity/i))).toBe(true)
+    rejectReload?.(new Error('reload unavailable'))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/reload unavailable/i))
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Load more activity' })).toBeNull()
+  })
+
+  it('aborts Activity work on logout and ignores stale retry and load-more completions', async () => {
+    let activityCalls = 0
+    const pending: Array<(response: Response) => void> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity')) {
+        activityCalls += 1
+        if (activityCalls === 1) return Promise.reject(new Error('initial unavailable'))
+        return new Promise<Response>((resolve) => { pending.push(resolve) })
+      }
+      if (url.includes('/auth/logout')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: false }) } as Response)
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/initial unavailable/i))
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(pending).toHaveLength(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    pending[0]({ ok: true, status: 200, json: async () => ({ items: [activityItem('stale-retry')], has_more: false }) } as Response)
+    await flushEffects()
+    expect(screen.queryByText('Activity stale-retry')).toBeNull()
+  })
+
+  it('aborts a pending load-more request on navigation and ignores its stale completion', async () => {
+    let resolveAppend: ((response: Response) => void) | undefined
+    let appendInit: RequestInit | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/activity') && url.includes('cursor=')) {
+        appendInit = init
+        return new Promise<Response>((resolve) => { resolveAppend = resolve })
+      }
+      if (url.includes('/activity')) return activityResponse([activityItem('one')], true, activityCursor)
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    fireEvent.click(screen.getByRole('button', { name: 'Load more activity' }))
+    await waitFor(() => expect(appendInit).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
+    expect((appendInit?.signal as AbortSignal).aborted).toBe(true)
+    resolveAppend?.({ ok: true, status: 200, json: async () => ({ items: [activityItem('stale-load-more')], has_more: false }) } as Response)
+    await flushEffects()
+    expect(screen.queryByText('Activity stale-load-more')).toBeNull()
+  })
+
+  const invalidActivityPages: Array<[string, unknown]> = [
+    ['unknown page field', { items: [], has_more: false, extra: true }],
+    ['unknown item field', { items: [activityItem('unknown', undefined, { extra: true })], has_more: false }],
+    ['empty required string', { items: [activityItem('')], has_more: false }],
+    ['overlength required string', { items: [activityItem('valid', undefined, { summary: 'x'.repeat(257) })], has_more: false }],
+    ['invalid optional type', { items: [activityItem('valid', undefined, { details: 42 })], has_more: false }],
+    ['overlength optional string', { items: [activityItem('valid', undefined, { details: 'x'.repeat(2001) })], has_more: false }],
+    ['impossible timestamp', { items: [activityItem('valid', '2026-02-30T12:00:00.000000000Z')], has_more: false }],
+    ['noncanonical timestamp', { items: [activityItem('valid', '2026-01-02T12:00:00Z')], has_more: false }],
+    ['missing cursor', { items: [activityItem('valid')], has_more: true }],
+    ['malformed cursor', { items: [activityItem('valid')], has_more: true, next_cursor: '%ZZ' }],
+    ['semicolon cursor', { items: [activityItem('valid')], has_more: true, next_cursor: 'cursor;drop' }],
+    ['final-page cursor', { items: [activityItem('valid')], has_more: false, next_cursor: activityCursor }],
+  ]
+
+  it.each(invalidActivityPages)('fails closed on %s without a render crash or page-one loop', async (_name, page) => {
+    let activityCalls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity')) {
+        activityCalls += 1
+        return Promise.resolve({ ok: true, status: 200, json: async () => page } as Response)
+      }
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/invalid activity/i))
+    expect(activityCalls).toBe(1)
+    expect(screen.queryByRole('button', { name: 'Load more activity' })).toBeNull()
+  })
+
+  it('uses keyboard activation and aria-live semantics for Activity announcements', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity') && url.includes('cursor=')) return activityResponse([activityItem('two')])
+      if (url.includes('/activity')) return activityResponse([activityItem('one')], true, activityCursor)
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    const status = screen.getByRole('status')
+    expect(status.getAttribute('aria-live')).toBe('polite')
+    const button = screen.getByRole('button', { name: 'Load more activity' })
+    expect(button.getAttribute('aria-busy')).toBe('false')
+    fireEvent.keyDown(button, { key: 'Enter' })
+    fireEvent.click(button)
+    expect(button.getAttribute('aria-busy')).toBe('true')
+    await waitFor(() => expect(screen.getByText('Loaded 1 more activity.')).toBeTruthy())
+  })
+
+  it('renders maximum contract-valid unbroken strings without a 320px horizontal overflow', async () => {
+    const max = 'x'.repeat(128)
+    const page = { items: [activityItem(max, '2026-01-02T11:00:00.000000000Z', { action: max, category: 'x'.repeat(64), actor_category: 'x'.repeat(64), entity_type: max, entity_id: max, summary: 'x'.repeat(256), details: 'x'.repeat(2000) })], has_more: false }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/activity')
+      ? Promise.resolve({ ok: true, status: 200, json: async () => page } as Response)
+      : Promise.resolve({ ok: true, json: async () => completeOverview } as Response))
+    await openActivity(fetchMock)
+    Object.defineProperties(document.documentElement, { clientWidth: { configurable: true, value: 320 }, scrollWidth: { configurable: true, value: 320 } })
+    expect(screen.getByText('x'.repeat(256))).toBeTruthy()
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(320)
+  })
+
+  it('does not fetch Activity before authentication or persist Activity and CSRF values in web storage', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve({ ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: expiresAt }) } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(fetchMock.mock.calls.map(([input]) => String(input)).some((url) => url.includes('/activity'))).toBe(false)
+    expect(globalThis.localStorage?.length ?? 0).toBe(0)
+    expect(globalThis.sessionStorage?.length ?? 0).toBe(0)
   })
 })

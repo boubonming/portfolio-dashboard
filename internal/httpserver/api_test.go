@@ -384,6 +384,13 @@ func TestPortfolioActivityAPIIsAuthenticatedScopedAndRedacted(t *testing.T) {
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid pagination=%d %s", invalid.Code, invalid.Body.String())
 	}
+	for _, rawQuery := range []string{"cursor=%ZZ", "cursor=cursor;drop", "limit=1&limit=2", "limit=", "offset=1"} {
+		badQuery := httptest.NewRecorder()
+		authenticated.ServeHTTP(badQuery, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/activity?"+rawQuery, nil))
+		if badQuery.Code != http.StatusBadRequest || badQuery.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("malformed raw query %q = %d cache=%q body=%s", rawQuery, badQuery.Code, badQuery.Header().Get("Cache-Control"), badQuery.Body.String())
+		}
+	}
 	unknown := httptest.NewRecorder()
 	authenticated.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/unknown/activity", nil))
 	if unknown.Code != http.StatusNotFound {
