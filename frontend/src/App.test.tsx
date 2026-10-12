@@ -73,6 +73,29 @@ afterEach(() => {
 })
 
 describe('Portfolio Dashboard', () => {
+  it('restores focus to the exact remounted same-symbol lot button after closing its thesis', async () => {
+    const sameSymbolOverview = {
+      ...completeOverview,
+      holdings: [
+        { ...completeOverview.holdings[0], lot_id: 'lot-a', symbol: 'SAME' },
+        { ...completeOverview.holdings[0], lot_id: 'lot-c', symbol: 'SAME' },
+      ],
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/thesis')
+      ? Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response)
+      : Promise.resolve({ ok: true, status: 200, json: async () => sameSymbolOverview } as Response))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const lotAButton = screen.getByRole('button', { name: 'Open thesis for SAME lot lot-a' })
+    const lotCButton = screen.getByRole('button', { name: 'Open thesis for SAME lot lot-c' })
+    fireEvent.click(lotCButton)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /investment thesis.*same/i })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open thesis for SAME lot lot-c' })))
+    expect(document.activeElement).not.toBe(screen.getByRole('button', { name: 'Open thesis for SAME lot lot-a' }))
+  })
+
   it('shows a loading state while the typed API request is pending', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => undefined)))
     render(<App />)

@@ -28,6 +28,36 @@ afterEach(() => {
 })
 
 describe('ThesisEditor response contracts', () => {
+  it('accepts UTC RFC3339Nano timestamps with zero through nine fractional digits on the runtime response path', async () => {
+    for (const updatedAt of [
+      '2026-01-02T12:00:00Z',
+      '2026-01-02T12:00:00.1Z',
+      '2026-01-02T12:00:00.1234Z',
+      '2026-01-02T12:00:00.123456789Z',
+    ]) {
+      cleanup()
+      const fetchMock = vi.fn(() => response(thesis({ updated_at: updatedAt })))
+      renderEditor(fetchMock)
+      await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+      expect(screen.queryByRole('alert')).toBeNull()
+    }
+  })
+
+  it('rejects invalid UTC RFC3339Nano timestamps on the runtime response path', async () => {
+    for (const updatedAt of [
+      '2026-02-29T12:00:00Z',
+      '2026-01-02T12:00:00+00:00',
+      '2026-01-02T12:00:00.1234567890Z',
+      ' 2026-01-02T12:00:00.123Z',
+      '2026-01-02T12:00:60.123Z',
+    ]) {
+      cleanup()
+      const fetchMock = vi.fn(() => response(thesis({ updated_at: updatedAt })))
+      renderEditor(fetchMock)
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/malformed thesis response/i))
+    }
+  })
+
   it('rejects unsafe or malformed source URLs before they can be rendered', () => {
     for (const url of ['javascript:alert(1)', 'data:text/html,unsafe', 'ftp://example.com/file', 'https://', 'https://user:password@example.com', 'https://example.com/a\r\nb']) {
       expect(() => validateSource({ label: 'Source', url })).toThrow()

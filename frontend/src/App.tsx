@@ -356,6 +356,8 @@ export default function App() {
   const activityLoadMoreRef = useRef<HTMLButtonElement>(null)
   const activityStatusRef = useRef<HTMLParagraphElement>(null)
   const thesisReturnRef = useRef<HTMLButtonElement>(null)
+  const thesisReturnLotIdRef = useRef<string | null>(null)
+  const filterRef = useRef<HTMLInputElement>(null)
   const activityLoadingMoreRef = useRef(false)
   const activityItemsRef = useRef<ActivityItem[]>([])
   const authGeneration = useRef(0)
@@ -587,7 +589,12 @@ export default function App() {
 
   const closeThesis = useCallback(() => {
     setThesisHolding(null)
-    window.setTimeout(() => thesisReturnRef.current?.focus(), 0)
+    window.setTimeout(() => {
+      const target = Array.from(document.querySelectorAll<HTMLButtonElement>('.thesis-open-button'))
+        .find((button) => button.dataset.thesisLotId === thesisReturnLotIdRef.current)
+      const focusTarget = target || filterRef.current
+      focusTarget?.focus()
+    }, 0)
   }, [])
 
   const visibleHoldings = useMemo(() => {
@@ -651,7 +658,7 @@ export default function App() {
           <option value="JPY">JPY</option>
         </select>
         <label htmlFor="filter">Filter holdings</label>
-        <input id="filter" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Symbol, currency or flag" />
+        <input ref={filterRef} id="filter" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Symbol, currency or flag" />
       </section>
 
       {state === 'loading' && <section className="notice" role="status"><h2>Loading portfolio</h2><p>Reading the latest immutable snapshot…</p></section>}
@@ -709,7 +716,7 @@ export default function App() {
                     <td className="numeric">{holding.latest_price || '—'}<span className="subline">{holding.latest_value || 'value unavailable'}</span></td>
                     <td className="numeric">{data.snapshot.complete ? (holding.reporting_value || '—') : 'Withheld'}</td>
                     <td><span className={`flag ${qualityClass(holding)}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
-                    <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button></td>
+                    <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button></td>
                   </tr>)}
                 </tbody>
               </table>

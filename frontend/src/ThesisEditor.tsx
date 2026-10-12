@@ -81,7 +81,7 @@ function validCalendarDate(value: unknown): value is string {
 }
 
 function validTimestamp(value: unknown): value is string {
-  if (typeof value !== 'string' || !/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{9}Z$/.test(value)) return false
+  if (typeof value !== 'string' || !/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?Z$/.test(value)) return false
   const parsed = Date.parse(value)
   return isFinite(parsed) && new Date(parsed).toISOString().slice(0, 19) === value.slice(0, 19)
 }
