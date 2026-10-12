@@ -1,8 +1,10 @@
 package httpserver
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"mime"
@@ -12,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/boubonming/portfolio-dashboard/internal/auth"
+	"github.com/boubonming/portfolio-dashboard/internal/domain"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 	"github.com/boubonming/portfolio-dashboard/internal/web"
 )
@@ -187,6 +190,10 @@ func portfolioOverview(database *store.Store) http.HandlerFunc {
 func portfolioRoutes(database *store.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if len(parts) >= 7 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[4] == "holdings" {
+			portfolioThesis(database).ServeHTTP(w, r)
+			return
+		}
 		if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[3] != "" {
 			switch parts[4] {
 			case "overview":
@@ -199,6 +206,130 @@ func portfolioRoutes(database *store.Store) http.Handler {
 		}
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 	})
+}
+
+func portfolioThesis(database *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		valid := len(parts) >= 7 && len(parts) <= 8 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[3] != "" && parts[4] == "holdings" && parts[5] != "" && parts[6] == "thesis" && (len(parts) == 7 || parts[7] == "history")
+		if !valid {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
+		if database == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
+		var count int
+		if err := database.DB.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM portfolios WHERE id=?", parts[3]).Scan(&count); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+			return
+		}
+		if count == 0 {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "portfolio_not_found"})
+			return
+		}
+		if err := database.DB.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM lots WHERE id=? AND portfolio_id=?", parts[5], parts[3]).Scan(&count); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+			return
+		}
+		if count == 0 {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "holding_not_found"})
+			return
+		}
+		if len(parts) == 8 {
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", http.MethodGet)
+				writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+				return
+			}
+			history, err := database.ThesisHistory(r.Context(), parts[3], parts[5])
+			if err != nil {
+				thesisHTTPError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"items": history})
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			thesis, err := database.GetThesis(r.Context(), parts[3], parts[5])
+			if err != nil {
+				thesisHTTPError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, thesis)
+		case http.MethodPut, http.MethodPost:
+			if err := saveThesisRequest(database, w, r, parts[3], parts[5]); err != nil {
+				thesisHTTPError(w, err)
+			}
+		default:
+			w.Header().Set("Allow", "GET, POST, PUT")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		}
+	}
+}
+
+func saveThesisRequest(database *store.Store, w http.ResponseWriter, r *http.Request, portfolioID, holdingID string) error {
+	mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaErr != nil || !strings.EqualFold(mediaType, "application/json") {
+		return fmt.Errorf("%w: content type", store.ErrInvalidThesis)
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, store.MaxThesisBodyBytes)
+	var raw map[string]json.RawMessage
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&raw); err != nil || raw == nil {
+		return fmt.Errorf("%w: malformed JSON", store.ErrInvalidThesis)
+	}
+	if extra := decoder.Decode(&struct{}{}); extra != io.EOF {
+		return fmt.Errorf("%w: trailing JSON", store.ErrInvalidThesis)
+	}
+	allowed := map[string]bool{"summary": true, "intended_holding_period": true, "allocation_limit": true, "reasons_to_hold": true, "risks": true, "reasons_to_sell": true, "conditions_to_change": true, "sources": true, "expected_revision": true}
+	for key := range raw {
+		if !allowed[key] {
+			return fmt.Errorf("%w: unknown field", store.ErrInvalidThesis)
+		}
+	}
+	for _, key := range []string{"summary", "intended_holding_period", "reasons_to_hold", "risks", "reasons_to_sell", "conditions_to_change", "sources", "expected_revision"} {
+		if _, ok := raw[key]; !ok {
+			return fmt.Errorf("%w: missing field", store.ErrInvalidThesis)
+		}
+		if key != "summary" && key != "intended_holding_period" && key != "expected_revision" && bytes.Equal(bytes.TrimSpace(raw[key]), []byte("null")) {
+			return fmt.Errorf("%w: null list", store.ErrInvalidThesis)
+		}
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("%w: malformed JSON", store.ErrInvalidThesis)
+	}
+	var request domain.ThesisUpdate
+	strictDecoder := json.NewDecoder(bytes.NewReader(encoded))
+	strictDecoder.DisallowUnknownFields()
+	if err := strictDecoder.Decode(&request); err != nil {
+		return fmt.Errorf("%w: malformed JSON", store.ErrInvalidThesis)
+	}
+	request.PortfolioID, request.HoldingID = portfolioID, holdingID
+	thesis, err := database.SaveThesis(r.Context(), request)
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, thesis)
+	return nil
+}
+
+func thesisHTTPError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrInvalidThesis):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_thesis"})
+	case errors.Is(err, store.ErrThesisConflict):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "thesis_revision_conflict"})
+	case errors.Is(err, store.ErrThesisNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "thesis_not_found"})
+	case errors.Is(err, store.ErrHoldingNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "holding_not_found"})
+	default:
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+	}
 }
 
 func portfolioActivity(database *store.Store) http.HandlerFunc {

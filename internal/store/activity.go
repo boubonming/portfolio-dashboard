@@ -234,6 +234,8 @@ func activitySummary(action string) (string, string, string) {
 		return "market", "Market refresh completed", "A market-data refresh completed."
 	case "portfolio.snapshot.created":
 		return "portfolio", "Immutable snapshot created", "An immutable valuation snapshot was created."
+	case "portfolio.thesis.updated":
+		return "portfolio", "Investment thesis updated", "An investment thesis revision was recorded."
 	default:
 		return "other", "Portfolio activity recorded", "A portfolio activity event was recorded."
 	}
