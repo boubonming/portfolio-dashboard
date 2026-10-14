@@ -216,9 +216,9 @@ paths:
         '200':
           description: Latest immutable snapshot, or an explicit no_snapshot state.
           headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
-          content: { application/json: { schema: { $ref: '#/components/schemas/ReviewSnapshot' }, example: { portfolio_id: demo-portfolio, snapshot_id: snap-2026-01-15, calculation_version: valuation-v3, state: complete, created_at: '2026-01-15T08:00:00Z', as_of: '2026-01-15T07:55:00Z', complete: true, missing_dependencies: [], stale_dependencies: [], invalid_dependencies: [], holdings: [{ portfolio_id: demo-portfolio, snapshot_id: snap-2026-01-15, holding_id: lot-demo-001, instrument_id: instrument-demo-001, symbol: DEMO, name: Synthetic Example Corp, quantity: '12.5000', currency: USD, unit_cost: '10.00', cost_basis: '125.0000', latest_price: '11.00', latest_value: '137.5000', reporting_value: '185.6250', quote_source: synthetic-feed, market_at: '2026-01-15T07:55:00Z', freshness_state: fresh, freshness_age_seconds: '300' }] } } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReviewSnapshot' }, example: { portfolio_id: demo-portfolio, snapshot_id: snap-2026-01-15, calculation_version: valuation-v3, state: complete, created_at: '2026-01-15T08:00:00.000000000Z', as_of: '2026-01-15T07:55:00.000000000Z', complete: true, missing_dependencies: [], stale_dependencies: [], invalid_dependencies: [], holdings: [{ portfolio_id: demo-portfolio, snapshot_id: snap-2026-01-15, holding_id: lot-demo-001, instrument_id: instrument-demo-001, symbol: DEMO, name: Synthetic Example Corp, quantity: '12.5000', currency: USD, unit_cost: '10.00', cost_basis: '125.0000', latest_price: '11.00', latest_value: '137.5000', reporting_value: '185.6250', quote_source: synthetic-feed, market_at: '2026-01-15T07:55:00.000000000Z', freshness_state: fresh, freshness_age_seconds: '300' }] } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/PortfolioNotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
@@ -240,7 +240,7 @@ paths:
           headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
           content: { application/json: { schema: { $ref: '#/components/schemas/ReviewSnapshot' } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/SnapshotNotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
@@ -267,7 +267,7 @@ paths:
           headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
           content: { application/json: { schema: { $ref: '#/components/schemas/ReviewHoldingContext' } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/HoldingOrSnapshotNotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
@@ -292,7 +292,7 @@ paths:
           headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
           content: { application/json: { schema: { $ref: '#/components/schemas/ReviewPage' } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/PortfolioNotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowedGetPost' }
@@ -318,14 +318,14 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/ReviewSubmission' }
-            example: { snapshot_id: snap-2026-01-15, calculation_version: valuation-v3, scope: { type: holding, holding_ids: [lot-demo-001], instrument_ids: [instrument-demo-001] }, status: complete, recommendation: hold, rationale: Synthetic evidence supports continued observation., risks: [Synthetic risk text.], counterarguments: [Synthetic counterargument.], conditions: [Review after the next dated snapshot.], metrics: [{ name: reporting_value, value: '185.6250', unit: reporting_currency, as_of: '2026-01-15T07:55:00Z', source: snapshot, deterministic: true }], sourced_facts: [{ statement: Synthetic sourced fact., evidence_ids: [evidence-demo-001] }], model_opinion: Synthetic model opinion., evidence: [{ evidence_id: evidence-demo-001, url: 'https://example.test/source/demo-001', title: Synthetic source, published_at: '2026-01-14T00:00:00Z', accessed_at: '2026-01-15T08:00:00Z', availability: available, freshness: current, excerpt: Synthetic excerpt treated as untrusted data. }], model: { provider: local-ai-server, model: synthetic-review-model, version: '2026-01', runtime: hermes-environment }, generated_at: '2026-01-15T08:00:00Z' }
+            example: { snapshot_id: snap-2026-01-15, calculation_version: valuation-v3, scope: { type: holding, holding_ids: [lot-demo-001], instrument_ids: [instrument-demo-001] }, status: complete, recommendation: hold, rationale: Synthetic evidence supports continued observation., risks: [Synthetic risk text.], counterarguments: [Synthetic counterargument.], conditions: [Review after the next dated snapshot.], metrics: [{ name: reporting_value, value: '185.6250', unit: reporting_currency, as_of: '2026-01-15T07:55:00.000000000Z', source: snapshot, deterministic: true }], sourced_facts: [{ statement: Synthetic sourced fact., evidence_ids: [evidence-demo-001] }], model_opinion: Synthetic model opinion., evidence: [{ evidence_id: evidence-demo-001, url: 'https://example.test/source/demo-001', title: Synthetic source, published_at: '2026-01-14T00:00:00.000000000Z', accessed_at: '2026-01-15T08:00:00.000000000Z', availability: available, freshness: current, excerpt: Synthetic excerpt treated as untrusted data. }], model: { provider: local-ai-server, model: synthetic-review-model, version: '2026-01', runtime: hermes-environment }, generated_at: '2026-01-15T08:00:00.000000000Z' }
       responses:
         '201':
           description: Review committed atomically and is immutable.
           headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }, Location: { description: Canonical review URL, schema: { type: string, maxLength: 512 } } }
           content: { application/json: { schema: { $ref: '#/components/schemas/Review' } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/PortfolioSnapshotOrTargetNotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowedGetPost' }
@@ -350,7 +350,7 @@ paths:
           headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } , Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
           content: { application/json: { schema: { $ref: '#/components/schemas/Review' } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ReviewNotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
@@ -379,7 +379,7 @@ paths:
           headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
           content: { application/json: { schema: { $ref: '#/components/schemas/ReviewFeedback' } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
+        '401': { $ref: '#/components/responses/UnauthorizedCookie' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ReviewNotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowedPost' }
@@ -421,10 +421,14 @@ components:
       description: Malformed path/query/header/body, unknown field, duplicate ID, or invariant violation.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
       content: { application/json: { schema: { $ref: '#/components/schemas/InvalidRequestError' }, example: { error: { code: invalid_request, message: Request does not satisfy the API contract., request_id: req-demo-001 } } } }
-    Unauthorized:
-      description: Missing, malformed, expired, revoked, or invalid browser/machine credentials.
-      headers: { WWW-Authenticate: { description: 'Only bearer-capable machine requests receive this deterministic challenge; cookie-session 401 responses omit it.', schema: { type: string, enum: ['Bearer realm="portfolio-machine"'] } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
-      content: { application/json: { schema: { $ref: '#/components/schemas/UnauthorizedError' } } }
+    UnauthorizedBearer:
+      description: Missing, malformed, expired, revoked, or invalid credentials on a machine-only or dual-auth operation; this deterministic response advertises the supported bearer scheme.
+      headers: { WWW-Authenticate: { description: Bearer challenge for machine-capable requests, schema: { type: string, enum: ['Bearer realm="portfolio-dashboard"'] } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/UnauthorizedError' }, example: { error: { code: unauthorized, message: Authentication is required., request_id: req-demo-401 } } } }
+    UnauthorizedCookie:
+      description: Missing, malformed, expired, or revoked browser session on the browser-only feedback operation; no bearer challenge is emitted.
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/UnauthorizedError' }, example: { error: { code: unauthorized, message: A browser session is required., request_id: req-demo-401-cookie } } } }
     Forbidden:
       description: Valid identity lacks the required permission, portfolio binding fails, or cookie CSRF/origin validation fails.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
@@ -534,6 +538,11 @@ components:
       minLength: 1
       maxLength: 128
       pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$'
+    CanonicalDateTime:
+      type: string
+      format: date-time
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$'
+      description: Canonical UTC timestamp used by normalized Phase D storage; exactly nine fractional digits and Z.
     ReviewStatus:
       type: string
       enum: [complete, incomplete]
@@ -571,6 +580,13 @@ components:
       maxLength: 128
       pattern: '^-?(?:0|[1-9][0-9]*)(?:[.][0-9]+)?$'
       description: Canonical base-10 decimal string; never a JSON number or SQLite REAL.
+    EvidenceUrl:
+      type: string
+      format: uri
+      minLength: 1
+      maxLength: 2048
+      pattern: '^https://[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*(?::(?:[1-9]|[1-9][0-9]{1,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:[/?#][A-Za-z0-9._~:/?#$&''()*+,;=%!-]*)?$'
+      description: Canonical HTTPS URL accepted by the Go net/url store boundary; userinfo and whitespace/control characters are not accepted.
     ReviewSnapshot:
       oneOf:
         - { $ref: '#/components/schemas/ReviewSnapshotComplete' }
@@ -586,8 +602,8 @@ components:
         snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
         calculation_version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
         state: { type: string, enum: [complete] }
-        created_at: { type: string, format: date-time }
-        as_of: { type: string, format: date-time }
+        created_at: { $ref: '#/components/schemas/CanonicalDateTime' }
+        as_of: { $ref: '#/components/schemas/CanonicalDateTime' }
         complete: { type: boolean, enum: [true] }
         missing_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
         stale_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
@@ -602,8 +618,8 @@ components:
         snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
         calculation_version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
         state: { type: string, enum: [incomplete] }
-        created_at: { type: string, format: date-time }
-        as_of: { type: string, format: date-time }
+        created_at: { $ref: '#/components/schemas/CanonicalDateTime' }
+        as_of: { $ref: '#/components/schemas/CanonicalDateTime' }
         complete: { type: boolean, enum: [false] }
         missing_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
         stale_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
@@ -640,7 +656,7 @@ components:
         latest_value: { $ref: '#/components/schemas/DecimalString' }
         reporting_value: { $ref: '#/components/schemas/DecimalString' }
         quote_source: { type: string, minLength: 1, maxLength: 128 }
-        market_at: { type: string, format: date-time }
+        market_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         freshness_state: { type: string, enum: [fresh, stale, missing, future, invalid] }
         freshness_age_seconds: { $ref: '#/components/schemas/DecimalString' }
     LoginRequest:
@@ -656,7 +672,7 @@ components:
       properties:
         authenticated: { type: boolean }
         csrf_token: { type: string, description: In-memory token for unsafe same-origin API requests. }
-        expires_at: { type: string, format: date-time }
+        expires_at: { $ref: '#/components/schemas/CanonicalDateTime' }
     PortfolioOverview:
       type: object
       required: [portfolio, reporting_currency, snapshot, allocation, holdings]
@@ -682,14 +698,14 @@ components:
         state: { type: string, enum: [complete, incomplete, no_snapshot] }
         snapshot_id: { type: string }
         calculation_version: { type: string }
-        created_at: { type: string, format: date-time }
-        as_of: { type: string, format: date-time }
+        created_at: { $ref: '#/components/schemas/CanonicalDateTime' }
+        as_of: { $ref: '#/components/schemas/CanonicalDateTime' }
         complete: { type: boolean }
         reporting_total: { type: string, description: Decimal string; present only when complete. }
         missing_dependencies: { type: array, items: { type: string } }
         stale_dependencies: { type: array, items: { type: string } }
         invalid_dependencies: { type: array, items: { type: string } }
-        source_timestamps: { type: array, items: { type: string, format: date-time } }
+        source_timestamps: { type: array, items: { $ref: '#/components/schemas/CanonicalDateTime' } }
         subtotals:
           type: array
           items: { $ref: '#/components/schemas/CurrencySubtotal' }
@@ -767,7 +783,7 @@ components:
       required: [status]
       properties:
         status: { type: string, enum: [fresh, stale, missing, future, invalid] }
-        market_at: { type: string, format: date-time }
+        market_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         age: { type: string }
     ActivityPage:
       oneOf:
@@ -801,7 +817,7 @@ components:
         actor_category: { type: string, minLength: 1, maxLength: 64, description: Safe actor category; never a credential or username. }
         entity_type: { type: string, minLength: 1, maxLength: 128 }
         entity_id: { type: string, minLength: 1, maxLength: 128 }
-        occurred_at: { type: string, format: date-time, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$' }
+        occurred_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         summary: { type: string, minLength: 1, maxLength: 256 }
         details: { type: string, minLength: 1, maxLength: 2000 }
     ThesisUpdate:
@@ -845,7 +861,7 @@ components:
         sources: { type: array, items: { $ref: '#/components/schemas/ThesisSource' } }
         revision: { type: integer, minimum: 1 }
         revision_id: { type: string }
-        updated_at: { type: string, format: date-time }
+        updated_at: { $ref: '#/components/schemas/CanonicalDateTime' }
     AllocationLimit:
       type: string
       nullable: true
@@ -870,8 +886,8 @@ components:
         sources: { type: array, items: { $ref: '#/components/schemas/ThesisSource' } }
         revision: { type: integer, minimum: 1 }
         revision_id: { type: string }
-        updated_at: { type: string, format: date-time }
-        created_at: { type: string, format: date-time }
+        updated_at: { $ref: '#/components/schemas/CanonicalDateTime' }
+        created_at: { $ref: '#/components/schemas/CanonicalDateTime' }
     ThesisHistory:
       type: object
       additionalProperties: false
@@ -886,7 +902,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 128 }
         value: { $ref: '#/components/schemas/DecimalString' }
         unit: { type: string, minLength: 1, maxLength: 64 }
-        as_of: { type: string, format: date-time }
+        as_of: { $ref: '#/components/schemas/CanonicalDateTime' }
         source: { type: string, enum: [snapshot, calculation, submitted] }
         deterministic: { type: boolean, enum: [true] }
       description: Deterministic metric copied from the named immutable snapshot or calculation; not model output.
@@ -896,15 +912,10 @@ components:
       required: [evidence_id, url, title, accessed_at, availability, freshness, excerpt]
       properties:
         evidence_id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
-        url:
-          type: string
-          format: uri
-          minLength: 1
-          maxLength: 2048
-          pattern: '^https://[A-Za-z0-9][A-Za-z0-9._~-]*(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~:/?#\[\]@!$&''()*+,;=%~-]*)?$'
+        url: { $ref: '#/components/schemas/EvidenceUrl' }
         title: { type: string, minLength: 1, maxLength: 512 }
-        published_at: { type: string, format: date-time }
-        accessed_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time, nullable: true, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$' }
+        accessed_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         availability: { type: string, enum: [available, unavailable, blocked, invalid] }
         freshness: { type: string, enum: [current, stale, unknown] }
         excerpt: { type: string, minLength: 1, maxLength: 4000 }
@@ -960,7 +971,7 @@ components:
         model_opinion: { type: string, minLength: 1, maxLength: 8000 }
         evidence: { type: array, maxItems: 64, items: { $ref: '#/components/schemas/ReviewEvidence' } }
         model: { $ref: '#/components/schemas/ModelProvenance' }
-        generated_at: { type: string, format: date-time }
+        generated_at: { $ref: '#/components/schemas/CanonicalDateTime' }
     CompleteReviewSubmission:
       allOf:
         - $ref: '#/components/schemas/ReviewSubmissionCommon'
@@ -985,6 +996,11 @@ components:
             availability: { type: string, enum: [available] }
             freshness: { type: string, enum: [current] }
     Review:
+      oneOf:
+        - $ref: '#/components/schemas/CompleteReview'
+        - $ref: '#/components/schemas/IncompleteReview'
+      description: Output branches are mutually exclusive and preserve the same completeness invariants as submission.
+    CompleteReview:
       type: object
       additionalProperties: false
       required: [review_id, portfolio_id, snapshot_id, calculation_version, scope, status, recommendation, rationale, risks, counterarguments, conditions, metrics, sourced_facts, model_opinion, evidence, model, generated_at, submitted_at, submitted_by, lifecycle]
@@ -994,8 +1010,33 @@ components:
         snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
         calculation_version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
         scope: { $ref: '#/components/schemas/ReviewScope' }
-        status: { type: string, enum: [complete, incomplete] }
-        recommendation: { $ref: '#/components/schemas/Recommendation' }
+        status: { type: string, enum: [complete] }
+        recommendation: { type: string, enum: [hold, review, trim_candidate, exit_candidate] }
+        rationale: { type: string, minLength: 1, maxLength: 8000 }
+        risks: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
+        counterarguments: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
+        conditions: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
+        metrics: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/ReviewMetric' } }
+        sourced_facts: { type: array, minItems: 1, maxItems: 32, items: { $ref: '#/components/schemas/SourcedFact' } }
+        model_opinion: { type: string, minLength: 1, maxLength: 8000 }
+        evidence: { type: array, minItems: 1, maxItems: 64, items: { $ref: '#/components/schemas/CurrentAvailableEvidence' } }
+        model: { $ref: '#/components/schemas/ModelProvenance' }
+        generated_at: { $ref: '#/components/schemas/CanonicalDateTime' }
+        submitted_at: { $ref: '#/components/schemas/CanonicalDateTime' }
+        submitted_by: { $ref: '#/components/schemas/PrincipalAttribution' }
+        lifecycle: { $ref: '#/components/schemas/ReviewLifecycle' }
+    IncompleteReview:
+      type: object
+      additionalProperties: false
+      required: [review_id, portfolio_id, snapshot_id, calculation_version, scope, status, recommendation, rationale, risks, counterarguments, conditions, metrics, sourced_facts, model_opinion, evidence, model, generated_at, submitted_at, submitted_by, lifecycle]
+      properties:
+        review_id: { $ref: '#/components/schemas/ReviewId' }
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
+        calculation_version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        scope: { $ref: '#/components/schemas/ReviewScope' }
+        status: { type: string, enum: [incomplete] }
+        recommendation: { type: string, enum: [no_recommendation] }
         rationale: { type: string, minLength: 1, maxLength: 8000 }
         risks: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
         counterarguments: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
@@ -1005,8 +1046,8 @@ components:
         model_opinion: { type: string, minLength: 1, maxLength: 8000 }
         evidence: { type: array, maxItems: 64, items: { $ref: '#/components/schemas/ReviewEvidence' } }
         model: { $ref: '#/components/schemas/ModelProvenance' }
-        generated_at: { type: string, format: date-time }
-        submitted_at: { type: string, format: date-time }
+        generated_at: { $ref: '#/components/schemas/CanonicalDateTime' }
+        submitted_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         submitted_by: { $ref: '#/components/schemas/PrincipalAttribution' }
         lifecycle: { $ref: '#/components/schemas/ReviewLifecycle' }
     ReviewLifecycle:
@@ -1094,102 +1135,65 @@ components:
         review_id: { $ref: '#/components/schemas/ReviewId' }
         decision: { type: string, enum: [agree, disagree, defer, request_another_review] }
         note: { type: string, nullable: true, maxLength: 2000 }
-        occurred_at: { type: string, format: date-time }
+        occurred_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         submitted_by: { $ref: '#/components/schemas/PrincipalAttribution' }
-    ErrorResponse:
-      oneOf:
-        - $ref: '#/components/schemas/InvalidRequestError'
-        - $ref: '#/components/schemas/UnauthorizedError'
-        - $ref: '#/components/schemas/ForbiddenError'
-        - $ref: '#/components/schemas/NotFoundError'
-        - $ref: '#/components/schemas/MethodNotAllowedError'
-        - $ref: '#/components/schemas/IdempotencyConflictError'
-        - $ref: '#/components/schemas/PayloadTooLargeError'
-        - $ref: '#/components/schemas/UnsupportedMediaTypeError'
-        - $ref: '#/components/schemas/IncompleteReviewError'
-        - $ref: '#/components/schemas/InternalErrorResponse'
-    ErrorEnvelope:
+    InvalidRequestError:
       type: object
       additionalProperties: false
       required: [error]
       properties:
-        error:
-          type: object
-          additionalProperties: false
-          required: [code, message, request_id]
-          properties:
-            code:
-              type: string
-              enum: [unauthorized, forbidden, not_found, invalid_request, method_not_allowed, idempotency_conflict, payload_too_large, unsupported_media_type, incomplete_review, internal_error]
-            message: { type: string, minLength: 1, maxLength: 256 }
-            request_id: { type: string, minLength: 1, maxLength: 128 }
-    InvalidRequestError:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodeInvalidRequest'
-    ErrorCodeInvalidRequest:
-      type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [invalid_request] } } } }
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [invalid_request] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
     UnauthorizedError:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodeUnauthorized'
-    ErrorCodeUnauthorized:
       type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [unauthorized] } } } }
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [unauthorized] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
     ForbiddenError:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodeForbidden'
-    ErrorCodeForbidden:
       type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [forbidden] } } } }
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [forbidden] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
     NotFoundError:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodeNotFound'
-    ErrorCodeNotFound:
       type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [not_found] } } } }
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [not_found] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
     MethodNotAllowedError:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodeMethodNotAllowed'
-    ErrorCodeMethodNotAllowed:
       type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [method_not_allowed] } } } }
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [method_not_allowed] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
     IdempotencyConflictError:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodeIdempotencyConflict'
-    ErrorCodeIdempotencyConflict:
       type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [idempotency_conflict] } } } }
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [idempotency_conflict] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
     PayloadTooLargeError:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodePayloadTooLarge'
-    ErrorCodePayloadTooLarge:
       type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [payload_too_large] } } } }
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [payload_too_large] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
     UnsupportedMediaTypeError:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodeUnsupportedMediaType'
-    ErrorCodeUnsupportedMediaType:
       type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [unsupported_media_type] } } } }
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [unsupported_media_type] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
     IncompleteReviewError:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodeIncompleteReview'
-    ErrorCodeIncompleteReview:
       type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [incomplete_review] } } } }
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [incomplete_review] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
     InternalErrorResponse:
-      allOf:
-        - $ref: '#/components/schemas/ErrorEnvelope'
-        - $ref: '#/components/schemas/ErrorCodeInternal'
-    ErrorCodeInternal:
       type: object
-      properties: { error: { type: object, properties: { code: { type: string, enum: [internal_error] } } } }
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: object, additionalProperties: false, required: [code, message, request_id], properties: { code: { type: string, enum: [internal_error] }, message: { type: string, minLength: 1, maxLength: 256 }, request_id: { type: string, minLength: 1, maxLength: 128 } } }
