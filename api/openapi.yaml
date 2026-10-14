@@ -221,7 +221,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/PortfolioNotFound' }
-        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
         '500': { $ref: '#/components/responses/InternalError' }
   /api/v1/portfolios/{portfolioId}/snapshots/{snapshotId}:
     get:
@@ -243,7 +243,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/SnapshotNotFound' }
-        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
         '500': { $ref: '#/components/responses/InternalError' }
   /api/v1/portfolios/{portfolioId}/holdings/{holdingId}/review-context:
     get:
@@ -270,7 +270,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/HoldingOrSnapshotNotFound' }
-        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
         '500': { $ref: '#/components/responses/InternalError' }
   /api/v1/portfolios/{portfolioId}/reviews:
     get:
@@ -295,7 +295,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/PortfolioNotFound' }
-        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGetPost' }
         '409': { $ref: '#/components/responses/IdempotencyConflict' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
@@ -328,7 +328,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/PortfolioSnapshotOrTargetNotFound' }
-        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGetPost' }
         '409': { $ref: '#/components/responses/IdempotencyConflict' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
@@ -353,7 +353,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ReviewNotFound' }
-        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
         '500': { $ref: '#/components/responses/InternalError' }
   /api/v1/portfolios/{portfolioId}/reviews/{reviewId}/feedback:
     post:
@@ -382,7 +382,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ReviewNotFound' }
-        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedPost' }
         '409': { $ref: '#/components/responses/IdempotencyConflict' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
@@ -429,9 +429,44 @@ components:
       description: Valid identity lacks the required permission, portfolio binding fails, or cookie CSRF/origin validation fails.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
       content: { application/json: { schema: { $ref: '#/components/schemas/ForbiddenError' } } }
-    MethodNotAllowed:
-      description: Known canonical path with an unsupported method.
-      headers: { Allow: { description: Exact canonical methods for this path, emitted only after authentication and authorization., schema: { type: string, minLength: 3, maxLength: 64 } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+    MethodNotAllowedGet:
+      description: Known canonical GET-only path with an unsupported method.
+      headers:
+        Allow:
+          description: >-
+            Exact canonical methods for this path, emitted only after
+            authentication and authorization.
+          schema: { type: string, enum: [GET] }
+          example: GET
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+        Vary: { $ref: '#/components/headers/PrivateVary' }
+        X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
+      content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
+    MethodNotAllowedGetPost:
+      description: Known reviews collection path with an unsupported method.
+      headers:
+        Allow:
+          description: >-
+            Exact canonical methods for the reviews collection, emitted only
+            after authentication and authorization.
+          schema: { type: string, enum: ['GET, POST'] }
+          example: 'GET, POST'
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+        Vary: { $ref: '#/components/headers/PrivateVary' }
+        X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
+      content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
+    MethodNotAllowedPost:
+      description: Known feedback path with an unsupported method.
+      headers:
+        Allow:
+          description: >-
+            Exact canonical POST method for the feedback path, emitted only
+            after authentication and authorization.
+          schema: { type: string, enum: [POST] }
+          example: POST
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+        Vary: { $ref: '#/components/headers/PrivateVary' }
+        X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
       content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
     PortfolioNotFound:
       description: Portfolio does not exist; cross-portfolio existence is not disclosed.
