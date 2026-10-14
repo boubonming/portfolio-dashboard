@@ -20,4 +20,13 @@ describe('typed API helper', () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 401 } as Response)))
     await expect(apiFetch('/api/v1/private')).rejects.toMatchObject({ status: 401 })
   })
+
+  it('preserves a caller-supplied Accept header', async () => {
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(() => Promise.resolve({ ok: true, status: 200 } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await apiFetch('/api/v1/export.csv', { headers: { Accept: 'text/csv' } })
+
+    expect((fetchMock.mock.calls[0][1]?.headers as Headers).get('Accept')).toBe('text/csv')
+  })
 })

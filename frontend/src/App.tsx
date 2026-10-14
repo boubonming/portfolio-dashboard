@@ -140,6 +140,30 @@ function displayDate(value?: string) {
   return value.replace('T', ' ').replace(/\.\d+Z$/, 'Z')
 }
 
+export function safeCSVFilename(contentDisposition: string | null, currency: string) {
+  const fallback = `portfolio-export-${currency}.csv`
+  if (!contentDisposition) return fallback
+  const match = contentDisposition.match(/(?:^|;)\s*filename="?([^";\r\n]+)"?/i)
+  const filename = match?.[1]?.trim()
+  return filename && filename.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*\.csv$/i.test(filename) ? filename : fallback
+}
+
+export function isCSVContentType(contentType: string | null) {
+  if (!contentType) return false
+  const [mediaType, ...parameters] = contentType.split(';')
+  if (mediaType.trim().toLowerCase() !== 'text/csv') return false
+  return parameters.every((parameter) => /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+\s*=\s*(?:[!#$%&'*+\-.^_`|~0-9A-Za-z]+|"(?:[^"\\]|\\.)*")$/.test(parameter.trim()))
+}
+
+function validPortfolioID(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128 && value === value.trim() && !/[/?#\u0000-\u001f\u007f]/.test(value)
+}
+
+function currentPortfolioID(value: PortfolioOverview | null) {
+  const candidate = value?.portfolio?.id
+  return validPortfolioID(candidate) ? candidate : null
+}
+
 function qualityLabel(holding: Holding) {
   const flags = [...holding.data_quality]
   if (holding.freshness.status && holding.freshness.status !== 'fresh' && !flags.includes(holding.freshness.status)) flags.unshift(holding.freshness.status)
@@ -323,7 +347,7 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
     <header className="brand"><span className="eyebrow">Private workspace</span><h1>Portfolio Dashboard</h1><p className="muted">Sign in to view your private portfolio.</p></header>
     <form className="login-card" onSubmit={submit} aria-labelledby="login-title">
       <h2 id="login-title">Sign in</h2>
-      <label htmlFor="username">Username</label><input ref={usernameRef} id="username" name="username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required />
+      <label htmlFor="username">Username</label><input ref={usernameRef} id="username" name="username" autoComplete="username" autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required />
       <label htmlFor="password">Password</label><input id="password" name="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
       {(error || externalError) && <p className="notice error" role="alert">{error || externalError}</p>}
       <button type="submit" disabled={state === 'submitting'}>{state === 'submitting' ? 'Signing in…' : 'Sign in'}</button>
@@ -345,6 +369,9 @@ export default function App() {
   const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState('')
+  const [exportState, setExportState] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [exportError, setExportError] = useState('')
+  const [exportAnnouncement, setExportAnnouncement] = useState('')
   const [authError, setAuthError] = useState('')
   const csrfToken = useRef<string | undefined>(undefined)
   const [filter, setFilter] = useState('')
@@ -353,6 +380,7 @@ export default function App() {
   const authControllerRef = useRef<AbortController | null>(null)
   const loadControllerRef = useRef<AbortController | null>(null)
   const activityControllerRef = useRef<AbortController | null>(null)
+  const exportControllerRef = useRef<AbortController | null>(null)
   const activityLoadMoreRef = useRef<HTMLButtonElement>(null)
   const activityStatusRef = useRef<HTMLParagraphElement>(null)
   const thesisReturnRef = useRef<HTMLButtonElement>(null)
@@ -363,23 +391,27 @@ export default function App() {
   const authGeneration = useRef(0)
   const loadGeneration = useRef(0)
   const activityGeneration = useRef(0)
+  const exportGeneration = useRef(0)
   const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const clearPrivateState = useCallback(() => {
     authGeneration.current += 1
     loadGeneration.current += 1
     activityGeneration.current += 1
+    exportGeneration.current += 1
     authControllerRef.current?.abort()
     authControllerRef.current = null
     loadControllerRef.current?.abort()
     loadControllerRef.current = null
     activityControllerRef.current?.abort()
     activityControllerRef.current = null
+    exportControllerRef.current?.abort()
+    exportControllerRef.current = null
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
     activityLoadingMoreRef.current = false
     activityItemsRef.current = []
-    setData(null); setThesisHolding(null); setActivity(null); setError(''); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
+    setData(null); setThesisHolding(null); setActivity(null); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -411,6 +443,7 @@ export default function App() {
       .then((response) => jsonResponse<PortfolioOverview>(response))
       .then((overview) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== loadGeneration.current) return
+        if (!currentPortfolioID(overview)) throw new Error('Invalid portfolio overview')
         setData(overview)
         setState('ready')
       })
@@ -421,6 +454,72 @@ export default function App() {
         setState('error')
       })
   }, [authState, clearPrivateState, currency])
+
+  const downloadCSV = useCallback(() => {
+    if (authState !== 'authenticated' || exportState === 'loading') return
+    const portfolioID = currentPortfolioID(data)
+    if (state !== 'ready' || !portfolioID) {
+      setExportError('Unable to download CSV: no valid portfolio overview is loaded.')
+      setExportAnnouncement('CSV download failed. Please try again.')
+      setExportState('error')
+      return
+    }
+    const authGenerationAtStart = authGeneration.current
+    const generation = ++exportGeneration.current
+    exportControllerRef.current?.abort()
+    const controller = new AbortController()
+    exportControllerRef.current = controller
+    setExportState('loading')
+    setExportError('')
+    setExportAnnouncement('Preparing CSV download…')
+    apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioID)}/export.csv?currency=${encodeURIComponent(currency)}`, { signal: controller.signal, headers: { Accept: 'text/csv' } })
+      .then(async (response) => {
+        if (!response.ok) throw new APIError(response.status)
+        if (!isCSVContentType(response.headers.get('Content-Type'))) throw new Error('Invalid CSV response MIME type')
+        const blob = await response.blob()
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== exportGeneration.current) return
+        const objectURL = URL.createObjectURL(blob)
+        let link: HTMLAnchorElement | null = null
+        try {
+          link = document.createElement('a')
+          link.href = objectURL
+          link.download = safeCSVFilename(response.headers.get('Content-Disposition'), currency)
+          link.style.display = 'none'
+          document.body.appendChild(link)
+          link.click()
+        } finally {
+          try { link?.remove() } finally { URL.revokeObjectURL(objectURL) }
+        }
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== exportGeneration.current) return
+        setExportState('idle')
+        setExportAnnouncement('CSV download started.')
+      })
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== exportGeneration.current) return
+        if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+        setExportError(reason instanceof Error ? reason.message : 'Unable to download CSV')
+        setExportAnnouncement('CSV download failed. Please try again.')
+        setExportState('error')
+      })
+      .finally(() => {
+        if (exportControllerRef.current === controller) exportControllerRef.current = null
+      })
+  }, [authState, clearPrivateState, currency, data, exportState, state, view])
+
+  useEffect(() => {
+    exportGeneration.current += 1
+    exportControllerRef.current?.abort()
+    exportControllerRef.current = null
+    setExportState('idle')
+    setExportError('')
+    setExportAnnouncement('')
+  }, [currency, view])
+
+  useEffect(() => () => {
+    exportGeneration.current += 1
+    exportControllerRef.current?.abort()
+    exportControllerRef.current = null
+  }, [])
 
   const loadActivity = useCallback((cursor: string | undefined, append: boolean, keyboardActivated = false) => {
     if (authState !== 'authenticated' || (append && activityLoadingMoreRef.current)) return
@@ -659,6 +758,9 @@ export default function App() {
         </select>
         <label htmlFor="filter">Filter holdings</label>
         <input ref={filterRef} id="filter" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Symbol, currency or flag" />
+        <button type="button" onClick={downloadCSV} disabled={exportState === 'loading'} aria-busy={exportState === 'loading'}>{exportState === 'loading' ? 'Downloading CSV…' : 'Download CSV'}</button>
+        {exportError && <span className="notice error" role="alert">{exportError} <button type="button" onClick={downloadCSV}>Retry download</button></span>}
+        <span className="visually-hidden" role="status" aria-live="polite">{exportAnnouncement}</span>
       </section>
 
       {state === 'loading' && <section className="notice" role="status"><h2>Loading portfolio</h2><p>Reading the latest immutable snapshot…</p></section>}

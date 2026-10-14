@@ -13,7 +13,7 @@ export type APIRequestInit = RequestInit & { csrfToken?: string }
 export async function apiFetch(input: RequestInfo | URL, init: APIRequestInit = {}): Promise<Response> {
   const { csrfToken, headers: suppliedHeaders, ...requestInit } = init
   const headers = new Headers(suppliedHeaders)
-  headers.set('Accept', 'application/json')
+  if (!headers.has('Accept')) headers.set('Accept', 'application/json')
   const method = (requestInit.method || 'GET').toUpperCase()
   if (csrfToken && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') headers.set('X-CSRF-Token', csrfToken)
   const response = await fetch(input, { ...requestInit, headers, credentials: 'same-origin' })
