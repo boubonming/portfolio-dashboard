@@ -486,6 +486,12 @@ export default function App() {
     setExportAnnouncement('')
   }, [currency, view])
 
+  useEffect(() => () => {
+    exportGeneration.current += 1
+    exportControllerRef.current?.abort()
+    exportControllerRef.current = null
+  }, [])
+
   const loadActivity = useCallback((cursor: string | undefined, append: boolean, keyboardActivated = false) => {
     if (authState !== 'authenticated' || (append && activityLoadingMoreRef.current)) return
     const hadKeyboardFocus = append && keyboardActivated && document.activeElement === activityLoadMoreRef.current

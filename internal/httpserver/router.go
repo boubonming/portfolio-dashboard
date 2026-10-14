@@ -55,13 +55,33 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 	mux.HandleFunc("/api/v1/auth/", authRoutes(authenticator))
 	portfolio := http.Handler(portfolioRoutes(database))
 	if authenticator != nil {
-		portfolio = authenticator.RequireAuth(authenticator.RequireCSRF(portfolio))
+		portfolio = portfolioCSRF(authenticator, portfolio)
+		portfolio = authenticator.RequireAuth(portfolio)
 	}
 	portfolio = noStorePrivate(portfolio)
 	mux.Handle("/api/v1/portfolios/", portfolio)
 	mux.HandleFunc("/api/", apiNotFound)
 	mux.HandleFunc("/", spa(files))
 	return mux, nil
+}
+
+func portfolioCSRF(authenticator *auth.Authenticator, next http.Handler) http.Handler {
+	protected := authenticator.RequireCSRF(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Export is a read-only route. Let its own method dispatch report 405
+		// before the global write-request CSRF check, without changing CSRF
+		// requirements for thesis writes or any future state-changing route.
+		if isPortfolioExportPath(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	})
+}
+
+func isPortfolioExportPath(r *http.Request) bool {
+	parts := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "/")
+	return len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[3] != "" && parts[4] == "export.csv"
 }
 
 func health(w http.ResponseWriter, r *http.Request) {

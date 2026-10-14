@@ -129,6 +129,28 @@ describe('Portfolio Dashboard', () => {
 		resolveExport?.({ ok: true, status: 200, headers: new Headers(), blob: async () => new Blob(['ok']) } as Response)
 	})
 
+	it('aborts a pending export on unmount and ignores its late response', async () => {
+		const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+		const createObjectURL = vi.fn(() => 'blob:late-export')
+		Object.assign(URL, { createObjectURL })
+		let resolveExport: ((response: Response) => void) | undefined
+		let exportSignal: AbortSignal | undefined
+		const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).includes('/export.csv')
+			? (exportSignal = init?.signal as AbortSignal, new Promise<Response>((resolve) => { resolveExport = resolve }))
+			: Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+		vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+		render(<App />)
+		await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+		fireEvent.click(screen.getByRole('button', { name: /download csv/i }))
+		expect(resolveExport).toBeDefined()
+		cleanup()
+		expect(exportSignal?.aborted).toBe(true)
+		resolveExport?.({ ok: true, status: 200, headers: new Headers({ 'Content-Disposition': 'attachment; filename="portfolio-export-MYR.csv"' }), blob: async () => new Blob(['late']) } as Response)
+		await flushEffects()
+		expect(createObjectURL).not.toHaveBeenCalled()
+		expect(click).not.toHaveBeenCalled()
+	})
+
 	it('clears private data and focuses login when CSV export returns 401', async () => {
 		const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/export.csv')
 			? Promise.resolve({ ok: false, status: 401, headers: new Headers(), blob: async () => new Blob() } as Response)

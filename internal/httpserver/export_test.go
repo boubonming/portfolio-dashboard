@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -164,6 +165,78 @@ func TestPortfolioExportCSVZeroHoldingsIsHeaderOnly(t *testing.T) {
 	}
 	if _, err := reader.Read(); err != io.EOF {
 		t.Fatalf("expected header-only CSV, got %v", err)
+	}
+	if got := response.Body.String(); !strings.HasSuffix(got, "\r\n") || strings.Contains(strings.TrimSuffix(got, "\r\n"), "\n") {
+		t.Fatalf("header-only CSV must use RFC 4180 CRLF records: %q", got)
+	}
+}
+
+func TestPortfolioExportCSVRejectsEscapedPathAliasesAndUnsupportedMethodsBeforeCSRF(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	handler := authenticatedAPIHandler(t, database)
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+		want   int
+	}{
+		{name: "escaped portfolio id", method: http.MethodGet, path: "/api/v1/portfolios/%70ortfolio-api/export.csv?currency=MYR", want: http.StatusNotFound},
+		{name: "post has route method error before csrf", method: http.MethodPost, path: "/api/v1/portfolios/portfolio-api/export.csv?currency=MYR", want: http.StatusMethodNotAllowed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+			if response.Code != test.want {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if test.method == http.MethodPost && response.Header().Get("Allow") != http.MethodGet {
+				t.Fatalf("allow=%q body=%s", response.Header().Get("Allow"), response.Body.String())
+			}
+		})
+	}
+}
+
+func TestPortfolioExportCSVContentDispositionParsesAsAttachment(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	response := httptest.NewRecorder()
+	authenticatedAPIHandler(t, database).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/export.csv?currency=MYR", nil))
+	mediaType, params, err := mime.ParseMediaType(response.Header().Get("Content-Disposition"))
+	if err != nil || mediaType != "attachment" || params["filename"] != "portfolio-export-MYR.csv" {
+		t.Fatalf("content disposition=%q media_type=%q params=%v err=%v", response.Header().Get("Content-Disposition"), mediaType, params, err)
+	}
+}
+
+func TestExportTextEscapesFormulaPrefixesAndPreservesCanonicalValues(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "equals", value: "=SUM(A1)", want: "'=SUM(A1)"},
+		{name: "plus", value: "+1", want: "'+1"},
+		{name: "minus", value: "-1", want: "'-1"},
+		{name: "at", value: "@cmd", want: "'@cmd"},
+		{name: "tab", value: "	=SUM(A1)", want: "'	=SUM(A1)"},
+		{name: "carriage return", value: "\r=SUM(A1)", want: "'\r=SUM(A1)"},
+		{name: "line feed", value: "\n=SUM(A1)", want: "'\n=SUM(A1)"},
+		{name: "unicode byte order mark", value: "\ufeff=SUM(A1)", want: "'\ufeff=SUM(A1)"},
+		{name: "zero width space", value: "\u200b=SUM(A1)", want: "'\u200b=SUM(A1)"},
+		{name: "ordinary text", value: "Alpha", want: "Alpha"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := exportText(test.value); got != test.want {
+				t.Fatalf("exportText(%q)=%q, want %q", test.value, got, test.want)
+			}
+		})
+	}
+	if got := exportTimestamp("2026-01-02T12:00:00.000000000Z"); got != "2026-01-02T12:00:00.000000000Z" {
+		t.Fatalf("canonical timestamp changed: %q", got)
+	}
+	date := "2026-01-02"
+	if got := optionalDate(&date); got != date {
+		t.Fatalf("canonical date changed: %q", got)
 	}
 }
 

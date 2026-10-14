@@ -35,7 +35,11 @@ var exportHeaders = []string{
 func portfolioExport(database *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-		validPath := len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[3] != "" && len(parts[3]) <= 128 && parts[4] == "export.csv" && r.URL.Path == "/api/v1/portfolios/"+parts[3]+"/export.csv"
+		canonicalPath := ""
+		if len(parts) == 5 {
+			canonicalPath = "/api/v1/portfolios/" + parts[3] + "/export.csv"
+		}
+		validPath := len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[3] != "" && len(parts[3]) <= 128 && parts[4] == "export.csv" && r.URL.Path == canonicalPath && r.URL.EscapedPath() == canonicalPath
 		if !validPath {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 			return
@@ -100,6 +104,7 @@ func renderPortfolioCSV(ctx context.Context, view domain.PortfolioOverview) ([]b
 	}
 	var buffer bytes.Buffer
 	writer := csv.NewWriter(&buffer)
+	writer.UseCRLF = true
 	if err := writer.Write(exportHeaders); err != nil {
 		return nil, err
 	}
@@ -155,7 +160,11 @@ func exportText(value string) string {
 		return ""
 	}
 	first, _ := utf8.DecodeRuneInString(value)
-	if strings.ContainsRune("=+-@", first) || unicode.IsSpace(first) || unicode.IsControl(first) {
+	// Unicode format controls such as BOM and zero-width space are treated as
+	// dangerous prefixes too: preserving them before a formula marker could
+	// hide the marker from this text policy while leaving spreadsheet parsing
+	// behavior implementation-dependent.
+	if strings.ContainsRune("=+-@", first) || unicode.IsSpace(first) || unicode.IsControl(first) || unicode.Is(unicode.Cf, first) {
 		return "'" + value
 	}
 	return value
