@@ -285,9 +285,10 @@ paths:
         - { name: cursor, in: query, required: false, description: Opaque signed keyset cursor bound to this portfolio, schema: { type: string, minLength: 16, maxLength: 512, pattern: '^[A-Za-z0-9_-]+$' } }
         - { name: holding_id, in: query, required: false, schema: { $ref: '#/components/schemas/HoldingId' } }
         - { name: status, in: query, required: false, schema: { $ref: '#/components/schemas/ReviewStatus' } }
+        - { name: outdated, in: query, required: false, description: Lifecycle filter; this is separate from stored status., schema: { type: boolean } }
       responses:
         '200':
-          description: Reviews in deterministic created_at descending, id descending order.
+          description: Reviews in deterministic submitted_at descending, review_id descending wire order (review_id is the database id).
           headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
           content: { application/json: { schema: { $ref: '#/components/schemas/ReviewPage' } } }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -295,6 +296,10 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/PortfolioNotFound' }
         '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/IncompleteReview' }
         '500': { $ref: '#/components/responses/InternalError' }
     post:
       summary: Submit one immutable advisory review
@@ -323,6 +328,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/PortfolioSnapshotOrTargetNotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
         '409': { $ref: '#/components/responses/IdempotencyConflict' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
@@ -343,6 +349,7 @@ paths:
           description: Historical review, with deterministic current-snapshot comparison.
           headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } , Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
           content: { application/json: { schema: { $ref: '#/components/schemas/Review' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ReviewNotFound' }
@@ -375,6 +382,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/ReviewNotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
         '409': { $ref: '#/components/responses/IdempotencyConflict' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '415': { $ref: '#/components/responses/UnsupportedMediaType' }
@@ -412,49 +420,59 @@ components:
     BadRequest:
       description: Malformed path/query/header/body, unknown field, duplicate ID, or invariant violation.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { error: { code: invalid_request, message: Request does not satisfy the API contract., request_id: req-demo-001 } } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/InvalidRequestError' }, example: { error: { code: invalid_request, message: Request does not satisfy the API contract., request_id: req-demo-001 } } } }
     Unauthorized:
       description: Missing, malformed, expired, revoked, or invalid browser/machine credentials.
-      headers: { WWW-Authenticate: { description: Bearer authentication is required for machine requests., schema: { type: string } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { WWW-Authenticate: { description: 'Only bearer-capable machine requests receive this deterministic challenge; cookie-session 401 responses omit it.', schema: { type: string, enum: ['Bearer realm="portfolio-machine"'] } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/UnauthorizedError' } } }
     Forbidden:
       description: Valid identity lacks the required permission, portfolio binding fails, or cookie CSRF/origin validation fails.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ForbiddenError' } } }
     MethodNotAllowed:
       description: Known canonical path with an unsupported method.
-      headers: { Allow: { description: Canonical methods for this path., schema: { type: string } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Allow: { description: Exact canonical methods for this path, emitted only after authentication and authorization., schema: { type: string, minLength: 3, maxLength: 64 } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
     PortfolioNotFound:
       description: Portfolio does not exist; cross-portfolio existence is not disclosed.
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } } }
     SnapshotNotFound:
       description: Snapshot does not exist or is not owned by this portfolio.
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } } }
     HoldingOrSnapshotNotFound:
       description: Holding, snapshot, or portfolio association does not exist.
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } } }
     PortfolioSnapshotOrTargetNotFound:
       description: Portfolio, exact snapshot, or explicitly named review target does not exist in this portfolio.
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } } }
     ReviewNotFound:
       description: Review does not exist or is not owned by this portfolio.
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } } }
     IdempotencyConflict:
       description: Key was used with a different request fingerprint, or the immutable operation conflicts with an existing record.
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/IdempotencyConflictError' } } }
     PayloadTooLarge:
       description: Request exceeds the 256 KiB review or feedback body limit.
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/PayloadTooLargeError' } } }
     UnsupportedMediaType:
       description: Content-Type is not exactly application/json (parameters permitted).
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/UnsupportedMediaTypeError' } } }
     IncompleteReview:
       description: Evidence is missing, unavailable, stale beyond policy, invalid, or the snapshot cannot support a recommendation; no fabricated recommendation is accepted.
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/IncompleteReviewError' } } }
     InternalError:
       description: Safe generic server failure; details are available only in redacted server logs by request ID.
-      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/InternalErrorResponse' } } }
   schemas:
     PortfolioId:
       type: string
@@ -483,23 +501,35 @@ components:
       pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$'
     ReviewStatus:
       type: string
-      enum: [complete, incomplete, outdated]
+      enum: [complete, incomplete]
     Recommendation:
       type: string
       enum: [hold, review, trim_candidate, exit_candidate, no_recommendation]
     ReviewScope:
+      oneOf:
+        - $ref: '#/components/schemas/PortfolioReviewScope'
+        - $ref: '#/components/schemas/HoldingReviewScope'
+      description: >-
+        Explicit branches prevent portfolio scopes from carrying targets and
+        require non-empty unique target arrays for holding scopes. The server
+        additionally enforces exact 1:1 holding/instrument correspondence and
+        membership in the requested snapshot.
+    PortfolioReviewScope:
       type: object
       additionalProperties: false
       required: [type, holding_ids, instrument_ids]
       properties:
-        type: { type: string, enum: [portfolio, holding] }
-        holding_ids: { type: array, minItems: 0, maxItems: 100, uniqueItems: true, items: { $ref: '#/components/schemas/HoldingId' } }
-        instrument_ids: { type: array, minItems: 0, maxItems: 100, uniqueItems: true, items: { $ref: '#/components/schemas/InstrumentId' } }
-      description: >-
-        portfolio requires both arrays empty; holding requires at least one
-        holding and exactly the corresponding explicit instrument set. The
-        server rejects duplicates, empty holding scope, supersets and mismatched
-        snapshot membership.
+        type: { type: string, enum: [portfolio] }
+        holding_ids: { type: array, minItems: 0, maxItems: 0, items: { $ref: '#/components/schemas/HoldingId' } }
+        instrument_ids: { type: array, minItems: 0, maxItems: 0, items: { $ref: '#/components/schemas/InstrumentId' } }
+    HoldingReviewScope:
+      type: object
+      additionalProperties: false
+      required: [type, holding_ids, instrument_ids]
+      properties:
+        type: { type: string, enum: [holding] }
+        holding_ids: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { $ref: '#/components/schemas/HoldingId' } }
+        instrument_ids: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { $ref: '#/components/schemas/InstrumentId' } }
     DecimalString:
       type: string
       minLength: 1
@@ -508,10 +538,11 @@ components:
       description: Canonical base-10 decimal string; never a JSON number or SQLite REAL.
     ReviewSnapshot:
       oneOf:
-        - { $ref: '#/components/schemas/ReviewSnapshotAvailable' }
-        - { $ref: '#/components/schemas/ReviewSnapshotUnavailable' }
+        - { $ref: '#/components/schemas/ReviewSnapshotComplete' }
+        - { $ref: '#/components/schemas/ReviewSnapshotIncomplete' }
+        - { $ref: '#/components/schemas/ReviewSnapshotNoSnapshot' }
       description: No snapshot is represented explicitly; it has no fabricated identity or values.
-    ReviewSnapshotAvailable:
+    ReviewSnapshotComplete:
       type: object
       additionalProperties: false
       required: [portfolio_id, snapshot_id, calculation_version, state, created_at, as_of, complete, missing_dependencies, stale_dependencies, invalid_dependencies, holdings]
@@ -519,15 +550,31 @@ components:
         portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
         snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
         calculation_version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
-        state: { type: string, enum: [complete, incomplete] }
+        state: { type: string, enum: [complete] }
         created_at: { type: string, format: date-time }
         as_of: { type: string, format: date-time }
-        complete: { type: boolean }
+        complete: { type: boolean, enum: [true] }
         missing_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
         stale_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
         invalid_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
         holdings: { type: array, maxItems: 10000, items: { $ref: '#/components/schemas/ReviewHoldingContext' } }
-    ReviewSnapshotUnavailable:
+    ReviewSnapshotIncomplete:
+      type: object
+      additionalProperties: false
+      required: [portfolio_id, snapshot_id, calculation_version, state, created_at, as_of, complete, missing_dependencies, stale_dependencies, invalid_dependencies, holdings]
+      properties:
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
+        calculation_version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        state: { type: string, enum: [incomplete] }
+        created_at: { type: string, format: date-time }
+        as_of: { type: string, format: date-time }
+        complete: { type: boolean, enum: [false] }
+        missing_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        stale_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        invalid_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        holdings: { type: array, maxItems: 10000, items: { $ref: '#/components/schemas/ReviewHoldingContext' } }
+    ReviewSnapshotNoSnapshot:
       type: object
       additionalProperties: false
       required: [portfolio_id, state, complete, missing_dependencies, stale_dependencies, invalid_dependencies, holdings]
@@ -850,6 +897,16 @@ components:
         runtime: { type: string, enum: [hermes-environment] }
       description: Non-secret local-AI provenance only; no token, endpoint, prompt or credential is accepted.
     ReviewSubmission:
+      oneOf:
+        - $ref: '#/components/schemas/CompleteReviewSubmission'
+        - $ref: '#/components/schemas/IncompleteReviewSubmission'
+      description: >-
+        The server verifies the exact snapshot and calculation version, target
+        membership and evidence references. If data or evidence is unknown,
+        stale beyond policy, missing or invalid, status must be incomplete and
+        recommendation must be no_recommendation; otherwise the request is
+        rejected with incomplete_review.
+    ReviewSubmissionCommon:
       type: object
       additionalProperties: false
       required: [snapshot_id, calculation_version, scope, status, recommendation, rationale, risks, counterarguments, conditions, metrics, sourced_facts, model_opinion, evidence, model, generated_at]
@@ -869,12 +926,29 @@ components:
         evidence: { type: array, maxItems: 64, items: { $ref: '#/components/schemas/ReviewEvidence' } }
         model: { $ref: '#/components/schemas/ModelProvenance' }
         generated_at: { type: string, format: date-time }
-      description: >-
-        The server verifies the exact snapshot and calculation version, target
-        membership and evidence references. If data or evidence is unknown,
-        stale beyond policy, missing or invalid, status must be incomplete and
-        recommendation must be no_recommendation; otherwise the request is
-        rejected with incomplete_review.
+    CompleteReviewSubmission:
+      allOf:
+        - $ref: '#/components/schemas/ReviewSubmissionCommon'
+        - type: object
+          properties:
+            status: { type: string, enum: [complete] }
+            recommendation: { type: string, enum: [hold, review, trim_candidate, exit_candidate] }
+            evidence: { type: array, minItems: 1, maxItems: 64, items: { $ref: '#/components/schemas/CurrentAvailableEvidence' } }
+            sourced_facts: { type: array, minItems: 1, maxItems: 32, items: { $ref: '#/components/schemas/SourcedFact' } }
+    IncompleteReviewSubmission:
+      allOf:
+        - $ref: '#/components/schemas/ReviewSubmissionCommon'
+        - type: object
+          properties:
+            status: { type: string, enum: [incomplete] }
+            recommendation: { type: string, enum: [no_recommendation] }
+    CurrentAvailableEvidence:
+      allOf:
+        - $ref: '#/components/schemas/ReviewEvidence'
+        - type: object
+          properties:
+            availability: { type: string, enum: [available] }
+            freshness: { type: string, enum: [current] }
     Review:
       type: object
       additionalProperties: false
@@ -901,14 +975,41 @@ components:
         submitted_by: { $ref: '#/components/schemas/PrincipalAttribution' }
         lifecycle: { $ref: '#/components/schemas/ReviewLifecycle' }
     ReviewLifecycle:
+      oneOf:
+        - $ref: '#/components/schemas/ReviewLifecycleNoCurrent'
+        - $ref: '#/components/schemas/ReviewLifecycleCurrent'
+        - $ref: '#/components/schemas/ReviewLifecycleOutdated'
+      description: >-
+        Normatively, outdated is false iff current_snapshot_id is null or
+        equals the review snapshot_id, and true iff a non-null current snapshot
+        differs. JSON Schema cannot compare IDs, so the server enforces the
+        equality branch at runtime.
+    ReviewLifecycleNoCurrent:
       type: object
       additionalProperties: false
       required: [historical_status, current_snapshot_id, outdated]
       properties:
         historical_status: { type: string, enum: [complete, incomplete] }
-        current_snapshot_id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$', nullable: true }
-        outdated: { type: boolean }
-      description: Outdated is true exactly when current_snapshot_id is a non-null snapshot different from the review snapshot_id; null means the portfolio currently has no snapshot and historical content remains unchanged.
+        current_snapshot_id: { type: string, nullable: true, minLength: 1, maxLength: 0 }
+        outdated: { type: boolean, enum: [false] }
+    ReviewLifecycleCurrent:
+      type: object
+      additionalProperties: false
+      required: [historical_status, current_snapshot_id, outdated]
+      properties:
+        historical_status: { type: string, enum: [complete, incomplete] }
+        current_snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
+        outdated: { type: boolean, enum: [false] }
+      description: current_snapshot_id equals the review snapshot_id.
+    ReviewLifecycleOutdated:
+      type: object
+      additionalProperties: false
+      required: [historical_status, current_snapshot_id, outdated]
+      properties:
+        historical_status: { type: string, enum: [complete, incomplete] }
+        current_snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
+        outdated: { type: boolean, enum: [true] }
+      description: current_snapshot_id differs from the review snapshot_id.
     PrincipalAttribution:
       type: object
       additionalProperties: false
@@ -918,12 +1019,23 @@ components:
         principal_type: { type: string, enum: [browser_user, machine] }
         permissions: { type: array, minItems: 1, maxItems: 2, uniqueItems: true, items: { type: string, enum: [portfolio:read, reviews:write] } }
     ReviewPage:
+      oneOf:
+        - $ref: '#/components/schemas/ReviewPageFinal'
+        - $ref: '#/components/schemas/ReviewPageMore'
+    ReviewPageFinal:
       type: object
       additionalProperties: false
       required: [items, has_more]
       properties:
         items: { type: array, maxItems: 50, items: { $ref: '#/components/schemas/Review' } }
-        has_more: { type: boolean }
+        has_more: { type: boolean, enum: [false] }
+    ReviewPageMore:
+      type: object
+      additionalProperties: false
+      required: [items, has_more, next_cursor]
+      properties:
+        items: { type: array, maxItems: 50, items: { $ref: '#/components/schemas/Review' } }
+        has_more: { type: boolean, enum: [true] }
         next_cursor: { type: string, minLength: 16, maxLength: 512, pattern: '^[A-Za-z0-9_-]+$' }
     FeedbackSubmission:
       type: object
@@ -931,8 +1043,12 @@ components:
       required: [decision]
       properties:
         decision: { type: string, enum: [agree, disagree, defer, request_another_review] }
-        note: { type: string, minLength: 1, maxLength: 2000 }
-      description: Human event only; note is plain escaped text and cannot modify the review or create a trade.
+        note: { type: string, minLength: 1, maxLength: 2000, nullable: true }
+      description: >-
+        Human event only. The note may be omitted or JSON null; both
+        canonicalize to null before fingerprinting and the response uses
+        note:null. A present string is plain escaped text and cannot modify a
+        review or create a trade.
     ReviewFeedback:
       type: object
       additionalProperties: false
@@ -946,6 +1062,18 @@ components:
         occurred_at: { type: string, format: date-time }
         submitted_by: { $ref: '#/components/schemas/PrincipalAttribution' }
     ErrorResponse:
+      oneOf:
+        - $ref: '#/components/schemas/InvalidRequestError'
+        - $ref: '#/components/schemas/UnauthorizedError'
+        - $ref: '#/components/schemas/ForbiddenError'
+        - $ref: '#/components/schemas/NotFoundError'
+        - $ref: '#/components/schemas/MethodNotAllowedError'
+        - $ref: '#/components/schemas/IdempotencyConflictError'
+        - $ref: '#/components/schemas/PayloadTooLargeError'
+        - $ref: '#/components/schemas/UnsupportedMediaTypeError'
+        - $ref: '#/components/schemas/IncompleteReviewError'
+        - $ref: '#/components/schemas/InternalErrorResponse'
+    ErrorEnvelope:
       type: object
       additionalProperties: false
       required: [error]
@@ -955,6 +1083,78 @@ components:
           additionalProperties: false
           required: [code, message, request_id]
           properties:
-            code: { type: string, minLength: 1, maxLength: 64 }
+            code:
+              type: string
+              enum: [unauthorized, forbidden, not_found, invalid_request, method_not_allowed, idempotency_conflict, payload_too_large, unsupported_media_type, incomplete_review, internal_error]
             message: { type: string, minLength: 1, maxLength: 256 }
             request_id: { type: string, minLength: 1, maxLength: 128 }
+    InvalidRequestError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodeInvalidRequest'
+    ErrorCodeInvalidRequest:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [invalid_request] } } } }
+    UnauthorizedError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodeUnauthorized'
+    ErrorCodeUnauthorized:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [unauthorized] } } } }
+    ForbiddenError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodeForbidden'
+    ErrorCodeForbidden:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [forbidden] } } } }
+    NotFoundError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodeNotFound'
+    ErrorCodeNotFound:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [not_found] } } } }
+    MethodNotAllowedError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodeMethodNotAllowed'
+    ErrorCodeMethodNotAllowed:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [method_not_allowed] } } } }
+    IdempotencyConflictError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodeIdempotencyConflict'
+    ErrorCodeIdempotencyConflict:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [idempotency_conflict] } } } }
+    PayloadTooLargeError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodePayloadTooLarge'
+    ErrorCodePayloadTooLarge:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [payload_too_large] } } } }
+    UnsupportedMediaTypeError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodeUnsupportedMediaType'
+    ErrorCodeUnsupportedMediaType:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [unsupported_media_type] } } } }
+    IncompleteReviewError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodeIncompleteReview'
+    ErrorCodeIncompleteReview:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [incomplete_review] } } } }
+    InternalErrorResponse:
+      allOf:
+        - $ref: '#/components/schemas/ErrorEnvelope'
+        - $ref: '#/components/schemas/ErrorCodeInternal'
+    ErrorCodeInternal:
+      type: object
+      properties: { error: { type: object, properties: { code: { type: string, enum: [internal_error] } } } }

@@ -1,245 +1,211 @@
 # Phase D scoped review API contract
 
-Status: implementation contract for Phase D; no runtime routes, migrations, machine credentials, Hermes configuration, UI, or database writes are introduced by this change.
-
-This record and `api/openapi.yaml` are one contract. The canonical resource namespace is `/api/v1/portfolios/{portfolioId}/...`; the older unscoped paths in the planning note are superseded by this portfolio-scoped form. All identifiers in this record are synthetic examples.
+Status: implementation contract only. This change modifies no handlers, migrations, UI, credentials, deployment, or database. `api/openapi.yaml` and this record are one contract; the portfolio-scoped namespace is `/api/v1/portfolios/{portfolioId}`.
 
 ## 1. Boundary and non-goals
 
-The portfolio application owns the ledger, immutable valuation snapshots, review storage, authentication boundary, and read model. Hermes remains the existing external environment and uses the configured local AI Server model by default. The portfolio container does not embed an agent runtime.
+Phase D exposes immutable snapshot/context reads, machine-submitted advisory reviews, review reads, and browser-only append-only feedback. The machine principal cannot mutate holdings, lots, instruments, quotes, FX, theses, snapshots, accounts, browser sessions, credentials, or trades. Feedback never edits a review and never records a trade. There is no Hermes management endpoint and the application does not embed an agent runtime.
 
-Hermes may:
+All private JSON success and error responses carry exactly these security headers: `Cache-Control: no-store`, `Vary: Cookie`, and `X-Content-Type-Options: nosniff`. Review and feedback writes accept only UTF-8 JSON, reject unknown fields, duplicate keys, trailing values, raw HTML, and bodies larger than 256 KiB. All strings are bounded by the OpenAPI schemas and rendered as escaped text.
 
-- read one explicitly authorized portfolio's immutable snapshot and safe holding/instrument review context;
-- submit an advisory review tied to one exact snapshot and calculation version; and
-- read the resulting review.
+The canonical next migration is exactly `008_scoped_reviews.sql`. Migrations `001_initial.sql` through `007_thesis.sql` already exist, including `004_fx_observation_constraints.sql`; this contract does not add that migration.
 
-Hermes may not edit portfolios, lots, holdings, instruments, quotes, FX, snapshots, theses, accounts, browser sessions, credentials, or trades. There are no trading or brokerage endpoints. Human feedback is a browser-only append-only event and never modifies a review or records a trade.
+## 2. Identity, authentication, and authorization
 
-Every Phase D response is JSON except where an existing endpoint already defines another media type. Private responses set `Cache-Control: no-store`, `Vary: Cookie`, and `X-Content-Type-Options: nosniff`. JSON uses `application/json`; request bodies are UTF-8 JSON and reject unknown fields, duplicate object keys, trailing values, raw HTML, and bodies over 256 KiB for review/feedback writes. Text is returned as escaped JSON strings and is rendered as text, never as HTML.
+There are two credential classes:
 
-## 2. Identities, permissions, and authentication
+- Browser: the existing HttpOnly, Secure-in-production, SameSite=Strict `portfolio_session` cookie and its in-memory CSRF token. The cookie contains a random short-lived session identifier; it is revocable on logout.
+- Machine: one fixed, explicitly configured Hermes principal with an opaque bearer secret held only in the Hermes environment/secret manager. The secret is never logged, returned, put in a URL/frontend asset/browser store, or persisted in SQLite. The configured principal is bound to one portfolio and may have only `portfolio:read` and, for POST review, `reviews:write`.
 
-There are two independent identity classes:
+A stable logical browser principal is persisted separately from sessions:
 
-1. Browser user: the existing single-user `portfolio_session` HttpOnly, Secure-in-production, SameSite=Strict cookie. It is short-lived, in-memory, revocable on logout, and paired with an in-memory CSRF token. It is used for UI reads and human feedback.
-2. Machine principal: a fixed, explicitly configured Hermes principal using an opaque bearer credential. The credential is injected only into the Hermes environment/secret manager. It is never returned, logged, persisted to SQLite, included in a URL, placed in frontend assets, or stored in browser storage.
+- `browser_principals.id` is the non-secret single-user ID `local-owner`, seeded once.
+- Every valid browser session resolves to this ID; it is not the random session ID and is never a credential.
+- It is used only for feedback attribution and feedback idempotency. No password, cookie, CSRF token, session secret, or credential hash is stored in this relation.
 
-The machine principal has these least-privilege permissions:
+For every Phase D route the server first performs only generic request-target and canonical-encoding safety checks (including rejection of malformed percent encoding, path traversal, duplicate/unknown query keys, and invalid identifiers). It then authenticates before revealing whether a protected resource path or method exists:
 
-- `portfolio:read`: latest/exact snapshots, safe holding review context, and review reads for the bound portfolio;
-- `reviews:write`: advisory review submission only. This permission never implies any ledger, thesis, snapshot, account, browser, or trade write.
+1. Reject missing, malformed, expired, revoked, or invalid credentials with uniform `401` / `unauthorized`.
+2. Reject a request carrying both cookie and bearer credentials with the same `401` / `unauthorized`; never choose one credential class.
+3. For a valid identity, check the portfolio binding and permission; failure is `403` / `forbidden`.
+4. Only after authentication and authorization resolve ownership and the resource. A missing or foreign resource is `404` / `not_found`; a known route with a wrong method is `405` / `method_not_allowed` with its exact `Allow` value.
+5. Browser unsafe writes require same-origin `Origin`/`Referer` validation and a constant-time CSRF-token match. Feedback is browser-only: bearer-only feedback is rejected, and machine authentication never weakens any cookie write or CSRF rule.
 
-The machine credential is configured as one active token plus an optional next token during rotation. The application accepts the active token and, only during a bounded operator-controlled overlap, the next token. Rotation replaces the active secret, and revocation removes it and invalidates it immediately. Secrets are compared in constant time after a fixed-shape decode/normalization path; malformed and unknown tokens take the same unauthorized outcome and do not disclose principal existence. Authentication failures do not reveal whether a portfolio, token, or permission exists.
+The bearer-capable unauthorized response deterministically offers `WWW-Authenticate: Bearer realm="portfolio-machine"`; a cookie-session unauthorized response omits that challenge so browser users are not instructed to use bearer credentials. Both-credential rejection remains a runtime negative-test obligation because OpenAPI security alternatives cannot express mutual exclusion.
 
-Startup fails closed if the machine principal is enabled without a secret, if a secret is shorter than 32 random bytes, if the principal has permissions outside the declared allow-list, if a portfolio binding is absent/invalid, or if the existing browser auth configuration is invalid. No insecure default, generated fallback, plaintext SQLite secret, or unauthenticated machine mode is allowed.
+Required negative tests cover both credentials, missing/invalid bearer and cookie values, malformed and encoded paths, unknown and duplicate query/header/body fields, wrong methods and exact `Allow`, wrong portfolio, missing permission, bearer-only feedback, bad Origin/Referer, bad CSRF token, and machine attempts to reach every prohibited mutation path.
 
-Auth precedence is deterministic:
+## 3. Canonical endpoints and response matrix
 
-1. Validate canonical method/path and request syntax enough to reject malformed requests.
-2. Authenticate exactly one credential class. A valid browser cookie is used only for session operations; a bearer request is used only for machine operations. Supplying both is rejected with `401 unauthorized` rather than allowing credential confusion.
-3. Check the principal's portfolio binding and permission. A valid identity without permission is `403 forbidden`.
-4. Check resource ownership and cross-resource invariants. Missing or foreign resources return the documented not-found envelope without cross-portfolio existence disclosure.
-5. For browser unsafe writes, validate same-origin Origin/Referer and `X-CSRF-Token` in constant time. Bearer requests do not bypass this rule for cookie-authenticated routes; feedback has no bearer alternative.
-
-Missing, malformed, expired, revoked, or invalid credentials return `401` with `unauthorized`. A valid identity lacking permission, a wrong portfolio binding, invalid CSRF token, or rejected browser origin returns `403` with `forbidden`. A known path with a wrong method returns `405`, an `Allow` header, and JSON. An unknown or malformed API path returns `404 not_found` as JSON, without SPA redirects. A malformed body, query, path identifier, duplicate ID, or violated association returns `400 invalid_request`. The server does not use `404` to replace a missing credential.
-
-The existing browser session login remains same-origin protected. Machine bearer authentication is not accepted by browser routes and never changes cookie-session CSRF semantics.
-
-## 3. Canonical endpoints
-
-All endpoints below are under `/api/v1/portfolios/{portfolioId}`. `portfolioId`, `snapshotId`, `holdingId`, `instrumentId`, and `reviewId` are 1–128 characters matching `^[A-Za-z0-9][A-Za-z0-9._~-]*$`.
-
-| Method and path | Auth | Purpose |
+| Method and path | Authentication | Permission/purpose |
 |---|---|---|
-| `GET /snapshots/latest` | browser session or machine `portfolio:read` | Read latest committed snapshot, including explicit `no_snapshot`. |
-| `GET /snapshots/{snapshotId}` | browser session or machine `portfolio:read` | Read one exact historical snapshot. Never reattaches to a newer snapshot. |
-| `GET /holdings/{holdingId}/review-context?snapshot_id=...` | browser session or machine `portfolio:read` | Read only the selected lot, instrument identity, and safe snapshot valuation fields. |
-| `GET /reviews` | browser session or machine `portfolio:read` | List reviews with optional holding/status filters. |
-| `POST /reviews` | machine `portfolio:read` + `reviews:write` | Commit one immutable advisory review. |
-| `GET /reviews/{reviewId}` | browser session or machine `portfolio:read` | Read one review and its current-snapshot lifecycle comparison. |
-| `POST /reviews/{reviewId}/feedback` | browser session + CSRF | Append human agree/disagree/defer/request-another-review event. |
+| `GET /snapshots/latest` | browser or machine | Exact portfolio latest snapshot, including explicit `no_snapshot`. |
+| `GET /snapshots/{snapshotId}` | browser or machine | Exact historical immutable snapshot. |
+| `GET /holdings/{holdingId}/review-context?snapshot_id=...` | browser or machine | One snapshot-owned holding/instrument context. |
+| `GET /reviews` | browser or machine | List reviews with `holding_id`, `status`, optional `outdated`, `limit`, and signed `cursor`. |
+| `POST /reviews` | machine with both permissions | Append one immutable review; atomic audit/Activity/idempotency. |
+| `GET /reviews/{reviewId}` | browser or machine | Historical review plus lifecycle comparison. |
+| `POST /reviews/{reviewId}/feedback` | browser cookie + CSRF only | Append attributable feedback; atomic audit/Activity/idempotency. |
 
-The OpenAPI file is authoritative for every field, bound, enum, example, security alternative, and response reference. Query keys are canonical and singular: `snapshot_id`, `holding_id`, `status`, `limit`, and `cursor`. Unknown or duplicate query keys are `400`. `limit` defaults to 20, is 1–50 for reviews, and the opaque signed cursor is 16–512 URL-safe characters. Review pages are ordered by `created_at DESC, review_id DESC`; cursors encode and authenticate that key plus portfolio ID and are unusable for another portfolio. A final page omits `next_cursor`; a non-final page includes it and `has_more: true`.
+All Phase D operations declare applicable `400 invalid_request`, `401 unauthorized`, `403 forbidden`, `404 not_found`, `405 method_not_allowed`, `409 idempotency_conflict` where a write key is present, `413 payload_too_large` for writes, `415 unsupported_media_type` for writes, `422 incomplete_review` for review submission completeness, and `500 internal_error` responses in OpenAPI. Every declared error has the three private headers. `405` always includes exact canonical `Allow`, and it is emitted only after authentication/authorization. POST review `201` creation and same-key replay include the canonical `Location: /api/v1/portfolios/{portfolioId}/reviews/{reviewId}`. Error codes are closed per response; there is no arbitrary `ErrorResponse.error.code` string.
 
-`POST /reviews` requires `Content-Type: application/json`, a 16–128 character `Idempotency-Key`, and a body no larger than 256 KiB. `POST /feedback` has the same idempotency-key and body limit plus the CSRF header. `Location` on a successful review submission is the canonical review URL. The exact errors are the shared `ErrorResponse` envelope:
+`GET /reviews` uses singular canonical query keys. Unknown/duplicate keys and malformed cursors are `400`. `status` filters only stored `complete|incomplete`; `outdated` is a separate optional boolean lifecycle filter and does not enter the stored status enum. The cursor is signed over portfolio ID, the complete filter set (`holding_id`, `status`, `outdated`), `submitted_at`, and the database `id`. A cursor for another portfolio or filter set is rejected. Wire order is `submitted_at DESC, review_id DESC`; wire `review_id` is the database `advisory_reviews.id`, and the supporting index is `(portfolio_id, submitted_at DESC, id DESC)`.
 
-```json
-{"error":{"code":"invalid_request","message":"Request does not satisfy the API contract.","request_id":"req-demo-001"}}
+A final page is `{items, has_more:false}` and omits `next_cursor`. A non-final page is `{items, has_more:true, next_cursor}` with a 16–512 character signed cursor. These are explicit OpenAPI `oneOf` branches.
+
+## 4. Snapshot, scope, and review semantics
+
+Snapshots are immutable and joined by `(portfolio_id, snapshot_id)`. `calculation_version`, decimal values, and timestamps are copied exactly; decimal values are canonical base-10 strings, never JSON numbers or SQLite `REAL`.
+
+Snapshot response branches are explicit: `state: complete` requires `complete:true`; `state: incomplete` requires `complete:false`; `state: no_snapshot` requires `complete:false`, empty holdings, and no fabricated snapshot ID, calculation version, timestamps, or values.
+
+`ReviewScope` is a closed `oneOf`:
+
+- `type: portfolio` requires both `holding_ids: []` and `instrument_ids: []`.
+- `type: holding` requires non-empty, unique arrays for both fields. The server additionally requires exact 1:1 positional/corresponding membership in the requested snapshot and rejects duplicates, empty scope, supersets, foreign targets, and holding/instrument mismatches.
+
+A complete review branch requires `status: complete`, a recommendation other than `no_recommendation`, at least one `available`/`current` HTTPS evidence item, and at least one sourced fact referencing submitted evidence. An incomplete review requires `status: incomplete` and `recommendation: no_recommendation`; it may describe stale, unknown, unavailable, blocked, invalid, or contradictory evidence. The server still enforces freshness policy, target membership, contradiction checks, calculation version, and every sourced-fact evidence reference. An invalid completeness claim is `422 incomplete_review`.
+
+Evidence URLs are HTTPS-only and bounded to 2,048 characters. Evidence, facts, rationale, risks, counterarguments, and conditions are untrusted text and never instructions, policy, permission, or tool commands. Model provenance contains provider/model/version and the fixed `hermes-environment` runtime only; it contains no prompt, endpoint, token, session, or account secret.
+
+## 5. Exact idempotency, immutability, and feedback note
+
+Review and feedback writes are append-only and atomic with their owned rows, idempotency row, audit event, and safe Activity row. The transaction rolls back completely on any validation, foreign-key, uniqueness, audit, or Activity failure.
+
+The server canonicalizes the validated JSON before fingerprinting. Omitted optional values and explicit JSON `null` have the same canonical representation where the field is nullable. For feedback, omitted `note` and `"note": null` both canonicalize to `note:null`; the response always contains `note:null` in that case; a present string is 1–2,000 characters. The proposed SQLite `review_feedback.note` column is nullable `TEXT`.
+
+Same key plus the same canonical request returns the original immutable result with original `201` semantics and no duplicate rows. Same key plus a different request returns `409 idempotency_conflict`. Idempotency records use `retain_until`, not `expires_at`: the key remains reserved while the row exists for at least seven years. Purge may remove a key only with its related retained review/feedback, audit, Activity, and dependent records under the approved retention process. Replay guarantees end only after that purge; key reuse is then allowed. Review content, targets, evidence, status, and snapshot association have no update/delete route and are protected by append-only triggers.
+
+## 6. SQLite persistence proposal for `008_scoped_reviews.sql`
+
+The migration runs transactionally after `PRAGMA foreign_keys=ON`. It first creates/validates required parent unique keys, then creates child tables, then creates the rebuilt Activity table and triggers. Existing tables are `portfolios`, `instruments`, `lots`, `snapshots`, `audit_events`, and `activity_events`; no hypothetical production legacy bridge is needed. Fresh-database ordering is explicit: existing parents, normalized snapshot/target parents, audit association, then child rows and rebuilt Activity.
+
+Before the normalized tables, migration 008 creates the SQLite parent key required by the composite snapshot foreign key: `CREATE UNIQUE INDEX snapshots_portfolio_id_id ON snapshots(portfolio_id, id)`. This is valid against the existing `snapshots(id PRIMARY KEY, portfolio_id, ...)` table and makes the parent-column order explicit.
+
+The following definitions are the structural contract (types/checks may be expanded only without weakening these keys):
+
+```sql
+CREATE TABLE browser_principals (
+  id TEXT PRIMARY KEY CHECK (id = 'local-owner'),
+  kind TEXT NOT NULL CHECK (kind = 'single_user'),
+  created_at TEXT NOT NULL
+);
+INSERT INTO browser_principals(id, kind, created_at) VALUES ('local-owner','single_user',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+
+CREATE TABLE machine_principals (
+  id TEXT PRIMARY KEY, portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
+  permission_portfolio_read INTEGER NOT NULL CHECK(permission_portfolio_read IN (0,1)),
+  permission_reviews_write INTEGER NOT NULL CHECK(permission_reviews_write IN (0,1)),
+  active INTEGER NOT NULL CHECK(active IN (0,1)), created_at TEXT NOT NULL,
+  UNIQUE(id, portfolio_id)
+);
+
+CREATE TABLE review_snapshots (
+  portfolio_id TEXT NOT NULL REFERENCES portfolios(id), snapshot_id TEXT NOT NULL,
+  calculation_version TEXT NOT NULL, PRIMARY KEY(portfolio_id, snapshot_id),
+  UNIQUE(portfolio_id, snapshot_id, calculation_version),
+  FOREIGN KEY(portfolio_id, snapshot_id) REFERENCES snapshots(portfolio_id, id)
+);
+
+CREATE TABLE snapshot_holdings (
+  portfolio_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, holding_id TEXT NOT NULL, instrument_id TEXT NOT NULL,
+  PRIMARY KEY(portfolio_id, snapshot_id, holding_id),
+  UNIQUE(portfolio_id, snapshot_id, holding_id, instrument_id),
+  FOREIGN KEY(portfolio_id, snapshot_id) REFERENCES review_snapshots(portfolio_id, snapshot_id),
+  FOREIGN KEY(instrument_id) REFERENCES instruments(id)
+);
+
+CREATE TABLE advisory_reviews (
+  id TEXT PRIMARY KEY, portfolio_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, calculation_version TEXT NOT NULL,
+  scope_type TEXT NOT NULL CHECK(scope_type IN ('portfolio','holding')),
+  historical_status TEXT NOT NULL CHECK(historical_status IN ('complete','incomplete')),
+  recommendation TEXT NOT NULL CHECK(recommendation IN ('hold','review','trim_candidate','exit_candidate','no_recommendation')),
+  submitted_at TEXT NOT NULL, retain_until TEXT NOT NULL,
+  UNIQUE(id, portfolio_id), UNIQUE(portfolio_id, id), UNIQUE(id, portfolio_id, snapshot_id),
+  FOREIGN KEY(portfolio_id, snapshot_id, calculation_version) REFERENCES review_snapshots(portfolio_id, snapshot_id, calculation_version)
+);
+
+CREATE TABLE review_targets (
+  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, holding_id TEXT NOT NULL, instrument_id TEXT NOT NULL,
+  PRIMARY KEY(review_id, holding_id), UNIQUE(review_id, portfolio_id, snapshot_id, holding_id, instrument_id),
+  FOREIGN KEY(review_id, portfolio_id, snapshot_id) REFERENCES advisory_reviews(id, portfolio_id, snapshot_id),
+  FOREIGN KEY(portfolio_id, snapshot_id, holding_id, instrument_id) REFERENCES snapshot_holdings(portfolio_id, snapshot_id, holding_id, instrument_id)
+);
+
+CREATE TABLE review_evidence (
+  review_id TEXT NOT NULL, evidence_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+  PRIMARY KEY(review_id, evidence_id), UNIQUE(review_id, ordinal),
+  FOREIGN KEY(review_id) REFERENCES advisory_reviews(id)
+);
+CREATE TABLE review_sourced_facts (
+  review_id TEXT NOT NULL, fact_ordinal INTEGER NOT NULL, statement TEXT NOT NULL,
+  PRIMARY KEY(review_id, fact_ordinal), UNIQUE(review_id, fact_ordinal),
+  FOREIGN KEY(review_id) REFERENCES advisory_reviews(id)
+);
+CREATE TABLE review_fact_evidence (
+  review_id TEXT NOT NULL, fact_ordinal INTEGER NOT NULL, evidence_id TEXT NOT NULL,
+  PRIMARY KEY(review_id, fact_ordinal, evidence_id),
+  FOREIGN KEY(review_id, fact_ordinal) REFERENCES review_sourced_facts(review_id, fact_ordinal),
+  FOREIGN KEY(review_id, evidence_id) REFERENCES review_evidence(review_id, evidence_id)
+);
+
+CREATE TABLE review_idempotency (
+  principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+  request_fingerprint TEXT NOT NULL, review_id TEXT NOT NULL, created_at TEXT NOT NULL, retain_until TEXT NOT NULL,
+  PRIMARY KEY(principal_id, portfolio_id, idempotency_key), UNIQUE(portfolio_id, review_id),
+  FOREIGN KEY(principal_id, portfolio_id) REFERENCES machine_principals(id, portfolio_id),
+  FOREIGN KEY(review_id, portfolio_id) REFERENCES advisory_reviews(id, portfolio_id)
+);
+
+CREATE TABLE review_feedback (
+  id TEXT PRIMARY KEY, browser_principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, review_id TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK(decision IN ('agree','disagree','defer','request_another_review')),
+  note TEXT NULL, occurred_at TEXT NOT NULL, retain_until TEXT NOT NULL,
+  UNIQUE(id, browser_principal_id, portfolio_id, review_id),
+  FOREIGN KEY(browser_principal_id) REFERENCES browser_principals(id),
+  FOREIGN KEY(portfolio_id, review_id) REFERENCES advisory_reviews(portfolio_id, id)
+);
+CREATE TABLE feedback_idempotency (
+  browser_principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, review_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+  request_fingerprint TEXT NOT NULL, feedback_id TEXT NOT NULL, created_at TEXT NOT NULL, retain_until TEXT NOT NULL,
+  PRIMARY KEY(browser_principal_id, portfolio_id, review_id, idempotency_key),
+  FOREIGN KEY(browser_principal_id) REFERENCES browser_principals(id),
+  FOREIGN KEY(portfolio_id, review_id) REFERENCES advisory_reviews(portfolio_id, id),
+  FOREIGN KEY(feedback_id, browser_principal_id, portfolio_id, review_id) REFERENCES review_feedback(id, browser_principal_id, portfolio_id, review_id)
+);
+
+CREATE TABLE audit_event_portfolios (
+  audit_event_id TEXT NOT NULL, portfolio_id TEXT NOT NULL,
+  PRIMARY KEY(audit_event_id, portfolio_id),
+  FOREIGN KEY(audit_event_id) REFERENCES audit_events(id),
+  FOREIGN KEY(portfolio_id) REFERENCES portfolios(id)
+);
 ```
 
-`message` is safe, bounded, and never contains credentials, bearer values, account secrets, raw submitted text, SQL, or stack traces. `request_id` is safe to return and is the only correlation identifier exposed to the caller.
+The migration rebuilds fresh `activity_events` with the existing safe columns and replaces its source relation with:
 
-## 4. Snapshot and context semantics
+```sql
+source_audit_event_id TEXT NOT NULL,
+portfolio_id TEXT NOT NULL,
+FOREIGN KEY(source_audit_event_id, portfolio_id)
+  REFERENCES audit_event_portfolios(audit_event_id, portfolio_id),
+UNIQUE(source_audit_event_id, portfolio_id)
+```
 
-A snapshot is immutable and identified by `(portfolio_id, snapshot_id)`. It includes `calculation_version`, `created_at`, `as_of`, explicit dependency quality arrays, and holding rows. Decimal quantities and monetary values are canonical base-10 strings, never JSON numbers, SQLite `REAL`, or binary floating point. `fresh`, `stale`, `missing`, `future`, and `invalid` are distinct freshness states.
+The audit event and `audit_event_portfolios` row are inserted in the same transaction as the scoped Activity row, so an Activity event cannot claim another portfolio's audit event. Existing generic activity rows are copied into the rebuilt table with their own association; this is a fresh-database ordering contract, not a request for a hypothetical legacy bridge.
 
-`GET /snapshots/latest` returns either:
+All review/feedback, idempotency, audit, and Activity rows have `retain_until` at least seven years after their owning event. Foreign-key parent keys are written in the exact order shown. The proposed migration also adds append-only triggers for advisory reviews, targets, evidence, facts, feedback, audit association, and Activity.
 
-- `state: complete` or `state: incomplete` with an exact identity, calculation version, timestamps, dependency arrays, and holdings; or
-- `state: no_snapshot`, `complete: false`, empty holdings, and no fabricated snapshot identity, dates, values, or recommendation.
+## 7. Lifecycle and implementation obligations
 
-A context response is tied to the requested exact snapshot. It includes the portfolio, lot, instrument, symbol/name, original currency, decimal valuation fields, quote source/time, and freshness state. It excludes account names, broker credentials, account numbers, theses, raw audit payloads, browser/session/CSRF values, and all unrelated portfolios. A holding and instrument must be joined through the same portfolio-owned snapshot row; a client cannot submit an arbitrary instrument ID that merely exists elsewhere.
+`ReviewLifecycle` is an OpenAPI branch: `current_snapshot_id:null` requires `outdated:false`; a non-null current snapshot has an explicit current (`outdated:false`) or outdated (`outdated:true`) branch. Normatively `outdated=false` iff IDs match and `outdated=true` iff they differ; JSON Schema cannot compare two IDs, so the handler/store must enforce this equality.
 
-## 5. Review model and trust boundary
+The exact historical snapshot, calculation version, targets, evidence, facts, recommendation, and status never change when a newer snapshot arrives. A missing current snapshot reports `current_snapshot_id:null` and `outdated:false` without rewriting history.
 
-`ReviewScope` is explicit and closed:
+The contract intentionally leaves all runtime pipeline work unchecked: migration implementation, domain/store transaction tests, machine auth, HTTP handlers, frontend, Hermes adapter, and dated-snapshot end-to-end tests. This record defines their required behavior only.
 
-- `type: portfolio` requires both `holding_ids` and `instrument_ids` to be empty;
-- `type: holding` requires one or more unique holding IDs and exactly the corresponding unique instrument IDs from the requested snapshot.
+## 8. Required verification cases
 
-The server rejects duplicate IDs, empty holding scope, supersets, missing targets, foreign targets, and holding/instrument mismatches. Every submitted ID is checked against the same portfolio and exact snapshot. Removed holdings remain historically referential because the snapshot and target rows are retained; a later ledger change never changes the historical join.
+A contract verifier must prove that OpenAPI rejects: portfolio scope with targets; holding scope with empty arrays or duplicate arrays; complete review with empty evidence/facts; complete review with `no_recommendation`; incomplete review with a recommendation; unavailable/stale evidence in a complete review; contradictory snapshot `state`/`complete`; contradictory lifecycle ID/null/`outdated`; final page with `next_cursor`; and non-final page without a cursor.
 
-The submission separates:
-
-- deterministic `metrics`, each copied from a snapshot/calculation with a decimal-string value, timestamp, source, and `deterministic: true`;
-- `sourced_facts`, each plain-text statement linked to one or more submitted evidence IDs;
-- model `rationale`, `risks`, `counterarguments`, `conditions`, and `model_opinion`; and
-- `evidence`, with HTTPS URL, title, optional publication date, access date, availability (`available`, `unavailable`, `blocked`, `invalid`), freshness (`current`, `stale`, `unknown`), and bounded excerpt.
-
-Evidence URLs are limited to reviewed HTTPS URLs and 2,048 characters. Evidence/title/excerpt/fact/rationale strings are untrusted data. The API accepts no raw HTML and the UI escapes all content. Text inside an evidence source is never an instruction, policy, permission, or tool command. Hermes must treat it as data and cannot use it to expand scope or invoke writes.
-
-A review may be `complete` only if every required target is present in the exact snapshot, all referenced evidence IDs exist, and evidence needed for the recommendation is available and within the configured freshness policy. Missing, unavailable, blocked, invalid, stale-beyond-policy, unknown, or contradictory evidence requires `status: incomplete` and `recommendation: no_recommendation`; a request claiming a complete recommendation under those conditions is rejected with `422 incomplete_review`. The server never fills gaps with guesses, current data, synthetic facts, or a newer snapshot.
-
-`ModelProvenance` records only provider, model, version, and `runtime: hermes-environment`. It never records a secret, endpoint, token, prompt, browser session, or provider account identifier. `generated_at` is supplied as provenance and `submitted_at` is assigned by the server.
-
-## 6. Idempotency and lifecycle
-
-Review idempotency is unique within `(machine_principal_id, portfolio_id, idempotency_key)`. The server canonicalizes the validated JSON representation and computes a request fingerprint that includes portfolio, exact snapshot, calculation version, scope, and content. It stores the fingerprint before returning success.
-
-- First valid request: one transaction inserts the review, targets, evidence, evidence links, idempotency record, audit event, and safe Activity event, then commits and returns `201`.
-- Same key and same fingerprint: return the original immutable review with the original `201` semantics; do not insert another review or event.
-- Same key and different fingerprint: return `409 idempotency_conflict`.
-- Any validation, foreign-key, uniqueness, or audit insertion failure: roll back the entire transaction and return an error; no partial review is visible.
-
-Feedback idempotency is unique within `(browser_principal_id, portfolio_id, review_id, idempotency_key)` with the same fingerprint/replay/conflict rules. Feedback rows are append-only; a user can submit later decisions, and each event remains attributable. Retention is seven years for review, evidence, target, feedback, idempotency, audit, and Activity records unless an approved privacy/redaction process removes only permitted free-text fields. Idempotency records are retained for the same period, so replay behavior remains deterministic.
-
-A review is immutable after commit: no update, delete, target replacement, evidence replacement, status rewrite, or snapshot reassociation endpoint exists. On read, `lifecycle.outdated` is true exactly when a non-null `current_snapshot_id` differs from `review.snapshot_id`; `current_snapshot_id` is the latest current snapshot when one exists and is `null` when no current snapshot exists. The stored `historical_status`, original snapshot ID, calculation version, content, evidence, and targets never change. A missing current snapshot leaves the historical review intact and reports `outdated: false` with `current_snapshot_id: null` rather than silently changing the review.
-
-## 7. Authorization and cross-resource invariants
-
-The implementation must enforce these invariants inside the domain/store transaction, not only in HTTP handlers:
-
-- every portfolio ID in URL, snapshot, target, review, evidence link, feedback, idempotency, audit, and Activity rows is the same portfolio;
-- `snapshot_id` belongs to that portfolio and its calculation version equals the submitted value;
-- each holding target belongs to the exact snapshot and its instrument target is the snapshot's instrument;
-- portfolio-scope reviews have no target rows; holding-scope reviews have a non-empty complete target set;
-- no machine principal can call thesis PUT, import, refresh, transaction, quote/FX write, snapshot write, account, browser, or trading code paths;
-- historical references remain readable after a holding is removed from a later snapshot; and
-- duplicate or superset target IDs are deterministic `400` errors, never silently deduplicated.
-
-The portfolio container exposes no Hermes management endpoint. The Hermes adapter owns its bearer secret and submits only the declared review payload. No public tunnel, permissive CORS setting, browser token, or frontend environment variable is used.
-
-## 8. Persistence proposal: canonical migration 004
-
-The app is new and the existing deployed schema has no Phase D production data. The next migration is exactly `004_scoped_reviews.sql`; no compatibility bridge or hypothetical legacy migration is added. It runs transactionally after foreign keys are enabled. All timestamps are UTC RFC3339 text; all decimal values are `TEXT`.
-
-Existing `portfolios`, `instruments`, `lots`, `snapshots`, `activity_events`, and `audit_events` are reused. The existing `snapshots` identity is `(id, portfolio_id)` logically; migration 004 adds a unique composite index if needed so child foreign keys cannot join a snapshot to another portfolio. The proposed new normalized entities are:
-
-`machine_principals`
-
-- `id TEXT PRIMARY KEY` (opaque internal principal ID)
-- `name TEXT NOT NULL UNIQUE`, `portfolio_id TEXT NOT NULL REFERENCES portfolios(id)`
-- `permission_portfolio_read INTEGER NOT NULL CHECK (permission_portfolio_read IN (0,1))`
-- `permission_reviews_write INTEGER NOT NULL CHECK (permission_reviews_write IN (0,1))`
-- `active INTEGER NOT NULL CHECK (active IN (0,1))`
-- `created_at TEXT NOT NULL`, `rotated_at TEXT`, `revoked_at TEXT`
-
-No token column exists. Secret material is environment/secret-manager state only. A deployment may keep a non-secret `credential_generation` for audit, but not a hash that creates a second secret store.
-
-`review_snapshots` (a historical immutable association, not a copy of snapshot payload)
-
-- `portfolio_id TEXT NOT NULL REFERENCES portfolios(id)`
-- `snapshot_id TEXT NOT NULL`, `calculation_version TEXT NOT NULL`
-- primary key `(portfolio_id, snapshot_id)`
-- foreign key `(portfolio_id, snapshot_id) REFERENCES snapshots(portfolio_id, id)`
-
-`snapshot_holdings` (the concrete immutable target index used to make review foreign keys possible)
-
-- `portfolio_id TEXT NOT NULL`, `snapshot_id TEXT NOT NULL`, `holding_id TEXT NOT NULL`, `instrument_id TEXT NOT NULL`
-- primary key `(portfolio_id, snapshot_id, holding_id)`
-- unique `(portfolio_id, snapshot_id, holding_id, instrument_id)`
-- foreign key `(portfolio_id, snapshot_id) REFERENCES review_snapshots(portfolio_id, snapshot_id)`
-- foreign key `instrument_id REFERENCES instruments(id)`
-- populated by the snapshot writer in the same transaction as the immutable snapshot association; no later update/delete is allowed
-
-`advisory_reviews`
-
-- `id TEXT PRIMARY KEY`, `portfolio_id TEXT NOT NULL`, `snapshot_id TEXT NOT NULL`, `calculation_version TEXT NOT NULL`
-- `scope_type TEXT NOT NULL CHECK (scope_type IN ('portfolio','holding'))`
-- `historical_status TEXT NOT NULL CHECK (historical_status IN ('complete','incomplete'))`
-- `recommendation TEXT NOT NULL CHECK (recommendation IN ('hold','review','trim_candidate','exit_candidate','no_recommendation'))`
-- `rationale TEXT NOT NULL`, `model_opinion TEXT NOT NULL`
-- `model_provider TEXT NOT NULL`, `model_name TEXT NOT NULL`, `model_version TEXT NOT NULL`, `model_runtime TEXT NOT NULL CHECK (model_runtime='hermes-environment')`
-- `generated_at TEXT NOT NULL`, `submitted_at TEXT NOT NULL`
-- foreign key `(portfolio_id, snapshot_id) REFERENCES review_snapshots(portfolio_id, snapshot_id)`
-- unique `(portfolio_id, id)` and a trigger rejecting UPDATE/DELETE
-
-`review_risks`, `review_counterarguments`, and `review_conditions`
-
-- `(review_id, ordinal)` primary key, `review_id TEXT NOT NULL REFERENCES advisory_reviews(id)`, `text TEXT NOT NULL`, `ordinal INTEGER NOT NULL CHECK (ordinal >= 0)`
-- unique `(review_id, text, ordinal)` is unnecessary; input order is preserved by ordinal and duplicates are valid text only where explicitly allowed by the domain.
-
-`review_targets`
-
-- `review_id TEXT NOT NULL REFERENCES advisory_reviews(id)`, `portfolio_id TEXT NOT NULL`, `snapshot_id TEXT NOT NULL`
-- `holding_id TEXT NOT NULL`, `instrument_id TEXT NOT NULL`, primary key `(review_id, holding_id)`
-- foreign key `(portfolio_id, snapshot_id, holding_id, instrument_id) REFERENCES snapshot_holdings(portfolio_id, snapshot_id, holding_id, instrument_id)`
-- unique `(review_id, instrument_id, holding_id)`
-
-`review_metrics`
-
-- `review_id TEXT NOT NULL REFERENCES advisory_reviews(id)`, `ordinal INTEGER NOT NULL`, `name TEXT NOT NULL`, `value TEXT NOT NULL`, `unit TEXT NOT NULL`, `as_of TEXT NOT NULL`, `source TEXT NOT NULL CHECK (source IN ('snapshot','calculation','submitted'))`, `deterministic INTEGER NOT NULL CHECK (deterministic=1)`
-- primary key `(review_id, ordinal)`
-
-`review_evidence`
-
-- `id TEXT PRIMARY KEY`, `review_id TEXT NOT NULL REFERENCES advisory_reviews(id)`, `ordinal INTEGER NOT NULL`
-- `url TEXT NOT NULL`, `title TEXT NOT NULL`, `published_at TEXT`, `accessed_at TEXT NOT NULL`
-- `availability TEXT NOT NULL CHECK (availability IN ('available','unavailable','blocked','invalid'))`
-- `freshness TEXT NOT NULL CHECK (freshness IN ('current','stale','unknown'))`, `excerpt TEXT NOT NULL`
-- unique `(review_id, id)`, primary key/unique `(review_id, ordinal)` for deterministic output
-
-`review_sourced_facts`, `review_fact_evidence`
-
-- fact table: `(review_id, ordinal)` primary key, `statement TEXT NOT NULL`
-- link table: `(review_id, fact_ordinal, evidence_id)` primary key, both foreign keys scoped to the same review; evidence IDs must resolve within that review
-
-`review_idempotency`
-
-- `principal_id TEXT NOT NULL REFERENCES machine_principals(id)`, `portfolio_id TEXT NOT NULL REFERENCES portfolios(id)`, `idempotency_key TEXT NOT NULL`, `request_fingerprint TEXT NOT NULL`, `review_id TEXT NOT NULL REFERENCES advisory_reviews(id)`, `created_at TEXT NOT NULL`, `expires_at TEXT NOT NULL`
-- primary key `(principal_id, portfolio_id, idempotency_key)` and unique `(portfolio_id, review_id)`
-
-`review_feedback`
-
-- `id TEXT PRIMARY KEY`, `portfolio_id TEXT NOT NULL REFERENCES portfolios(id)`, `review_id TEXT NOT NULL REFERENCES advisory_reviews(id)`
-- `decision TEXT NOT NULL CHECK (decision IN ('agree','disagree','defer','request_another_review'))`, `note TEXT NOT NULL`, `principal_id TEXT NOT NULL`, `occurred_at TEXT NOT NULL`
-- foreign key `(portfolio_id, review_id) REFERENCES advisory_reviews(portfolio_id, id)`
-- append-only trigger rejecting UPDATE/DELETE
-
-`feedback_idempotency`
-
-- `principal_id TEXT NOT NULL`, `portfolio_id TEXT NOT NULL`, `review_id TEXT NOT NULL`, `idempotency_key TEXT NOT NULL`, `request_fingerprint TEXT NOT NULL`, `feedback_id TEXT NOT NULL REFERENCES review_feedback(id)`, `created_at TEXT NOT NULL`, `expires_at TEXT NOT NULL`
-- primary key `(principal_id, portfolio_id, review_id, idempotency_key)`
-
-Indexes:
-
-- reviews by `(portfolio_id, submitted_at DESC, id DESC)`;
-- reviews by `(portfolio_id, snapshot_id, submitted_at DESC)`;
-- targets by `(portfolio_id, holding_id, submitted_at DESC)` through the review join;
-- evidence and fact links by `(review_id, ordinal)`;
-- feedback by `(portfolio_id, review_id, occurred_at DESC, id DESC)`;
-- idempotency primary keys and review foreign keys as above.
-
-The migration must enable and verify SQLite foreign keys, create all tables/indexes/triggers in one migration transaction, and fail without partial schema. Review submit commits all review-owned rows, idempotency, audit, and Activity attribution in one transaction. The audit payload contains safe action/entity/principal category and IDs only; it redacts bearer values, cookies, CSRF tokens, request bodies, evidence excerpts, account data, and provider secrets. Activity exposes only the safe summary (`hermes review submitted` or `human review feedback recorded`) and never raw model/evidence text.
-
-## 9. Ordered implementation pipeline
-
-1. Persistence/domain vertical slice: implement migration 004, composite ownership checks, immutable review/evidence/target/feedback tables, decimal-string validation, and transaction tests. Depends on current snapshot/store/activity schemas. Produces the storage/domain contract and rollback/idempotency behavior.
-2. Machine auth vertical slice: add environment-only principal configuration, constant-time bearer validation, permission/portfolio binding, startup fail-closed checks, rotation/revocation, and negative tests proving no thesis/holding/trade path is reachable. Depends on existing browser auth. Produces the machine identity contract.
-3. HTTP review API vertical slice: implement exact snapshot/context/review/feedback routes, strict JSON parsing, body/query/cursor bounds, error envelopes, no-store/Vary/nosniff headers, CSRF boundaries, and `httptest` isolation/idempotency tests. Depends on slices 1–2. Produces the OpenAPI operation contract.
-4. Frontend Reviews UI/feedback slice: add typed client models, escaped review/evidence rendering, current/outdated/incomplete states, paginated review queue, and CSRF-protected human feedback. Depends on slice 3. Produces browser behavior without machine credentials.
-5. Hermes adapter slice: integrate the existing Hermes environment only after its documented capabilities are inspected; fetch one portfolio-scoped exact snapshot/context, preserve untrusted evidence boundaries, and submit with a machine bearer secret held outside the portfolio container. Depends on slices 1–3 and does not add an agent runtime to the application.
-6. Real dated-snapshot end-to-end verification: use a real dated immutable snapshot in an authorized isolated environment, submit once, replay the same key, read the review through the API/UI, create a newer snapshot, verify historical values remain unchanged and `outdated: true`, and prove a machine identity cannot edit holdings/theses or trade. Depends on all prior slices and explicit approval for the test environment; no real provider credentials or trades.
-
-Each slice must use focused failing tests before implementation, then the relevant Go/frontend regression suite. This contract task intentionally leaves all pipeline tasks unchecked and introduces no runtime behavior.
+A fresh in-memory SQLite probe with foreign keys enabled must reject: a review target from another portfolio/snapshot; a target whose instrument differs from the snapshot holding; a fact linked to evidence from another review; review idempotency with a principal/portfolio mismatch; feedback with a browser-principal/portfolio/review mismatch; feedback idempotency with a different feedback owner; and an Activity row whose audit association has another portfolio. It must accept the corresponding same-owner rows.
