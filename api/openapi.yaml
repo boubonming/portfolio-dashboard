@@ -1,8 +1,12 @@
 openapi: 3.0.3
 info:
   title: Portfolio Dashboard API
-  version: 1.0.0
-  description: Authenticated portfolio-scoped holdings, immutable valuation snapshots, and editable investment theses.
+  version: 1.1.0-phase-d-contract
+  description: >-
+    Authenticated portfolio-scoped holdings, immutable valuation snapshots,
+    editable investment theses, and the Phase D scoped advisory review contract.
+    Phase D endpoints are contract-only in this change; runtime handlers will
+    follow the implementation pipeline in docs/review-api-contract.md.
 servers:
   - url: /
 paths:
@@ -193,13 +197,370 @@ paths:
         '200': { description: Oldest-first immutable revisions, content: { application/json: { schema: { $ref: '#/components/schemas/ThesisHistory' } } } }
         '401': { description: Authentication is required }
         '404': { description: 'Portfolio, holding, or thesis not found' }
+  /api/v1/portfolios/{portfolioId}/snapshots/latest:
+    get:
+      summary: Read the latest immutable review snapshot
+      description: >-
+        Returns the latest committed snapshot for this portfolio, including
+        explicit incomplete data states. The response is private and must
+        include no-store, Vary: Cookie, and X-Content-Type-Options: nosniff.
+        Machine callers need portfolio:read; browser callers use the existing
+        authenticated session.
+      operationId: getLatestReviewSnapshot
+      security:
+        - sessionCookie: []
+        - machineBearer: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+      responses:
+        '200':
+          description: Latest immutable snapshot, or an explicit no_snapshot state.
+          headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReviewSnapshot' }, example: { portfolio_id: demo-portfolio, snapshot_id: snap-2026-01-15, calculation_version: valuation-v3, state: complete, created_at: '2026-01-15T08:00:00Z', as_of: '2026-01-15T07:55:00Z', complete: true, missing_dependencies: [], stale_dependencies: [], invalid_dependencies: [], holdings: [{ portfolio_id: demo-portfolio, snapshot_id: snap-2026-01-15, holding_id: lot-demo-001, instrument_id: instrument-demo-001, symbol: DEMO, name: Synthetic Example Corp, quantity: '12.5000', currency: USD, unit_cost: '10.00', cost_basis: '125.0000', latest_price: '11.00', latest_value: '137.5000', reporting_value: '185.6250', quote_source: synthetic-feed, market_at: '2026-01-15T07:55:00Z', freshness_state: fresh, freshness_age_seconds: '300' }] } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/PortfolioNotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/portfolios/{portfolioId}/snapshots/{snapshotId}:
+    get:
+      summary: Read one exact immutable review snapshot
+      description: A historical snapshot remains addressable after newer snapshots exist.
+      operationId: getReviewSnapshot
+      security:
+        - sessionCookie: []
+        - machineBearer: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: snapshotId, in: path, required: true, schema: { $ref: '#/components/schemas/SnapshotId' } }
+      responses:
+        '200':
+          description: Exact immutable snapshot.
+          headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReviewSnapshot' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/SnapshotNotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/portfolios/{portfolioId}/holdings/{holdingId}/review-context:
+    get:
+      summary: Read one holding and instrument review context
+      description: >-
+        Returns only the selected portfolio lot, its instrument identity and
+        safe valuation fields from the requested immutable snapshot. Account
+        names, broker credentials, account numbers, theses and other
+        portfolios are excluded.
+      operationId: getReviewHoldingContext
+      security:
+        - sessionCookie: []
+        - machineBearer: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: holdingId, in: path, required: true, schema: { $ref: '#/components/schemas/HoldingId' } }
+        - { name: snapshot_id, in: query, required: true, schema: { $ref: '#/components/schemas/SnapshotId' } }
+      responses:
+        '200':
+          description: Portfolio-isolated review context.
+          headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReviewHoldingContext' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/HoldingOrSnapshotNotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/portfolios/{portfolioId}/reviews:
+    get:
+      summary: List immutable advisory reviews
+      operationId: listAdvisoryReviews
+      security:
+        - sessionCookie: []
+        - machineBearer: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+        - { name: cursor, in: query, required: false, description: Opaque signed keyset cursor bound to this portfolio, schema: { type: string, minLength: 16, maxLength: 512, pattern: '^[A-Za-z0-9_-]+$' } }
+        - { name: holding_id, in: query, required: false, schema: { $ref: '#/components/schemas/HoldingId' } }
+        - { name: status, in: query, required: false, schema: { $ref: '#/components/schemas/ReviewStatus' } }
+      responses:
+        '200':
+          description: Reviews in deterministic created_at descending, id descending order.
+          headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReviewPage' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/PortfolioNotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      summary: Submit one immutable advisory review
+      description: >-
+        Machine-only advisory write. Requires reviews:write and portfolio:read,
+        an idempotency key, one exact snapshot and an explicit scope. It never
+        changes holdings, theses, snapshots, prices, accounts or trades.
+      operationId: submitAdvisoryReview
+      security:
+        - machineBearer: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewSubmission' }
+            example: { snapshot_id: snap-2026-01-15, calculation_version: valuation-v3, scope: { type: holding, holding_ids: [lot-demo-001], instrument_ids: [instrument-demo-001] }, status: complete, recommendation: hold, rationale: Synthetic evidence supports continued observation., risks: [Synthetic risk text.], counterarguments: [Synthetic counterargument.], conditions: [Review after the next dated snapshot.], metrics: [{ name: reporting_value, value: '185.6250', unit: reporting_currency, as_of: '2026-01-15T07:55:00Z', source: snapshot, deterministic: true }], sourced_facts: [{ statement: Synthetic sourced fact., evidence_ids: [evidence-demo-001] }], model_opinion: Synthetic model opinion., evidence: [{ evidence_id: evidence-demo-001, url: 'https://example.test/source/demo-001', title: Synthetic source, published_at: '2026-01-14T00:00:00Z', accessed_at: '2026-01-15T08:00:00Z', availability: available, freshness: current, excerpt: Synthetic excerpt treated as untrusted data. }], model: { provider: local-ai-server, model: synthetic-review-model, version: '2026-01', runtime: hermes-environment }, generated_at: '2026-01-15T08:00:00Z' }
+      responses:
+        '201':
+          description: Review committed atomically and is immutable.
+          headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }, Location: { description: Canonical review URL, schema: { type: string, maxLength: 512 } } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Review' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/PortfolioSnapshotOrTargetNotFound' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/IncompleteReview' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/portfolios/{portfolioId}/reviews/{reviewId}:
+    get:
+      summary: Read one immutable advisory review
+      operationId: getAdvisoryReview
+      security:
+        - sessionCookie: []
+        - machineBearer: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: reviewId, in: path, required: true, schema: { $ref: '#/components/schemas/ReviewId' } }
+      responses:
+        '200':
+          description: Historical review, with deterministic current-snapshot comparison.
+          headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } , Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Review' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ReviewNotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/portfolios/{portfolioId}/reviews/{reviewId}/feedback:
+    post:
+      summary: Record attributable human feedback
+      description: >-
+        Browser-session-only append-only feedback. Feedback is an event and
+        never edits review content or records a trade. Requires same-origin
+        cookie-session CSRF protection.
+      operationId: recordReviewFeedback
+      security:
+        - sessionCookie: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: reviewId, in: path, required: true, schema: { $ref: '#/components/schemas/ReviewId' } }
+        - { name: X-CSRF-Token, in: header, required: true, schema: { type: string, minLength: 32, maxLength: 512 } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/FeedbackSubmission' }, example: { decision: agree, note: Synthetic human note. } } }
+      responses:
+        '201':
+          description: Append-only feedback event.
+          headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReviewFeedback' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ReviewNotFound' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '500': { $ref: '#/components/responses/InternalError' }
 components:
   securitySchemes:
     sessionCookie:
       type: apiKey
       in: cookie
       name: portfolio_session
+      description: >-
+        Existing HttpOnly SameSite=Strict browser session. Unsafe requests
+        require X-CSRF-Token plus same-origin Origin/Referer validation.
+    machineBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: >-
+        Opaque machine credential for the fixed Hermes principal. The token is
+        injected into the Hermes environment, compared in constant time, and
+        never stored in SQLite, returned, logged, placed in a URL, or exposed
+        to browser code. The principal is configured with portfolio:read and,
+        only for review submission, reviews:write.
+  headers:
+    NoStore:
+      description: Private responses are never stored by shared or browser caches.
+      schema: { type: string, enum: [no-store] }
+    PrivateVary:
+      description: Session-authenticated responses vary by cookie.
+      schema: { type: string, enum: [Cookie] }
+    NoSniff:
+      description: Prevent MIME sniffing on private API responses.
+      schema: { type: string, enum: [nosniff] }
+  responses:
+    BadRequest:
+      description: Malformed path/query/header/body, unknown field, duplicate ID, or invariant violation.
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' }, example: { error: { code: invalid_request, message: Request does not satisfy the API contract., request_id: req-demo-001 } } } }
+    Unauthorized:
+      description: Missing, malformed, expired, revoked, or invalid browser/machine credentials.
+      headers: { WWW-Authenticate: { description: Bearer authentication is required for machine requests., schema: { type: string } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Forbidden:
+      description: Valid identity lacks the required permission, portfolio binding fails, or cookie CSRF/origin validation fails.
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    MethodNotAllowed:
+      description: Known canonical path with an unsupported method.
+      headers: { Allow: { description: Canonical methods for this path., schema: { type: string } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    PortfolioNotFound:
+      description: Portfolio does not exist; cross-portfolio existence is not disclosed.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    SnapshotNotFound:
+      description: Snapshot does not exist or is not owned by this portfolio.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    HoldingOrSnapshotNotFound:
+      description: Holding, snapshot, or portfolio association does not exist.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    PortfolioSnapshotOrTargetNotFound:
+      description: Portfolio, exact snapshot, or explicitly named review target does not exist in this portfolio.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    ReviewNotFound:
+      description: Review does not exist or is not owned by this portfolio.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    IdempotencyConflict:
+      description: Key was used with a different request fingerprint, or the immutable operation conflicts with an existing record.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    PayloadTooLarge:
+      description: Request exceeds the 256 KiB review or feedback body limit.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    UnsupportedMediaType:
+      description: Content-Type is not exactly application/json (parameters permitted).
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    IncompleteReview:
+      description: Evidence is missing, unavailable, stale beyond policy, invalid, or the snapshot cannot support a recommendation; no fabricated recommendation is accepted.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    InternalError:
+      description: Safe generic server failure; details are available only in redacted server logs by request ID.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   schemas:
+    PortfolioId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$'
+    SnapshotId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$'
+    HoldingId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$'
+    InstrumentId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$'
+    ReviewId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$'
+    ReviewStatus:
+      type: string
+      enum: [complete, incomplete, outdated]
+    Recommendation:
+      type: string
+      enum: [hold, review, trim_candidate, exit_candidate, no_recommendation]
+    ReviewScope:
+      type: object
+      additionalProperties: false
+      required: [type, holding_ids, instrument_ids]
+      properties:
+        type: { type: string, enum: [portfolio, holding] }
+        holding_ids: { type: array, minItems: 0, maxItems: 100, uniqueItems: true, items: { $ref: '#/components/schemas/HoldingId' } }
+        instrument_ids: { type: array, minItems: 0, maxItems: 100, uniqueItems: true, items: { $ref: '#/components/schemas/InstrumentId' } }
+      description: >-
+        portfolio requires both arrays empty; holding requires at least one
+        holding and exactly the corresponding explicit instrument set. The
+        server rejects duplicates, empty holding scope, supersets and mismatched
+        snapshot membership.
+    DecimalString:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^-?(?:0|[1-9][0-9]*)(?:[.][0-9]+)?$'
+      description: Canonical base-10 decimal string; never a JSON number or SQLite REAL.
+    ReviewSnapshot:
+      oneOf:
+        - { $ref: '#/components/schemas/ReviewSnapshotAvailable' }
+        - { $ref: '#/components/schemas/ReviewSnapshotUnavailable' }
+      description: No snapshot is represented explicitly; it has no fabricated identity or values.
+    ReviewSnapshotAvailable:
+      type: object
+      additionalProperties: false
+      required: [portfolio_id, snapshot_id, calculation_version, state, created_at, as_of, complete, missing_dependencies, stale_dependencies, invalid_dependencies, holdings]
+      properties:
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
+        calculation_version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        state: { type: string, enum: [complete, incomplete] }
+        created_at: { type: string, format: date-time }
+        as_of: { type: string, format: date-time }
+        complete: { type: boolean }
+        missing_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        stale_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        invalid_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        holdings: { type: array, maxItems: 10000, items: { $ref: '#/components/schemas/ReviewHoldingContext' } }
+    ReviewSnapshotUnavailable:
+      type: object
+      additionalProperties: false
+      required: [portfolio_id, state, complete, missing_dependencies, stale_dependencies, invalid_dependencies, holdings]
+      properties:
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        state: { type: string, enum: [no_snapshot] }
+        complete: { type: boolean, enum: [false] }
+        missing_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        stale_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        invalid_dependencies: { type: array, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        holdings: { type: array, maxItems: 0, items: { type: object } }
+    ReviewHoldingContext:
+      type: object
+      additionalProperties: false
+      required: [portfolio_id, snapshot_id, holding_id, instrument_id, symbol, name, quantity, currency, freshness_state]
+      properties:
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
+        holding_id: { $ref: '#/components/schemas/HoldingId' }
+        instrument_id: { $ref: '#/components/schemas/InstrumentId' }
+        symbol: { type: string, minLength: 1, maxLength: 64 }
+        name: { type: string, minLength: 1, maxLength: 256 }
+        quantity: { $ref: '#/components/schemas/DecimalString' }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        unit_cost: { $ref: '#/components/schemas/DecimalString' }
+        cost_basis: { $ref: '#/components/schemas/DecimalString' }
+        latest_price: { $ref: '#/components/schemas/DecimalString' }
+        latest_value: { $ref: '#/components/schemas/DecimalString' }
+        reporting_value: { $ref: '#/components/schemas/DecimalString' }
+        quote_source: { type: string, minLength: 1, maxLength: 128 }
+        market_at: { type: string, format: date-time }
+        freshness_state: { type: string, enum: [fresh, stale, missing, future, invalid] }
+        freshness_age_seconds: { $ref: '#/components/schemas/DecimalString' }
     LoginRequest:
       type: object
       required: [username, password]
@@ -435,3 +796,165 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/ThesisRevision' } }
+    ReviewMetric:
+      type: object
+      additionalProperties: false
+      required: [name, value, unit, as_of, source, deterministic]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        value: { $ref: '#/components/schemas/DecimalString' }
+        unit: { type: string, minLength: 1, maxLength: 64 }
+        as_of: { type: string, format: date-time }
+        source: { type: string, enum: [snapshot, calculation, submitted] }
+        deterministic: { type: boolean, enum: [true] }
+      description: Deterministic metric copied from the named immutable snapshot or calculation; not model output.
+    ReviewEvidence:
+      type: object
+      additionalProperties: false
+      required: [evidence_id, url, title, accessed_at, availability, freshness, excerpt]
+      properties:
+        evidence_id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        url:
+          type: string
+          format: uri
+          minLength: 1
+          maxLength: 2048
+          pattern: '^https://[A-Za-z0-9][A-Za-z0-9._~-]*(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~:/?#\[\]@!$&''()*+,;=%~-]*)?$'
+        title: { type: string, minLength: 1, maxLength: 512 }
+        published_at: { type: string, format: date-time }
+        accessed_at: { type: string, format: date-time }
+        availability: { type: string, enum: [available, unavailable, blocked, invalid] }
+        freshness: { type: string, enum: [current, stale, unknown] }
+        excerpt: { type: string, minLength: 1, maxLength: 4000 }
+      description: >-
+        URL, title and excerpt are untrusted data. Only HTTPS is accepted;
+        HTML is not accepted and the content never supplies instructions or
+        authority to Hermes. An unavailable, blocked, invalid, stale or
+        unknown evidence item cannot support a complete recommendation.
+    SourcedFact:
+      type: object
+      additionalProperties: false
+      required: [statement, evidence_ids]
+      properties:
+        statement: { type: string, minLength: 1, maxLength: 2000 }
+        evidence_ids: { type: array, minItems: 1, maxItems: 16, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 128 } }
+      description: A plain-text factual statement whose support must resolve to submitted evidence IDs.
+    ModelProvenance:
+      type: object
+      additionalProperties: false
+      required: [provider, model, version, runtime]
+      properties:
+        provider: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        model: { type: string, minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9][A-Za-z0-9._~:/-]*$' }
+        version: { type: string, minLength: 1, maxLength: 128 }
+        runtime: { type: string, enum: [hermes-environment] }
+      description: Non-secret local-AI provenance only; no token, endpoint, prompt or credential is accepted.
+    ReviewSubmission:
+      type: object
+      additionalProperties: false
+      required: [snapshot_id, calculation_version, scope, status, recommendation, rationale, risks, counterarguments, conditions, metrics, sourced_facts, model_opinion, evidence, model, generated_at]
+      properties:
+        snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
+        calculation_version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        scope: { $ref: '#/components/schemas/ReviewScope' }
+        status: { type: string, enum: [complete, incomplete] }
+        recommendation: { $ref: '#/components/schemas/Recommendation' }
+        rationale: { type: string, minLength: 1, maxLength: 8000 }
+        risks: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
+        counterarguments: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
+        conditions: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
+        metrics: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/ReviewMetric' } }
+        sourced_facts: { type: array, maxItems: 32, items: { $ref: '#/components/schemas/SourcedFact' } }
+        model_opinion: { type: string, minLength: 1, maxLength: 8000 }
+        evidence: { type: array, maxItems: 64, items: { $ref: '#/components/schemas/ReviewEvidence' } }
+        model: { $ref: '#/components/schemas/ModelProvenance' }
+        generated_at: { type: string, format: date-time }
+      description: >-
+        The server verifies the exact snapshot and calculation version, target
+        membership and evidence references. If data or evidence is unknown,
+        stale beyond policy, missing or invalid, status must be incomplete and
+        recommendation must be no_recommendation; otherwise the request is
+        rejected with incomplete_review.
+    Review:
+      type: object
+      additionalProperties: false
+      required: [review_id, portfolio_id, snapshot_id, calculation_version, scope, status, recommendation, rationale, risks, counterarguments, conditions, metrics, sourced_facts, model_opinion, evidence, model, generated_at, submitted_at, submitted_by, lifecycle]
+      properties:
+        review_id: { $ref: '#/components/schemas/ReviewId' }
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
+        calculation_version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        scope: { $ref: '#/components/schemas/ReviewScope' }
+        status: { type: string, enum: [complete, incomplete] }
+        recommendation: { $ref: '#/components/schemas/Recommendation' }
+        rationale: { type: string, minLength: 1, maxLength: 8000 }
+        risks: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
+        counterarguments: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
+        conditions: { type: array, maxItems: 32, items: { type: string, minLength: 1, maxLength: 2000 } }
+        metrics: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/ReviewMetric' } }
+        sourced_facts: { type: array, maxItems: 32, items: { $ref: '#/components/schemas/SourcedFact' } }
+        model_opinion: { type: string, minLength: 1, maxLength: 8000 }
+        evidence: { type: array, maxItems: 64, items: { $ref: '#/components/schemas/ReviewEvidence' } }
+        model: { $ref: '#/components/schemas/ModelProvenance' }
+        generated_at: { type: string, format: date-time }
+        submitted_at: { type: string, format: date-time }
+        submitted_by: { $ref: '#/components/schemas/PrincipalAttribution' }
+        lifecycle: { $ref: '#/components/schemas/ReviewLifecycle' }
+    ReviewLifecycle:
+      type: object
+      additionalProperties: false
+      required: [historical_status, current_snapshot_id, outdated]
+      properties:
+        historical_status: { type: string, enum: [complete, incomplete] }
+        current_snapshot_id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$', nullable: true }
+        outdated: { type: boolean }
+      description: Outdated is true exactly when current_snapshot_id is a non-null snapshot different from the review snapshot_id; null means the portfolio currently has no snapshot and historical content remains unchanged.
+    PrincipalAttribution:
+      type: object
+      additionalProperties: false
+      required: [principal_id, principal_type, permissions]
+      properties:
+        principal_id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        principal_type: { type: string, enum: [browser_user, machine] }
+        permissions: { type: array, minItems: 1, maxItems: 2, uniqueItems: true, items: { type: string, enum: [portfolio:read, reviews:write] } }
+    ReviewPage:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      properties:
+        items: { type: array, maxItems: 50, items: { $ref: '#/components/schemas/Review' } }
+        has_more: { type: boolean }
+        next_cursor: { type: string, minLength: 16, maxLength: 512, pattern: '^[A-Za-z0-9_-]+$' }
+    FeedbackSubmission:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [agree, disagree, defer, request_another_review] }
+        note: { type: string, minLength: 1, maxLength: 2000 }
+      description: Human event only; note is plain escaped text and cannot modify the review or create a trade.
+    ReviewFeedback:
+      type: object
+      additionalProperties: false
+      required: [feedback_id, portfolio_id, review_id, decision, note, occurred_at, submitted_by]
+      properties:
+        feedback_id: { type: string, minLength: 1, maxLength: 128 }
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        review_id: { $ref: '#/components/schemas/ReviewId' }
+        decision: { type: string, enum: [agree, disagree, defer, request_another_review] }
+        note: { type: string, nullable: true, maxLength: 2000 }
+        occurred_at: { type: string, format: date-time }
+        submitted_by: { $ref: '#/components/schemas/PrincipalAttribution' }
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, request_id]
+          properties:
+            code: { type: string, minLength: 1, maxLength: 64 }
+            message: { type: string, minLength: 1, maxLength: 256 }
+            request_id: { type: string, minLength: 1, maxLength: 128 }
