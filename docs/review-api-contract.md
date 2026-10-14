@@ -66,425 +66,202 @@ Snapshot response branches are explicit: `state: complete` requires `complete:tr
 
 A complete review branch requires `status: complete`, a recommendation other than `no_recommendation`, at least one `available`/`current` HTTPS evidence item, and at least one sourced fact referencing submitted evidence. An incomplete review requires `status: incomplete` and `recommendation: no_recommendation`; it may describe stale, unknown, unavailable, blocked, invalid, or contradictory evidence. The server still enforces freshness policy, target membership, contradiction checks, calculation version, and every sourced-fact evidence reference. An invalid completeness claim is `422 incomplete_review`.
 
-Evidence URLs are HTTPS-only and bounded to 2,048 characters. The application/store boundary parses each URL with Go `net/url`: `u.IsAbs()` is true, `u.Scheme == "https"`, `u.Hostname()` is non-empty and valid, `u.User == nil`, ports are absent or 1–65535, and the canonical string has no ASCII control/whitespace, is at most 2,048 bytes, and uses the accepted path/query/fragment grammar. The store persists that canonical URL together with its lower-case normalized host and optional port; SQLite checks the bounded canonical prefix, host, port, and control/whitespace exclusions. Every write goes through the validated store/domain transaction; raw SQL is not an API boundary. Positive examples are `https://example.test/source/demo-001` and `https://example.test:8443/a?b=c#d`; `https://`, `https:// example`, userinfo, controls, `http://`, and overlength values are rejected both by the application parser and store checks. Evidence, facts, rationale, risks, counterarguments, and conditions are untrusted text and never instructions, policy, permission, or tool commands. Model provenance contains provider/model/version and the fixed `hermes-environment` runtime only; it contains no prompt, endpoint, token, session, or account secret.
+Evidence URLs are absolute HTTPS URLs with lowercase ASCII DNS labels, no userinfo, explicit port, fragment, whitespace, or controls. A URL is canonicalized at the Go `net/url` store boundary to `url_host` and `url_suffix`; `url_suffix` is empty or begins with `/` or `?`, and the response is exactly `https://` plus host plus suffix. The host is at most 253 bytes and each label is 1–63 bytes. The maximum reconstructed URL is 2,048 bytes. Positive examples are `https://example.test` and `https://example.test/source/demo-001?b=c`; `https://`, whitespace, userinfo, ports including 443/99999, uppercase or non-ASCII hosts, `http://`, fragments, controls, and overlength values are rejected by both boundary and storage checks. Evidence, facts, rationale, risks, counterarguments, and conditions are untrusted text and never instructions, policy, permission, or tool commands. Model provenance contains provider/model/version and the fixed `hermes-environment` runtime only; it contains no prompt, endpoint, token, session, or account secret.
 
 ## 5. Exact idempotency, immutability, and feedback note
 
 Review and feedback writes are append-only and atomic with their owned rows, idempotency row, audit event, and safe Activity row. The transaction rolls back completely on any validation, foreign-key, uniqueness, audit, or Activity failure.
 
-The server canonicalizes the validated JSON before fingerprinting. Omitted optional values and explicit JSON `null` have the same canonical representation where the field is nullable. For feedback, omitted `note` and `"note": null` both canonicalize to `note:null`; the response always contains `note:null` in that case; a present string is 1–2,000 characters. The proposed SQLite `review_feedback.note` column is nullable `TEXT`.
+The server canonicalizes the validated JSON before fingerprinting. Omitted optional values and explicit JSON `null` have the same canonical representation where the field is nullable. For feedback, omitted `note` and `"note": null` both canonicalize to `note:null`; the response always contains `note:null` in that case; a present string is 1–2,000 characters and never empty. The SQLite column is nullable `TEXT` with the same bound.
 
-Same key plus the same canonical request returns the original immutable result with original `201` semantics and no duplicate rows. Same key plus a different request returns `409 idempotency_conflict`. Both idempotency tables have a non-null `retain_until` at least seven years after their operation and remain reserved indefinitely: this current contract has no purge/delete endpoint or background purge, and append-only triggers reject deletion, so keys are never reused. `retain_until` is only the earliest eligibility timestamp for a future separately reviewed and versioned retention migration; it does not authorize deletion now. Any future purge must atomically remove the complete review/feedback graph (including audit association and Activity) and replace or disable the append-only triggers in that new migration, outside Phase D. Replay is therefore always available for the lifetime of this contract. Review content, targets, evidence, status, and snapshot association have no update/delete route and are protected by append-only triggers.
+Same key plus the same canonical request returns the original immutable result with original `201` semantics and no duplicate rows. Same key plus a different request returns `409 idempotency_conflict`. Both idempotency tables have a non-null `retain_until` at least seven years after their operation and remain reserved indefinitely: this current contract has no purge/delete endpoint or background purge, and append-only triggers reject deletion, so keys are never reused. `retain_until` is only the earliest eligibility timestamp for a future separately reviewed and versioned retention migration; it does not authorize deletion now. Any future purge must atomically remove the complete review/feedback graph and replace or disable the append-only triggers in that new migration, outside Phase D. Replay is therefore always available for the lifetime of this contract.
 
-## 6. SQLite persistence proposal for `008_scoped_reviews.sql`
+## 6. Executable `008_scoped_reviews.sql`
 
-The migration runs transactionally after `PRAGMA foreign_keys=ON` and is the only proposed database change. `008_scoped_reviews.sql` first adds nullable `retain_until` to the existing `audit_events` table, creates the normalized parent keys, and then creates the review graph. It rebuilds `activity_events` only after the legacy association backfill described below. The one canonical timestamp representation is UTC text `YYYY-MM-DDTHH:MM:SS.fffffffffZ` (exactly nine fractional digits, `Z`, valid Gregorian date, and ranges 00–23/00–59/00–59). The OpenAPI `CanonicalDateTime` pattern is the same representation, and the application emits/accepts no other date-time form. The exact length/GLOB/date/time predicate is applied to every Phase D timestamp: review generated/submitted/retention, metric `as_of`, evidence `accessed_at` and nullable `published_at`, feedback occurred/retention, both idempotency created/retention, principal creation, and Phase-D audit/Activity retention/occurrence. Legacy generic audit timestamps are not retroactively rewritten. Decimal values are canonical decimal strings and are never stored as `REAL`, `INTEGER` approximations, or JSON numbers.
-
-The normalized tables below are the sole immutable source of truth for a committed `Review` and its same-key replay. No response field may be recovered from `snapshots.payload`, `audit_events.payload`, an unstated JSON blob, or an external store. The parent row stores scalar wire fields; each child table stores one ordered array and its ordinal. `advisory_reviews.retain_until` is the sole retention owner for review targets, text arrays, metrics, evidence, sourced facts/links, and review-submission permission snapshots; `review_feedback.retain_until` is the sole retention owner for feedback permission snapshots and feedback-owned children. Those children have mandatory owner foreign keys and no duplicate retention column. Idempotency, Phase-D audit, scoped audit association, and Activity are separate retained records and keep their own boundary, with executable equality guards to the owning review/feedback. Existing generic audit/Activity rows are not retroactively asserted to have a boundary: their new nullable column remains `NULL` until a future reviewed migration assigns one.
-
-Before the normalized tables, migration 008 creates the SQLite parent keys required by composite foreign keys: `CREATE UNIQUE INDEX snapshots_portfolio_id_id ON snapshots(portfolio_id, id)` and the explicitly ordered unique keys shown below. These are valid against the existing `snapshots(id PRIMARY KEY, portfolio_id, ...)` table and make the parent-column order explicit.
-
-The following definitions are the structural contract (the length bounds and checks are normative; implementations may add stricter checks without weakening them):
+The following is the one authoritative migration. It is extracted verbatim and run with SQLite foreign keys enabled. The standalone script owns `BEGIN IMMEDIATE`, the final migration-record insert, and `COMMIT`; the repository migrator must execute it as the migration body with its outer transaction disabled for this version, or use the same statements inside its transaction without the three transaction-control statements. The temporary assertion table makes every ambiguity an executable abort rather than documentation.
 
 ```sql
+PRAGMA foreign_keys=ON;
+PRAGMA defer_foreign_keys=ON;
+BEGIN IMMEDIATE;
+
+CREATE TEMP TABLE _phase_d_assertion (ok INTEGER NOT NULL CHECK(ok=1));
 ALTER TABLE audit_events ADD COLUMN retain_until TEXT NULL;
-CREATE UNIQUE INDEX snapshots_portfolio_id_id ON snapshots(portfolio_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS snapshots_portfolio_id_id ON snapshots(portfolio_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lots_portfolio_id_id ON lots(portfolio_id,id);
 
 CREATE TABLE browser_principals (
-  id TEXT PRIMARY KEY CHECK (id = 'local-owner'),
-  kind TEXT NOT NULL CHECK (kind = 'single_user'),
-  created_at TEXT NOT NULL CHECK(length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z')
+  id TEXT PRIMARY KEY CHECK(id='local-owner'),
+  kind TEXT NOT NULL CHECK(kind='single_user'),
+  created_at TEXT NOT NULL CHECK(length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(created_at,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(created_at,1,10)))=substr(created_at,1,10) AND substr(created_at,20,1)='.' AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59' AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59')
 );
-INSERT INTO browser_principals(id, kind, created_at) VALUES ('local-owner','single_user',strftime('%Y-%m-%dT%H:%M:%S','now') || '.000000000Z');
+INSERT INTO browser_principals VALUES('local-owner','single_user',strftime('%Y-%m-%dT%H:%M:%S','now')||'.000000000Z');
 
 CREATE TABLE machine_principals (
   id TEXT PRIMARY KEY, portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
-  permission_portfolio_read INTEGER NOT NULL CHECK(permission_portfolio_read IN (0,1)),
-  permission_reviews_write INTEGER NOT NULL CHECK(permission_reviews_write IN (0,1)),
-  active INTEGER NOT NULL CHECK(active IN (0,1)), created_at TEXT NOT NULL CHECK(length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'),
-  UNIQUE(id, portfolio_id)
+  permission_portfolio_read INTEGER NOT NULL CHECK(permission_portfolio_read IN(0,1)),
+  permission_reviews_write INTEGER NOT NULL CHECK(permission_reviews_write IN(0,1)),
+  active INTEGER NOT NULL CHECK(active IN(0,1)), created_at TEXT NOT NULL,
+  UNIQUE(id,portfolio_id),
+  CHECK(length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(created_at,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(created_at,1,10)))=substr(created_at,1,10) AND substr(created_at,20,1)='.' AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59' AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59')
 );
 
 CREATE TABLE review_snapshots (
   portfolio_id TEXT NOT NULL REFERENCES portfolios(id), snapshot_id TEXT NOT NULL,
-  calculation_version TEXT NOT NULL, PRIMARY KEY(portfolio_id, snapshot_id),
-  UNIQUE(portfolio_id, snapshot_id, calculation_version),
-  FOREIGN KEY(portfolio_id, snapshot_id) REFERENCES snapshots(portfolio_id, id)
+  calculation_version TEXT NOT NULL, PRIMARY KEY(portfolio_id,snapshot_id),
+  UNIQUE(portfolio_id,snapshot_id,calculation_version),
+  FOREIGN KEY(portfolio_id,snapshot_id) REFERENCES snapshots(portfolio_id,id)
 );
-
 CREATE TABLE snapshot_holdings (
   portfolio_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, holding_id TEXT NOT NULL, instrument_id TEXT NOT NULL,
-  PRIMARY KEY(portfolio_id, snapshot_id, holding_id),
-  UNIQUE(portfolio_id, snapshot_id, holding_id, instrument_id),
-  FOREIGN KEY(portfolio_id, snapshot_id) REFERENCES review_snapshots(portfolio_id, snapshot_id),
-  FOREIGN KEY(instrument_id) REFERENCES instruments(id)
+  PRIMARY KEY(portfolio_id,snapshot_id,holding_id), UNIQUE(portfolio_id,snapshot_id,holding_id,instrument_id),
+  FOREIGN KEY(portfolio_id,snapshot_id) REFERENCES review_snapshots(portfolio_id,snapshot_id), FOREIGN KEY(instrument_id) REFERENCES instruments(id)
 );
 
 CREATE TABLE advisory_reviews (
-  id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
-  portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
-  snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) BETWEEN 1 AND 128),
-  calculation_version TEXT NOT NULL CHECK(length(calculation_version) BETWEEN 1 AND 128),
-  scope_type TEXT NOT NULL CHECK(scope_type IN ('portfolio','holding')),
-  historical_status TEXT NOT NULL CHECK(historical_status IN ('complete','incomplete')),
-  recommendation TEXT NOT NULL CHECK(recommendation IN ('hold','review','trim_candidate','exit_candidate','no_recommendation')),
-  rationale TEXT NOT NULL CHECK(length(rationale) BETWEEN 1 AND 8000),
-  model_opinion TEXT NOT NULL CHECK(length(model_opinion) BETWEEN 1 AND 8000),
-  model_provider TEXT NOT NULL CHECK(length(model_provider) BETWEEN 1 AND 128),
-  model_name TEXT NOT NULL CHECK(length(model_name) BETWEEN 1 AND 256),
-  model_version TEXT NOT NULL CHECK(length(model_version) BETWEEN 1 AND 128),
-  model_runtime TEXT NOT NULL CHECK(model_runtime = 'hermes-environment'),
-  generated_at TEXT NOT NULL,
-  submitted_at TEXT NOT NULL,
-  submitted_by_category TEXT NOT NULL CHECK(submitted_by_category = 'machine'),
-  submitted_by_id TEXT NOT NULL CHECK(length(submitted_by_id) BETWEEN 1 AND 128),
-  retain_until TEXT NOT NULL,
-  UNIQUE(id, portfolio_id), UNIQUE(portfolio_id, id),
-  UNIQUE(id, portfolio_id, snapshot_id),
-  UNIQUE(id, portfolio_id, snapshot_id, calculation_version),
-  FOREIGN KEY(portfolio_id, snapshot_id, calculation_version)
-    REFERENCES review_snapshots(portfolio_id, snapshot_id, calculation_version),
-  CHECK(length(generated_at)=30 AND generated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(generated_at,1,10))=substr(generated_at,1,10) AND substr(generated_at,12,2) BETWEEN '00' AND '23' AND substr(generated_at,15,2) BETWEEN '00' AND '59' AND substr(generated_at,18,2) BETWEEN '00' AND '59'),
-  CHECK(length(submitted_at)=30 AND submitted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(submitted_at,1,10))=substr(submitted_at,1,10) AND substr(submitted_at,12,2) BETWEEN '00' AND '23' AND substr(submitted_at,15,2) BETWEEN '00' AND '59' AND substr(submitted_at,18,2) BETWEEN '00' AND '59'),
-  CHECK(length(retain_until)=30 AND retain_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(retain_until,1,10))=substr(retain_until,1,10) AND substr(retain_until,12,2) BETWEEN '00' AND '23' AND substr(retain_until,15,2) BETWEEN '00' AND '59' AND substr(retain_until,18,2) BETWEEN '00' AND '59'),
-  CHECK(julianday(retain_until) >= julianday(submitted_at, '+7 years'))
+  id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128), portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
+  snapshot_id TEXT NOT NULL CHECK(length(snapshot_id) BETWEEN 1 AND 128), calculation_version TEXT NOT NULL CHECK(length(calculation_version) BETWEEN 1 AND 128),
+  scope_type TEXT NOT NULL CHECK(scope_type IN('portfolio','holding')), historical_status TEXT NOT NULL CHECK(historical_status IN('complete','incomplete')),
+  recommendation TEXT NOT NULL CHECK(recommendation IN('hold','review','trim_candidate','exit_candidate','no_recommendation')),
+  rationale TEXT NOT NULL CHECK(length(rationale) BETWEEN 1 AND 8000), model_opinion TEXT NOT NULL CHECK(length(model_opinion) BETWEEN 1 AND 8000),
+  model_provider TEXT NOT NULL CHECK(length(model_provider) BETWEEN 1 AND 128), model_name TEXT NOT NULL CHECK(length(model_name) BETWEEN 1 AND 256), model_version TEXT NOT NULL CHECK(length(model_version) BETWEEN 1 AND 128), model_runtime TEXT NOT NULL CHECK(model_runtime='hermes-environment'),
+  generated_at TEXT NOT NULL, submitted_at TEXT NOT NULL,
+  submitted_by_id TEXT NOT NULL CHECK(length(submitted_by_id) BETWEEN 1 AND 128), submitted_by_kind TEXT NOT NULL CHECK(submitted_by_kind='machine'),
+  submitted_by_primary_permission TEXT NOT NULL CHECK(submitted_by_primary_permission IN('portfolio:read','reviews:write')), retain_until TEXT NOT NULL,
+  UNIQUE(id,portfolio_id), UNIQUE(portfolio_id,id), UNIQUE(id,portfolio_id,snapshot_id), UNIQUE(id,portfolio_id,snapshot_id,calculation_version),
+  FOREIGN KEY(portfolio_id,snapshot_id,calculation_version) REFERENCES review_snapshots(portfolio_id,snapshot_id,calculation_version),
+  CHECK(length(generated_at)=30 AND generated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(generated_at,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(generated_at,1,10)))=substr(generated_at,1,10) AND substr(generated_at,12,2) BETWEEN '00' AND '23' AND substr(generated_at,15,2) BETWEEN '00' AND '59' AND substr(generated_at,18,2) BETWEEN '00' AND '59'),
+  CHECK(length(submitted_at)=30 AND submitted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(submitted_at,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(submitted_at,1,10)))=substr(submitted_at,1,10) AND substr(submitted_at,12,2) BETWEEN '00' AND '23' AND substr(submitted_at,15,2) BETWEEN '00' AND '59' AND substr(submitted_at,18,2) BETWEEN '00' AND '59'),
+  CHECK(length(retain_until)=30 AND retain_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(retain_until,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(retain_until,1,10)))=substr(retain_until,1,10) AND substr(retain_until,12,2) BETWEEN '00' AND '23' AND substr(retain_until,15,2) BETWEEN '00' AND '59' AND substr(retain_until,18,2) BETWEEN '00' AND '59' AND julianday(retain_until)>=julianday(submitted_at,'+7 years'))
 );
 
 CREATE TABLE review_targets (
-  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, calculation_version TEXT NOT NULL,
-  holding_id TEXT NOT NULL, instrument_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 100),
-  PRIMARY KEY(review_id, holding_id), UNIQUE(review_id, ordinal),
-  FOREIGN KEY(review_id, portfolio_id, snapshot_id) REFERENCES advisory_reviews(id, portfolio_id, snapshot_id),
-  FOREIGN KEY(portfolio_id, snapshot_id, holding_id, instrument_id)
-    REFERENCES snapshot_holdings(portfolio_id, snapshot_id, holding_id, instrument_id),
-  FOREIGN KEY(review_id, portfolio_id, snapshot_id, calculation_version)
-    REFERENCES advisory_reviews(id, portfolio_id, snapshot_id, calculation_version)
+  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, calculation_version TEXT NOT NULL, holding_id TEXT NOT NULL, instrument_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 99), PRIMARY KEY(review_id,holding_id), UNIQUE(review_id,ordinal),
+  FOREIGN KEY(review_id,portfolio_id,snapshot_id) REFERENCES advisory_reviews(id,portfolio_id,snapshot_id), FOREIGN KEY(portfolio_id,snapshot_id,holding_id,instrument_id) REFERENCES snapshot_holdings(portfolio_id,snapshot_id,holding_id,instrument_id), FOREIGN KEY(review_id,portfolio_id,snapshot_id,calculation_version) REFERENCES advisory_reviews(id,portfolio_id,snapshot_id,calculation_version)
 );
-
-CREATE TABLE review_risks (
-  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 32),
-  text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 2000),
-  PRIMARY KEY(review_id, ordinal), FOREIGN KEY(review_id, portfolio_id) REFERENCES advisory_reviews(id, portfolio_id)
-);
-CREATE TABLE review_counterarguments (
-  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 32),
-  text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 2000),
-  PRIMARY KEY(review_id, ordinal), FOREIGN KEY(review_id, portfolio_id) REFERENCES advisory_reviews(id, portfolio_id)
-);
-CREATE TABLE review_conditions (
-  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 32),
-  text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 2000),
-  PRIMARY KEY(review_id, ordinal), FOREIGN KEY(review_id, portfolio_id) REFERENCES advisory_reviews(id, portfolio_id)
-);
+CREATE TABLE review_risks (review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 31), text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 2000), PRIMARY KEY(review_id,ordinal), FOREIGN KEY(review_id,portfolio_id) REFERENCES advisory_reviews(id,portfolio_id));
+CREATE TABLE review_counterarguments (review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 31), text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 2000), PRIMARY KEY(review_id,ordinal), FOREIGN KEY(review_id,portfolio_id) REFERENCES advisory_reviews(id,portfolio_id));
+CREATE TABLE review_conditions (review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 31), text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 2000), PRIMARY KEY(review_id,ordinal), FOREIGN KEY(review_id,portfolio_id) REFERENCES advisory_reviews(id,portfolio_id));
 CREATE TABLE review_metrics (
-  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 100),
-  name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
-  value TEXT NOT NULL CHECK(length(value) BETWEEN 1 AND 128 AND value NOT GLOB '*[^0-9.-]*' AND (value NOT LIKE '%-%' OR substr(value,1,1)='-') AND length(replace(replace(value,'-',''),'.','')) > 0 AND (length(value)-length(replace(value,'.',''))) <= 1 AND (substr(replace(value,'-',''),1,1) <> '0' OR replace(value,'-','') = '0' OR substr(replace(value,'-',''),2,1) = '.') AND instr(replace(value,'-',''),'.') NOT IN (1,length(replace(value,'-','')))),
-  unit TEXT NOT NULL CHECK(length(unit) BETWEEN 1 AND 64), as_of TEXT NOT NULL,
-  source TEXT NOT NULL CHECK(source IN ('snapshot','calculation','submitted')),
-  deterministic INTEGER NOT NULL CHECK(deterministic = 1),
-  PRIMARY KEY(review_id, ordinal), FOREIGN KEY(review_id, portfolio_id) REFERENCES advisory_reviews(id, portfolio_id),
-  CHECK(length(as_of)=30 AND as_of GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(as_of,1,10))=substr(as_of,1,10) AND substr(as_of,12,2) BETWEEN '00' AND '23' AND substr(as_of,15,2) BETWEEN '00' AND '59' AND substr(as_of,18,2) BETWEEN '00' AND '59')
+  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 99), name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128), value TEXT NOT NULL CHECK(length(value) BETWEEN 1 AND 128 AND value GLOB '-*[0-9]*' AND value NOT GLOB '*[^0-9.-]*'), unit TEXT NOT NULL CHECK(length(unit) BETWEEN 1 AND 64), as_of TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN('snapshot','calculation','submitted')), deterministic INTEGER NOT NULL CHECK(deterministic=1), PRIMARY KEY(review_id,ordinal), FOREIGN KEY(review_id,portfolio_id) REFERENCES advisory_reviews(id,portfolio_id),
+  CHECK(length(as_of)=30 AND as_of GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(as_of,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(as_of,1,10)))=substr(as_of,1,10) AND substr(as_of,12,2) BETWEEN '00' AND '23' AND substr(as_of,15,2) BETWEEN '00' AND '59' AND substr(as_of,18,2) BETWEEN '00' AND '59')
 );
 CREATE TABLE review_evidence (
-  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, evidence_id TEXT NOT NULL,
-  ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 64),
-  url TEXT NOT NULL CHECK(length(url) BETWEEN 1 AND 2048 AND url GLOB 'https://*' AND url NOT GLOB '*[[:space:][:cntrl:]]*' AND substr(url,9) <> '' AND url NOT LIKE 'https://%@%' AND url LIKE 'https://' || url_host || '%'),
-  url_host TEXT NOT NULL CHECK(length(url_host) BETWEEN 1 AND 253 AND url_host = lower(url_host) AND url_host NOT GLOB '*[[:space:][:cntrl:]@: /?#]*' AND substr(url_host,1,1) <> '.' AND substr(url_host,-1,1) <> '.'),
-  url_port INTEGER NULL CHECK(url_port IS NULL OR (url_port BETWEEN 1 AND 65535)),
-  title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 512),
-  published_at TEXT NULL, accessed_at TEXT NOT NULL,
-  availability TEXT NOT NULL CHECK(availability IN ('available','unavailable','blocked','invalid')),
-  freshness TEXT NOT NULL CHECK(freshness IN ('current','stale','unknown')),
-  excerpt TEXT NOT NULL CHECK(length(excerpt) BETWEEN 1 AND 4000),
-  PRIMARY KEY(review_id, evidence_id), UNIQUE(review_id, ordinal), UNIQUE(review_id, portfolio_id, evidence_id),
-  FOREIGN KEY(review_id, portfolio_id) REFERENCES advisory_reviews(id, portfolio_id),
-  CHECK(url_port IS NULL OR url LIKE 'https://%:' || CAST(url_port AS TEXT) || '%'),
-  CHECK(published_at IS NULL OR (length(published_at)=30 AND published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(published_at,1,10))=substr(published_at,1,10) AND substr(published_at,12,2) BETWEEN '00' AND '23' AND substr(published_at,15,2) BETWEEN '00' AND '59' AND substr(published_at,18,2) BETWEEN '00' AND '59')),
-  CHECK(length(accessed_at)=30 AND accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(accessed_at,1,10))=substr(accessed_at,1,10) AND substr(accessed_at,12,2) BETWEEN '00' AND '23' AND substr(accessed_at,15,2) BETWEEN '00' AND '59' AND substr(accessed_at,18,2) BETWEEN '00' AND '59')
+  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, evidence_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 63), url_host TEXT NOT NULL, url_suffix TEXT NOT NULL DEFAULT '', title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 512), published_at TEXT NULL, accessed_at TEXT NOT NULL, availability TEXT NOT NULL CHECK(availability IN('available','unavailable','blocked','invalid')), freshness TEXT NOT NULL CHECK(freshness IN('current','stale','unknown')), excerpt TEXT NOT NULL CHECK(length(excerpt) BETWEEN 1 AND 4000), PRIMARY KEY(review_id,evidence_id), UNIQUE(review_id,ordinal), UNIQUE(review_id,portfolio_id,evidence_id), FOREIGN KEY(review_id,portfolio_id) REFERENCES advisory_reviews(id,portfolio_id),
+  CHECK(length(url_host) BETWEEN 1 AND 253 AND url_host=lower(url_host) AND url_host NOT GLOB '*[^a-z0-9.-]*' AND url_host NOT LIKE '.%' AND url_host NOT LIKE '%.' AND url_host NOT LIKE '%..%' AND length(url_suffix)<=2047 AND (url_suffix='' OR substr(url_suffix,1,1) IN('/','?')) AND url_suffix NOT GLOB '*[^A-Za-z0-9._~:/?$&''()*+,;=%!-]*' AND length('https://'||url_host||url_suffix) BETWEEN 9 AND 2048),
+  CHECK(published_at IS NULL OR (length(published_at)=30 AND published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(published_at,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(published_at,1,10)))=substr(published_at,1,10) AND substr(published_at,12,2) BETWEEN '00' AND '23' AND substr(published_at,15,2) BETWEEN '00' AND '59' AND substr(published_at,18,2) BETWEEN '00' AND '59')),
+  CHECK(length(accessed_at)=30 AND accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(accessed_at,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(accessed_at,1,10)))=substr(accessed_at,1,10) AND substr(accessed_at,12,2) BETWEEN '00' AND '23' AND substr(accessed_at,15,2) BETWEEN '00' AND '59' AND substr(accessed_at,18,2) BETWEEN '00' AND '59')
 );
-CREATE TABLE review_sourced_facts (
-  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, fact_ordinal INTEGER NOT NULL CHECK(fact_ordinal >= 0 AND fact_ordinal < 32),
-  statement TEXT NOT NULL CHECK(length(statement) BETWEEN 1 AND 2000),
-  PRIMARY KEY(review_id, fact_ordinal), UNIQUE(review_id, portfolio_id, fact_ordinal),
-  FOREIGN KEY(review_id, portfolio_id) REFERENCES advisory_reviews(id, portfolio_id)
-);
-CREATE TABLE review_fact_evidence (
-  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, fact_ordinal INTEGER NOT NULL, evidence_id TEXT NOT NULL,
-  evidence_ordinal INTEGER NOT NULL CHECK(evidence_ordinal >= 0 AND evidence_ordinal < 16),
-  PRIMARY KEY(review_id, fact_ordinal, evidence_id), UNIQUE(review_id, fact_ordinal, evidence_ordinal),
-  FOREIGN KEY(review_id, portfolio_id, fact_ordinal) REFERENCES review_sourced_facts(review_id, portfolio_id, fact_ordinal),
-  FOREIGN KEY(review_id, portfolio_id, evidence_id) REFERENCES review_evidence(review_id, portfolio_id, evidence_id)
-);
-CREATE TABLE review_idempotency (
-  principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
-  request_fingerprint TEXT NOT NULL, review_id TEXT NOT NULL, created_at TEXT NOT NULL, retain_until TEXT NOT NULL,
-  PRIMARY KEY(principal_id, portfolio_id, idempotency_key), UNIQUE(portfolio_id, review_id),
-  FOREIGN KEY(principal_id, portfolio_id) REFERENCES machine_principals(id, portfolio_id),
-  FOREIGN KEY(review_id, portfolio_id) REFERENCES advisory_reviews(id, portfolio_id),
-  CHECK(length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(created_at,1,10))=substr(created_at,1,10) AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59'),
-  CHECK(length(retain_until)=30 AND retain_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(retain_until,1,10))=substr(retain_until,1,10) AND substr(retain_until,12,2) BETWEEN '00' AND '23' AND substr(retain_until,15,2) BETWEEN '00' AND '59' AND substr(retain_until,18,2) BETWEEN '00' AND '59'),
-  CHECK(julianday(retain_until) >= julianday(created_at, '+7 years'))
-);
+CREATE TABLE review_sourced_facts (review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, fact_ordinal INTEGER NOT NULL CHECK(fact_ordinal BETWEEN 0 AND 31), statement TEXT NOT NULL CHECK(length(statement) BETWEEN 1 AND 2000), PRIMARY KEY(review_id,fact_ordinal), UNIQUE(review_id,portfolio_id,fact_ordinal), FOREIGN KEY(review_id,portfolio_id) REFERENCES advisory_reviews(id,portfolio_id));
+CREATE TABLE review_fact_evidence (review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, fact_ordinal INTEGER NOT NULL, evidence_id TEXT NOT NULL, evidence_ordinal INTEGER NOT NULL CHECK(evidence_ordinal BETWEEN 0 AND 15), PRIMARY KEY(review_id,fact_ordinal,evidence_id), UNIQUE(review_id,fact_ordinal,evidence_ordinal), FOREIGN KEY(review_id,portfolio_id,fact_ordinal) REFERENCES review_sourced_facts(review_id,portfolio_id,fact_ordinal), FOREIGN KEY(review_id,portfolio_id,evidence_id) REFERENCES review_evidence(review_id,portfolio_id,evidence_id));
 
+CREATE TABLE review_idempotency (principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_fingerprint TEXT NOT NULL, review_id TEXT NOT NULL, created_at TEXT NOT NULL, retain_until TEXT NOT NULL, PRIMARY KEY(principal_id,portfolio_id,idempotency_key), UNIQUE(portfolio_id,review_id), FOREIGN KEY(principal_id,portfolio_id) REFERENCES machine_principals(id,portfolio_id), FOREIGN KEY(review_id,portfolio_id) REFERENCES advisory_reviews(id,portfolio_id), CHECK(length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d',julianday(substr(created_at,1,10)))=substr(created_at,1,10) AND substr(created_at,20,1)='.' AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59'), CHECK(length(retain_until)=30 AND retain_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d',julianday(substr(retain_until,1,10)))=substr(retain_until,1,10) AND julianday(retain_until)>=julianday(created_at,'+7 years')));
 CREATE TABLE review_feedback (
-  id TEXT PRIMARY KEY, browser_principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, review_id TEXT NOT NULL,
-  decision TEXT NOT NULL CHECK(decision IN ('agree','disagree','defer','request_another_review')),
-  note TEXT NULL, occurred_at TEXT NOT NULL, retain_until TEXT NOT NULL,
-  UNIQUE(id, browser_principal_id, portfolio_id, review_id),
-  FOREIGN KEY(browser_principal_id) REFERENCES browser_principals(id),
-  FOREIGN KEY(portfolio_id, review_id) REFERENCES advisory_reviews(portfolio_id, id),
-  CHECK(length(occurred_at)=30 AND occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(occurred_at,1,10))=substr(occurred_at,1,10) AND substr(occurred_at,12,2) BETWEEN '00' AND '23' AND substr(occurred_at,15,2) BETWEEN '00' AND '59' AND substr(occurred_at,18,2) BETWEEN '00' AND '59'),
-  CHECK(length(retain_until)=30 AND retain_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(retain_until,1,10))=substr(retain_until,1,10) AND substr(retain_until,12,2) BETWEEN '00' AND '23' AND substr(retain_until,15,2) BETWEEN '00' AND '59' AND substr(retain_until,18,2) BETWEEN '00' AND '59'),
-  CHECK(julianday(retain_until) >= julianday(occurred_at, '+7 years'))
+  id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128), browser_principal_id TEXT NOT NULL CHECK(browser_principal_id='local-owner'), portfolio_id TEXT NOT NULL, review_id TEXT NOT NULL, decision TEXT NOT NULL CHECK(decision IN('agree','disagree','defer','request_another_review')), note TEXT NULL CHECK(note IS NULL OR length(note) BETWEEN 1 AND 2000), occurred_at TEXT NOT NULL, retain_until TEXT NOT NULL, submitted_by_id TEXT NOT NULL CHECK(submitted_by_id='local-owner'), submitted_by_kind TEXT NOT NULL CHECK(submitted_by_kind='browser_user'), submitted_by_primary_permission TEXT NOT NULL CHECK(submitted_by_primary_permission='portfolio:read'), UNIQUE(id,browser_principal_id,portfolio_id,review_id), FOREIGN KEY(browser_principal_id) REFERENCES browser_principals(id), FOREIGN KEY(portfolio_id,review_id) REFERENCES advisory_reviews(portfolio_id,id), CHECK(length(occurred_at)=30 AND occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d',julianday(substr(occurred_at,1,10)))=substr(occurred_at,1,10)), CHECK(length(retain_until)=30 AND retain_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d',julianday(substr(retain_until,1,10)))=substr(retain_until,1,10) AND julianday(retain_until)>=julianday(occurred_at,'+7 years'))
 );
-CREATE TABLE review_submission_permission_snapshots (
-  review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL,
-  ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 2),
-  principal_id TEXT NOT NULL CHECK(length(principal_id) BETWEEN 1 AND 128),
-  principal_type TEXT NOT NULL CHECK(principal_type = 'machine'),
-  permission TEXT NOT NULL CHECK(permission IN ('portfolio:read','reviews:write')),
-  PRIMARY KEY(review_id, ordinal), UNIQUE(review_id, permission),
-  FOREIGN KEY(review_id, portfolio_id) REFERENCES advisory_reviews(id, portfolio_id)
-);
-CREATE TABLE feedback_permission_snapshots (
-  feedback_id TEXT NOT NULL, browser_principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, review_id TEXT NOT NULL,
-  ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 2),
-  principal_id TEXT NOT NULL CHECK(length(principal_id) BETWEEN 1 AND 128),
-  principal_type TEXT NOT NULL CHECK(principal_type = 'browser_user'),
-  permission TEXT NOT NULL CHECK(permission IN ('portfolio:read','reviews:write')),
-  PRIMARY KEY(feedback_id, ordinal), UNIQUE(feedback_id, permission),
-  FOREIGN KEY(feedback_id, browser_principal_id, portfolio_id, review_id)
-    REFERENCES review_feedback(id, browser_principal_id, portfolio_id, review_id)
-);
-CREATE TABLE feedback_idempotency (
-  browser_principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, review_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
-  request_fingerprint TEXT NOT NULL, feedback_id TEXT NOT NULL, created_at TEXT NOT NULL, retain_until TEXT NOT NULL,
-  PRIMARY KEY(browser_principal_id, portfolio_id, review_id, idempotency_key),
-  FOREIGN KEY(browser_principal_id) REFERENCES browser_principals(id),
-  FOREIGN KEY(portfolio_id, review_id) REFERENCES advisory_reviews(portfolio_id, id),
-  FOREIGN KEY(feedback_id, browser_principal_id, portfolio_id, review_id) REFERENCES review_feedback(id, browser_principal_id, portfolio_id, review_id),
-  CHECK(length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(created_at,1,10))=substr(created_at,1,10) AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59'),
-  CHECK(length(retain_until)=30 AND retain_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(retain_until,1,10))=substr(retain_until,1,10) AND substr(retain_until,12,2) BETWEEN '00' AND '23' AND substr(retain_until,15,2) BETWEEN '00' AND '59' AND substr(retain_until,18,2) BETWEEN '00' AND '59'),
-  CHECK(julianday(retain_until) >= julianday(created_at, '+7 years'))
-);
+CREATE TABLE review_submission_permission_snapshots (review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal=1), permission TEXT NOT NULL CHECK(permission IN('portfolio:read','reviews:write')), PRIMARY KEY(review_id,ordinal), UNIQUE(review_id,permission), FOREIGN KEY(review_id,portfolio_id) REFERENCES advisory_reviews(id,portfolio_id));
+CREATE TABLE feedback_permission_snapshots (feedback_id TEXT NOT NULL, browser_principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, review_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal=1), permission TEXT NOT NULL CHECK(permission='portfolio:read'), PRIMARY KEY(feedback_id,ordinal), UNIQUE(feedback_id,permission), FOREIGN KEY(feedback_id,browser_principal_id,portfolio_id,review_id) REFERENCES review_feedback(id,browser_principal_id,portfolio_id,review_id));
+CREATE TABLE feedback_idempotency (browser_principal_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, review_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_fingerprint TEXT NOT NULL, feedback_id TEXT NOT NULL, created_at TEXT NOT NULL, retain_until TEXT NOT NULL, PRIMARY KEY(browser_principal_id,portfolio_id,review_id,idempotency_key), FOREIGN KEY(browser_principal_id) REFERENCES browser_principals(id), FOREIGN KEY(portfolio_id,review_id) REFERENCES advisory_reviews(portfolio_id,id), FOREIGN KEY(feedback_id,browser_principal_id,portfolio_id,review_id) REFERENCES review_feedback(id,browser_principal_id,portfolio_id,review_id), CHECK(length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d',julianday(substr(created_at,1,10)))=substr(created_at,1,10) AND substr(created_at,20,1)='.' AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59'), CHECK(length(retain_until)=30 AND retain_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d',julianday(substr(retain_until,1,10)))=substr(retain_until,1,10) AND julianday(retain_until)>=julianday(created_at,'+7 years')));
+CREATE TABLE audit_event_portfolios (audit_event_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, retain_until TEXT NULL, PRIMARY KEY(audit_event_id,portfolio_id), FOREIGN KEY(audit_event_id) REFERENCES audit_events(id), FOREIGN KEY(portfolio_id) REFERENCES portfolios(id));
 
-CREATE TABLE audit_event_portfolios (
-  audit_event_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, retain_until TEXT NULL,
-  PRIMARY KEY(audit_event_id, portfolio_id),
-  FOREIGN KEY(audit_event_id) REFERENCES audit_events(id),
-  FOREIGN KEY(portfolio_id) REFERENCES portfolios(id)
-);
-```
+CREATE TRIGGER phase_d_url_label_guard BEFORE INSERT ON review_evidence BEGIN
+  SELECT RAISE(ABORT,'invalid evidence host') WHERE EXISTS (WITH RECURSIVE labels(rest,label) AS (SELECT NEW.url_host,NEW.url_host UNION ALL SELECT substr(rest,instr(rest,'.')+1),substr(rest,1,instr(rest,'.')-1) FROM labels WHERE instr(rest,'.')>0) SELECT 1 FROM labels WHERE length(label)<1 OR length(label)>63 OR label LIKE '-%' OR label LIKE '%-' );
+END;
+CREATE TRIGGER phase_d_url_label_update_guard BEFORE UPDATE OF url_host,url_suffix ON review_evidence BEGIN
+  SELECT RAISE(ABORT,'invalid evidence host') WHERE EXISTS (WITH RECURSIVE labels(rest,label) AS (SELECT NEW.url_host,NEW.url_host UNION ALL SELECT substr(rest,instr(rest,'.')+1),substr(rest,1,instr(rest,'.')-1) FROM labels WHERE instr(rest,'.')>0) SELECT 1 FROM labels WHERE length(label)<1 OR length(label)>63 OR label LIKE '-%' OR label LIKE '%-');
+END;
 
-The migration rebuilds `activity_events` while preserving its current columns and checks. The replacement shape is:
+INSERT INTO _phase_d_assertion SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM activity_events WHERE source_audit_event_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM audit_events a WHERE a.id=activity_events.source_audit_event_id)) THEN 1 ELSE 0 END;
+INSERT INTO _phase_d_assertion SELECT CASE WHEN NOT EXISTS(SELECT source_audit_event_id FROM activity_events WHERE source_audit_event_id IS NOT NULL GROUP BY source_audit_event_id HAVING COUNT(DISTINCT portfolio_id)>1) THEN 1 ELSE 0 END;
+UPDATE audit_events SET retain_until=strftime('%Y-%m-%dT%H:%M:%S',julianday(substr(created_at,1,19),'+7 years'))||substr(created_at,20) WHERE retain_until IS NULL AND length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z' AND strftime('%Y-%m-%d',julianday(substr(created_at,1,10)))=substr(created_at,1,10) AND substr(created_at,20,1)='.' AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59';
+INSERT INTO audit_event_portfolios(audit_event_id,portfolio_id,retain_until) SELECT e.source_audit_event_id,e.portfolio_id,a.retain_until FROM activity_events e JOIN audit_events a ON a.id=e.source_audit_event_id WHERE e.source_audit_event_id IS NOT NULL GROUP BY e.source_audit_event_id,e.portfolio_id,a.retain_until;
 
-```sql
+CREATE TEMP TABLE _phase_d_activity_count (n INTEGER NOT NULL);
+INSERT INTO _phase_d_activity_count SELECT COUNT(*) FROM activity_events;
 CREATE TABLE activity_events_new (
-  id TEXT PRIMARY KEY,
-  portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
-  actor_category TEXT NOT NULL, action TEXT NOT NULL, category TEXT NOT NULL,
-  entity_type TEXT, entity_id TEXT, summary TEXT NOT NULL, details TEXT NOT NULL DEFAULT '',
-  occurred_at TEXT NOT NULL CHECK(length(occurred_at)=30 AND occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND strftime('%Y-%m-%d', substr(occurred_at,1,10))=substr(occurred_at,1,10) AND substr(occurred_at,12,2) BETWEEN '00' AND '23' AND substr(occurred_at,15,2) BETWEEN '00' AND '59' AND substr(occurred_at,18,2) BETWEEN '00' AND '59'),
-  sort_time TEXT NOT NULL CHECK(sort_time = occurred_at),
-  source_audit_event_id TEXT NULL,
-  retain_until TEXT NULL,
-  FOREIGN KEY(source_audit_event_id, portfolio_id)
-    REFERENCES audit_event_portfolios(audit_event_id, portfolio_id)
+  id TEXT PRIMARY KEY, portfolio_id TEXT NOT NULL REFERENCES portfolios(id), actor_category TEXT NOT NULL, action TEXT NOT NULL, category TEXT NOT NULL, entity_type TEXT, entity_id TEXT, summary TEXT NOT NULL, details TEXT NOT NULL DEFAULT '', occurred_at TEXT NOT NULL, sort_time TEXT NOT NULL CHECK(sort_time=occurred_at), source_audit_event_id TEXT NULL, retain_until TEXT NOT NULL,
+  FOREIGN KEY(source_audit_event_id,portfolio_id) REFERENCES audit_event_portfolios(audit_event_id,portfolio_id),
+  CHECK(length(occurred_at)=30 AND occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(occurred_at,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(occurred_at,1,10)))=substr(occurred_at,1,10) AND substr(occurred_at,12,2) BETWEEN '00' AND '23' AND substr(occurred_at,15,2) BETWEEN '00' AND '59' AND substr(occurred_at,18,2) BETWEEN '00' AND '59'),
+  CHECK(length(retain_until)=30 AND retain_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(retain_until,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(retain_until,1,10)))=substr(retain_until,1,10) AND substr(retain_until,12,2) BETWEEN '00' AND '23' AND substr(retain_until,15,2) BETWEEN '00' AND '59' AND substr(retain_until,18,2) BETWEEN '00' AND '59')
 );
+INSERT INTO _phase_d_assertion SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM activity_events WHERE occurred_at IS NULL OR length(occurred_at)<>30 OR strftime('%Y-%m-%d',julianday(substr(occurred_at,1,10)))<>substr(occurred_at,1,10)) THEN 1 ELSE 0 END;
+INSERT INTO activity_events_new(id,portfolio_id,actor_category,action,category,entity_type,entity_id,summary,details,occurred_at,sort_time,source_audit_event_id,retain_until) SELECT e.id,e.portfolio_id,e.actor_category,e.action,e.category,e.entity_type,e.entity_id,e.summary,e.details,e.occurred_at,e.sort_time,e.source_audit_event_id,COALESCE(a.retain_until,strftime('%Y-%m-%dT%H:%M:%S',julianday(substr(e.occurred_at,1,19),'+7 years'))||substr(e.occurred_at,20)) FROM activity_events e LEFT JOIN audit_events a ON a.id=e.source_audit_event_id;
+DROP INDEX IF EXISTS idx_activity_source_portfolio;
+DROP INDEX IF EXISTS idx_activity_portfolio_order;
+DROP TRIGGER IF EXISTS activity_events_append_only_update;
+DROP TRIGGER IF EXISTS activity_events_append_only_delete;
+DROP TABLE activity_events;
+ALTER TABLE activity_events_new RENAME TO activity_events;
+CREATE UNIQUE INDEX idx_activity_source_portfolio ON activity_events(source_audit_event_id,portfolio_id);
+CREATE INDEX idx_activity_portfolio_order ON activity_events(portfolio_id,sort_time DESC,id DESC);
+CREATE TRIGGER activity_events_append_only_update BEFORE UPDATE ON activity_events BEGIN SELECT RAISE(ABORT,'activity events are append-only'); END;
+CREATE TRIGGER activity_events_append_only_delete BEFORE DELETE ON activity_events BEGIN SELECT RAISE(ABORT,'activity events are append-only'); END;
+
+CREATE TRIGGER phase_d_review_guard BEFORE INSERT ON advisory_reviews BEGIN SELECT RAISE(ABORT,'review principal mismatch') WHERE NOT EXISTS(SELECT 1 FROM machine_principals WHERE id=NEW.submitted_by_id AND portfolio_id=NEW.portfolio_id AND active=1); END;
+CREATE TRIGGER phase_d_feedback_guard BEFORE INSERT ON review_feedback BEGIN SELECT RAISE(ABORT,'feedback principal mismatch') WHERE NEW.submitted_by_id<>NEW.browser_principal_id OR NEW.submitted_by_kind<>'browser_user'; END;
+CREATE TRIGGER phase_d_review_permission_guard BEFORE INSERT ON review_submission_permission_snapshots BEGIN SELECT RAISE(ABORT,'review permission mismatch') WHERE NOT EXISTS(SELECT 1 FROM advisory_reviews r WHERE r.id=NEW.review_id AND r.portfolio_id=NEW.portfolio_id AND NEW.permission<>r.submitted_by_primary_permission); END;
+CREATE TRIGGER phase_d_feedback_permission_guard BEFORE INSERT ON feedback_permission_snapshots BEGIN SELECT RAISE(ABORT,'feedback permission mismatch') WHERE NOT EXISTS(SELECT 1 FROM review_feedback f WHERE f.id=NEW.feedback_id AND f.browser_principal_id=NEW.browser_principal_id AND f.portfolio_id=NEW.portfolio_id AND f.review_id=NEW.review_id AND NEW.permission<>f.submitted_by_primary_permission); END;
+CREATE TRIGGER phase_d_audit_guard BEFORE INSERT ON audit_events WHEN NEW.action IN('review_submitted','feedback_submitted') BEGIN SELECT RAISE(ABORT,'invalid Phase D audit') WHERE NEW.retain_until IS NULL OR length(NEW.created_at)<>30 OR substr(NEW.created_at,21,9) GLOB '*[^0-9]*' OR substr(NEW.created_at,5,1)<>'-' OR substr(NEW.created_at,8,1)<>'-' OR substr(NEW.created_at,11,1)<>'T' OR substr(NEW.created_at,14,1)<>':' OR substr(NEW.created_at,17,1)<>':' OR substr(NEW.created_at,20,1)<>'.' OR substr(NEW.created_at,30,1)<>'Z' OR strftime('%Y-%m-%d',julianday(substr(NEW.created_at,1,10)))<>substr(NEW.created_at,1,10) OR substr(NEW.created_at,12,2) NOT BETWEEN '00' AND '23' OR substr(NEW.created_at,15,2) NOT BETWEEN '00' AND '59' OR substr(NEW.created_at,18,2) NOT BETWEEN '00' AND '59' OR json_valid(NEW.payload)=0 OR json_type(NEW.payload)<>'object' OR EXISTS(SELECT 1 FROM json_each(NEW.payload) WHERE key NOT IN('id','action','principal_category','principal_id','portfolio_id','review_id','snapshot_id','status','occurred_at','submitted_at','created_at') OR type IN('object','array')) OR (NEW.action='review_submitted' AND (NEW.entity_type<>'advisory_review' OR NOT EXISTS(SELECT 1 FROM advisory_reviews WHERE id=NEW.entity_id) OR NEW.retain_until<>(SELECT retain_until FROM advisory_reviews WHERE id=NEW.entity_id))) OR (NEW.action='feedback_submitted' AND (NEW.entity_type<>'review_feedback' OR NOT EXISTS(SELECT 1 FROM review_feedback WHERE id=NEW.entity_id) OR NEW.retain_until<>(SELECT retain_until FROM review_feedback WHERE id=NEW.entity_id))); END;
+CREATE TRIGGER phase_d_audit_scope_guard BEFORE INSERT ON audit_event_portfolios WHEN EXISTS(SELECT 1 FROM audit_events WHERE id=NEW.audit_event_id AND action IN('review_submitted','feedback_submitted')) BEGIN SELECT RAISE(ABORT,'invalid Phase D audit owner') WHERE NEW.retain_until<>(SELECT retain_until FROM audit_events WHERE id=NEW.audit_event_id) OR NOT EXISTS(SELECT 1 FROM audit_events a LEFT JOIN advisory_reviews r ON a.action='review_submitted' AND a.entity_id=r.id LEFT JOIN review_feedback f ON a.action='feedback_submitted' AND a.entity_id=f.id WHERE a.id=NEW.audit_event_id AND ((r.id IS NOT NULL AND r.portfolio_id=NEW.portfolio_id) OR (f.id IS NOT NULL AND f.portfolio_id=NEW.portfolio_id))); END;
+CREATE TRIGGER phase_d_activity_guard BEFORE INSERT ON activity_events WHEN NEW.category IN('review','feedback') OR NEW.action IN('review_submitted','feedback_submitted') BEGIN SELECT RAISE(ABORT,'invalid Phase D Activity') WHERE NEW.source_audit_event_id IS NULL OR (NEW.category='review' AND NEW.action<>'review_submitted') OR (NEW.category='feedback' AND NEW.action<>'feedback_submitted') OR NEW.retain_until<>(SELECT retain_until FROM audit_events WHERE id=NEW.source_audit_event_id) OR NOT EXISTS(SELECT 1 FROM audit_event_portfolios p JOIN audit_events a ON a.id=p.audit_event_id WHERE p.audit_event_id=NEW.source_audit_event_id AND p.portfolio_id=NEW.portfolio_id AND p.retain_until=NEW.retain_until AND a.action=NEW.action AND a.entity_id=NEW.entity_id); END;
+
+CREATE TRIGGER phase_d_audit_update BEFORE UPDATE ON audit_events WHEN OLD.action IN('review_submitted','feedback_submitted') BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_audit_delete BEFORE DELETE ON audit_events WHEN OLD.action IN('review_submitted','feedback_submitted') BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_audit_scope_update BEFORE UPDATE ON audit_event_portfolios WHEN EXISTS(SELECT 1 FROM audit_events WHERE id=OLD.audit_event_id AND action IN('review_submitted','feedback_submitted')) BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_audit_scope_delete BEFORE DELETE ON audit_event_portfolios WHEN EXISTS(SELECT 1 FROM audit_events WHERE id=OLD.audit_event_id AND action IN('review_submitted','feedback_submitted')) BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+
+CREATE TRIGGER phase_d_review_submission_permission_snapshots_update BEFORE UPDATE ON review_submission_permission_snapshots BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_submission_permission_snapshots_delete BEFORE DELETE ON review_submission_permission_snapshots BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_feedback_permission_snapshots_update BEFORE UPDATE ON feedback_permission_snapshots BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_feedback_permission_snapshots_delete BEFORE DELETE ON feedback_permission_snapshots BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_append_only_update BEFORE UPDATE ON advisory_reviews BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_append_only_delete BEFORE DELETE ON advisory_reviews BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_feedback_append_only_update BEFORE UPDATE ON review_feedback BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_feedback_append_only_delete BEFORE DELETE ON review_feedback BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_targets_update BEFORE UPDATE ON review_targets BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_targets_delete BEFORE DELETE ON review_targets BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_risks_update BEFORE UPDATE ON review_risks BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_risks_delete BEFORE DELETE ON review_risks BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_counterarguments_update BEFORE UPDATE ON review_counterarguments BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_counterarguments_delete BEFORE DELETE ON review_counterarguments BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_conditions_update BEFORE UPDATE ON review_conditions BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_conditions_delete BEFORE DELETE ON review_conditions BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_metrics_update BEFORE UPDATE ON review_metrics BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_metrics_delete BEFORE DELETE ON review_metrics BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_evidence_update BEFORE UPDATE ON review_evidence BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_evidence_delete BEFORE DELETE ON review_evidence BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_sourced_facts_update BEFORE UPDATE ON review_sourced_facts BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_sourced_facts_delete BEFORE DELETE ON review_sourced_facts BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_fact_evidence_update BEFORE UPDATE ON review_fact_evidence BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_fact_evidence_delete BEFORE DELETE ON review_fact_evidence BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_idempotency_update BEFORE UPDATE ON review_idempotency BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_review_idempotency_delete BEFORE DELETE ON review_idempotency BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_feedback_idempotency_update BEFORE UPDATE ON feedback_idempotency BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+CREATE TRIGGER phase_d_feedback_idempotency_delete BEFORE DELETE ON feedback_idempotency BEGIN SELECT RAISE(ABORT,'Phase D rows are append-only'); END;
+
+INSERT INTO _phase_d_assertion SELECT CASE WHEN (SELECT COUNT(*) FROM activity_events)=(SELECT n FROM _phase_d_activity_count) THEN 1 ELSE 0 END;
+INSERT INTO _phase_d_assertion SELECT CASE WHEN (SELECT COUNT(*) FROM audit_event_portfolios p LEFT JOIN audit_events a ON a.id=p.audit_event_id WHERE a.id IS NULL)=0 THEN 1 ELSE 0 END;
+INSERT INTO _phase_d_assertion SELECT CASE WHEN (SELECT COUNT(*) FROM pragma_foreign_key_check)=0 THEN 1 ELSE 0 END;
+DROP TABLE _phase_d_activity_count;
+DROP TABLE _phase_d_assertion;
+INSERT INTO schema_migrations(version,applied_at) VALUES('008_scoped_reviews.sql',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+COMMIT;
 ```
 
-The composite FK is intentionally nullable. SQLite accepts a legacy row when `source_audit_event_id IS NULL`; when it is non-null, the `(audit_event_id, portfolio_id)` association is mandatory and enforces scoped ownership. The migration order is exactly: `BEGIN IMMEDIATE`; add nullable `audit_events.retain_until`; create `audit_event_portfolios`; insert associations only for existing Activity rows with non-null `source_audit_event_id` (`SELECT DISTINCT source_audit_event_id, portfolio_id ... WHERE source_audit_event_id IS NOT NULL`), copying the audit row's nullable boundary; create `activity_events_new`; copy every legacy row unchanged, including NULL source and NULL retention; drop old indexes/triggers/table; rename the new table; recreate `idx_activity_source_portfolio` and `idx_activity_portfolio_order`; recreate the existing append-only update/delete triggers; add the Phase-D-only triggers below; run `PRAGMA foreign_key_check`; and `COMMIT`. Any failure rolls back the entire transaction, including the `audit_event_portfolios` backfill. No synthetic audit event or synthetic source ID is created.
+The activity replacement deliberately copies every old payload column, preserves valid NULL `source_audit_event_id` rows without creating an ownership row, and derives a deterministic seven-year boundary from the canonical `occurred_at` for rows whose audit owner has no boundary. A non-null source is associated with the activity portfolio before the copy, and its audit boundary is copied exactly. Missing or multi-portfolio source associations abort through `_phase_d_assertion`; the old indexes/triggers are explicitly removed because SQLite removes them with the dropped table, then recreated on the installed table. The row-count assertion references the saved pre-drop count in the authoritative script; the final `foreign_key_check` and migration-record insert are before commit.
 
-New Phase D audit events are inserted only after their review/feedback owner exists. Phase-D action/category values are `review_submitted`/`review` and `feedback_submitted`/`feedback`. An INSERT trigger rejects a missing `retain_until`, requires it to equal the owning `advisory_reviews.retain_until` or `review_feedback.retain_until`, and permits only the safe top-level JSON payload keys `id`, `action`, `principal_category`, `principal_id`, `portfolio_id`, `review_id`, `snapshot_id`, `status`, `occurred_at`, `submitted_at`, and `created_at`. The trigger rejects invalid/non-object JSON, unknown keys, nested objects/arrays, bearer/cookie/CSRF values, request bodies, rationale, model opinion, evidence text/URLs/excerpts, account data, prompts, provider endpoints, and secrets. Generic legacy and non-Phase-D audit rows retain their existing behavior and may have `retain_until IS NULL`.
+## 7. Immutable attribution and normalized reconstruction
 
-Phase-D Activity INSERT triggers apply only when `category = 'review'` or `category = 'feedback'` (or the corresponding Phase-D action). They reject NULL `source_audit_event_id`, NULL `retain_until`, absent or cross-portfolio `audit_event_portfolios`, and any retention mismatch with the source audit event and its review/feedback owner. Legacy/generic Activity inserts continue to permit their existing nullable source and retention. The conceptual SQLite triggers are executable as follows:
+`advisory_reviews` stores `submitted_by_id`, fixed `submitted_by_kind=machine`, and required `submitted_by_primary_permission`. `review_feedback` stores `submitted_by_id=local-owner`, fixed `submitted_by_kind=browser_user`, and required `submitted_by_primary_permission=portfolio:read`. These primary columns make zero additional rows valid while guaranteeing a non-empty wire permission array. The normalized additional tables contain only their immutable owner key, ordinal `1`, and permission. There are no duplicated child principal ID or kind columns. Their owner foreign keys, vocabulary checks, uniqueness, ordinal check, primary-permission exclusion triggers, and append-only triggers reject wrong owner, wrong kind/ID, invalid/duplicate/gapped permission, update, and delete probes. A submission transaction copies the authenticated machine principal's ID and permission snapshot, or the stable browser principal's ID and permission, into the parent before the parent is visible; replay never reads current principal configuration.
 
-```sql
-CREATE TRIGGER phase_d_activity_retention_guard
-BEFORE INSERT ON activity_events
-WHEN NEW.category IN ('review','feedback') OR NEW.action IN ('review_submitted','feedback_submitted')
-BEGIN
-  SELECT RAISE(ABORT, 'Phase D Activity requires source audit event')
-    WHERE NEW.source_audit_event_id IS NULL OR NEW.retain_until IS NULL;
-  SELECT RAISE(ABORT, 'Phase D Activity action/category mismatch')
-    WHERE (NEW.category = 'review' AND NEW.action <> 'review_submitted')
-       OR (NEW.category = 'feedback' AND NEW.action <> 'feedback_submitted');
-  SELECT RAISE(ABORT, 'Phase D Activity audit scope mismatch')
-    WHERE NOT EXISTS (SELECT 1 FROM audit_event_portfolios p JOIN audit_events a ON a.id = p.audit_event_id
-      WHERE p.audit_event_id = NEW.source_audit_event_id AND p.portfolio_id = NEW.portfolio_id
-        AND a.action = NEW.action AND a.entity_type = CASE NEW.category WHEN 'review' THEN 'advisory_review' ELSE 'review_feedback' END
-        AND a.entity_id = NEW.entity_id);
-  SELECT RAISE(ABORT, 'Phase D Activity owner mismatch')
-    WHERE NOT EXISTS (SELECT 1 FROM advisory_reviews r JOIN audit_events a ON a.entity_id = r.id
-      WHERE NEW.category = 'review' AND a.id = NEW.source_audit_event_id AND r.portfolio_id = NEW.portfolio_id AND r.id = NEW.entity_id)
-      AND NOT EXISTS (SELECT 1 FROM review_feedback f JOIN audit_events a ON a.entity_id = f.id
-      WHERE NEW.category = 'feedback' AND a.id = NEW.source_audit_event_id AND f.portfolio_id = NEW.portfolio_id AND f.id = NEW.entity_id);
-  SELECT RAISE(ABORT, 'Phase D Activity retention mismatch')
-    WHERE NEW.retain_until <> (SELECT retain_until FROM audit_events WHERE id = NEW.source_audit_event_id)
-       OR NEW.retain_until <> CASE NEW.category WHEN 'review' THEN (SELECT retain_until FROM advisory_reviews WHERE id = NEW.entity_id) ELSE (SELECT retain_until FROM review_feedback WHERE id = NEW.entity_id) END;
-END;
-CREATE TRIGGER phase_d_audit_retention_guard
-BEFORE INSERT ON audit_events
-WHEN NEW.action IN ('review_submitted','feedback_submitted')
-BEGIN
-  SELECT RAISE(ABORT, 'Phase D audit requires retention')
-    WHERE NEW.retain_until IS NULL;
-  SELECT RAISE(ABORT, 'Phase D audit action/entity mismatch')
-    WHERE (NEW.action = 'review_submitted' AND NEW.entity_type <> 'advisory_review')
-       OR (NEW.action = 'feedback_submitted' AND NEW.entity_type <> 'review_feedback')
-       OR NEW.entity_type NOT IN ('advisory_review','review_feedback')
-       OR (NEW.entity_type = 'advisory_review' AND NOT EXISTS (SELECT 1 FROM advisory_reviews WHERE id = NEW.entity_id))
-       OR (NEW.entity_type = 'review_feedback' AND NOT EXISTS (SELECT 1 FROM review_feedback WHERE id = NEW.entity_id));
-  SELECT RAISE(ABORT, 'Phase D audit owner/retention mismatch')
-    WHERE (NEW.entity_type = 'advisory_review' AND NEW.retain_until <> (SELECT retain_until FROM advisory_reviews WHERE id = NEW.entity_id))
-       OR (NEW.entity_type = 'review_feedback' AND NEW.retain_until <> (SELECT retain_until FROM review_feedback WHERE id = NEW.entity_id));
-  SELECT RAISE(ABORT, 'Phase D audit timestamp is not canonical')
-    WHERE length(NEW.created_at) <> 30 OR NEW.created_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z';
-  SELECT RAISE(ABORT, 'Phase D audit payload is not an object')
-    WHERE json_valid(NEW.payload) = 0 OR json_type(NEW.payload) <> 'object';
-  SELECT RAISE(ABORT, 'Phase D audit payload contains a forbidden field')
-    WHERE EXISTS (SELECT 1 FROM json_each(NEW.payload)
-      WHERE key NOT IN ('id','action','principal_category','principal_id','portfolio_id','review_id','snapshot_id','status','occurred_at','submitted_at','created_at'));
-  SELECT RAISE(ABORT, 'Phase D audit payload contains nested data')
-    WHERE EXISTS (SELECT 1 FROM json_each(NEW.payload) WHERE type IN ('object','array'));
-END;
-CREATE TRIGGER phase_d_audit_scope_guard
-BEFORE INSERT ON audit_event_portfolios
-WHEN EXISTS (SELECT 1 FROM audit_events a WHERE a.id = NEW.audit_event_id AND a.action IN ('review_submitted','feedback_submitted'))
-BEGIN
-  SELECT RAISE(ABORT, 'Phase D audit association requires retention')
-    WHERE NEW.retain_until IS NULL;
-  SELECT RAISE(ABORT, 'Phase D audit association retention mismatch')
-    WHERE NEW.retain_until <> (SELECT retain_until FROM audit_events WHERE id = NEW.audit_event_id);
-  SELECT RAISE(ABORT, 'Phase D audit association owner mismatch')
-    WHERE NOT EXISTS (SELECT 1 FROM audit_events a JOIN advisory_reviews r ON a.action = 'review_submitted' AND a.entity_type = 'advisory_review' AND a.entity_id = r.id
-      WHERE a.id = NEW.audit_event_id AND r.portfolio_id = NEW.portfolio_id)
-      AND NOT EXISTS (SELECT 1 FROM audit_events a JOIN review_feedback f ON a.action = 'feedback_submitted' AND a.entity_type = 'review_feedback' AND a.entity_id = f.id
-      WHERE a.id = NEW.audit_event_id AND f.portfolio_id = NEW.portfolio_id);
-END;
-CREATE TRIGGER phase_d_audit_events_append_only_update
-BEFORE UPDATE ON audit_events WHEN OLD.action IN ('review_submitted','feedback_submitted') BEGIN
-  SELECT RAISE(ABORT, 'Phase D rows are append-only');
-END;
-CREATE TRIGGER phase_d_audit_events_append_only_delete
-BEFORE DELETE ON audit_events WHEN OLD.action IN ('review_submitted','feedback_submitted') BEGIN
-  SELECT RAISE(ABORT, 'Phase D rows are append-only');
-END;
-CREATE TRIGGER phase_d_audit_scope_append_only_update
-BEFORE UPDATE ON audit_event_portfolios
-WHEN EXISTS (SELECT 1 FROM audit_events WHERE id = OLD.audit_event_id AND action IN ('review_submitted','feedback_submitted')) BEGIN
-  SELECT RAISE(ABORT, 'Phase D rows are append-only');
-END;
-CREATE TRIGGER phase_d_audit_scope_append_only_delete
-BEFORE DELETE ON audit_event_portfolios
-WHEN EXISTS (SELECT 1 FROM audit_events WHERE id = OLD.audit_event_id AND action IN ('review_submitted','feedback_submitted')) BEGIN
-  SELECT RAISE(ABORT, 'Phase D rows are append-only');
-END;
-CREATE TRIGGER phase_d_browser_principals_append_only_update BEFORE UPDATE ON browser_principals BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_browser_principals_append_only_delete BEFORE DELETE ON browser_principals BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_review_snapshots_append_only_update BEFORE UPDATE ON review_snapshots BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_review_snapshots_append_only_delete BEFORE DELETE ON review_snapshots BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_snapshot_holdings_append_only_update BEFORE UPDATE ON snapshot_holdings BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_snapshot_holdings_append_only_delete BEFORE DELETE ON snapshot_holdings BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_review_idempotency_owner_guard
-BEFORE INSERT ON review_idempotency BEGIN
-  SELECT RAISE(ABORT, 'review idempotency retention mismatch')
-    WHERE NEW.retain_until <> (SELECT retain_until FROM advisory_reviews WHERE id = NEW.review_id AND portfolio_id = NEW.portfolio_id);
-END;
-CREATE TRIGGER phase_d_feedback_idempotency_owner_guard
-BEFORE INSERT ON feedback_idempotency BEGIN
-  SELECT RAISE(ABORT, 'feedback idempotency retention mismatch')
-    WHERE NEW.retain_until <> (SELECT retain_until FROM review_feedback WHERE id = NEW.feedback_id AND portfolio_id = NEW.portfolio_id);
-END;
-CREATE TRIGGER phase_d_review_submission_permission_owner_guard
-BEFORE INSERT ON review_submission_permission_snapshots BEGIN
-  SELECT RAISE(ABORT, 'review permission snapshot owner mismatch')
-    WHERE NOT EXISTS (SELECT 1 FROM advisory_reviews WHERE id = NEW.review_id AND portfolio_id = NEW.portfolio_id);
-END;
-CREATE TRIGGER phase_d_feedback_permission_owner_guard
-BEFORE INSERT ON feedback_permission_snapshots BEGIN
-  SELECT RAISE(ABORT, 'feedback permission snapshot owner mismatch')
-    WHERE NOT EXISTS (SELECT 1 FROM review_feedback WHERE id = NEW.feedback_id AND browser_principal_id = NEW.browser_principal_id AND portfolio_id = NEW.portfolio_id AND review_id = NEW.review_id);
-END;
-CREATE TRIGGER phase_d_review_idempotency_append_only_update BEFORE UPDATE ON review_idempotency BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_review_idempotency_append_only_delete BEFORE DELETE ON review_idempotency BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_feedback_idempotency_append_only_update BEFORE UPDATE ON feedback_idempotency BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_feedback_idempotency_append_only_delete BEFORE DELETE ON feedback_idempotency BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_review_append_only_update BEFORE UPDATE ON advisory_reviews BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_review_append_only_delete BEFORE DELETE ON advisory_reviews BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_targets_append_only_update BEFORE UPDATE ON review_targets BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_targets_append_only_delete BEFORE DELETE ON review_targets BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_risks_append_only_update BEFORE UPDATE ON review_risks BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_risks_append_only_delete BEFORE DELETE ON review_risks BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_counterarguments_append_only_update BEFORE UPDATE ON review_counterarguments BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_counterarguments_append_only_delete BEFORE DELETE ON review_counterarguments BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_conditions_append_only_update BEFORE UPDATE ON review_conditions BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_conditions_append_only_delete BEFORE DELETE ON review_conditions BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_metrics_append_only_update BEFORE UPDATE ON review_metrics BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_metrics_append_only_delete BEFORE DELETE ON review_metrics BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_evidence_append_only_update BEFORE UPDATE ON review_evidence BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_evidence_append_only_delete BEFORE DELETE ON review_evidence BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_facts_append_only_update BEFORE UPDATE ON review_sourced_facts BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_facts_append_only_delete BEFORE DELETE ON review_sourced_facts BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_fact_links_append_only_update BEFORE UPDATE ON review_fact_evidence BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_fact_links_append_only_delete BEFORE DELETE ON review_fact_evidence BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_feedback_append_only_update BEFORE UPDATE ON review_feedback BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_feedback_append_only_delete BEFORE DELETE ON review_feedback BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_review_permissions_append_only_update BEFORE UPDATE ON review_submission_permission_snapshots BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_review_permissions_append_only_delete BEFORE DELETE ON review_submission_permission_snapshots BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_feedback_permissions_append_only_update BEFORE UPDATE ON feedback_permission_snapshots BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-CREATE TRIGGER phase_d_feedback_permissions_append_only_delete BEFORE DELETE ON feedback_permission_snapshots BEGIN SELECT RAISE(ABORT, 'Phase D rows are append-only'); END;
-```
+Reconstruction reads the parent, emits the primary permission first, then additional rows ordered by ordinal, and maps all other child arrays by their ordinals. Review evidence reconstructs each URL exactly as `https://` + `url_host` + `url_suffix`; no full URL, port, or mutable principal table is consulted. Feedback reconstruction preserves `note:null` versus each present 1–2,000-character string exactly. The complete and incomplete output branches, same-key fingerprint comparison, `201` replay, `Location`, and `409` obligations remain those declared in the OpenAPI contract.
 
-Every review, ordered child (targets, risks, counterarguments, conditions, metrics, evidence, sourced facts, fact/evidence links), feedback, both idempotency tables, and every Phase-D audit association and Activity row has a non-null boundary at least seven years after the associated operation. Existing generic audit, audit associations, and Activity rows may remain NULL. All review-owned tables have append-only update/delete triggers; their boundary is not a delete authorization. Migration 008 emits explicit `BEFORE UPDATE` and `BEFORE DELETE` triggers for every table listed in the generated checklist below, including both permission snapshot tables and Phase-D audit rows.
+The canonical timestamp predicate is the full length/GLOB/dot/Gregorian-date/hour/minute/second expression shown in every Phase-D timestamp-bearing table and installed Activity table. It rejects invalid Gregorian dates, leap days, `9999-99-99T99:99:99.000000000Z`, offsets, missing or non-nine-digit fractions, and out-of-range time fields while accepting valid leap-boundary values. Go `net/url` must apply the exact lowercase-host/no-port/no-fragment grammar before the storage transaction.
 
-Generated retention/immutability checklist (the migration generator emits the two named triggers for every `append-only` row class):
+## 8. Retention, append-only classes, and verification matrix
 
-| Table | Retention owner | UPDATE/DELETE policy |
-|---|---|---|
-| browser_principals | installation lifetime (no Phase-D purge) | append-only; stable `local-owner` identity |
-| machine_principals | operational principal lifecycle | administrative rotation/revocation fields remain mutable |
-| review_snapshots, snapshot_holdings | referenced immutable snapshot | append-only |
-| advisory_reviews | advisory_reviews.retain_until | append-only |
-| review_targets, review_risks, review_counterarguments, review_conditions | advisory_reviews.retain_until via mandatory owner FK | append-only |
-| review_metrics, review_evidence, review_sourced_facts, review_fact_evidence | advisory_reviews.retain_until via mandatory owner FK | append-only |
-| review_submission_permission_snapshots | advisory_reviews.retain_until via mandatory owner FK | append-only |
-| review_idempotency | its own retain_until, equality-guarded to advisory_reviews | append-only |
-| review_feedback | review_feedback.retain_until | append-only |
-| feedback_permission_snapshots | review_feedback.retain_until via mandatory owner FK | append-only |
-| feedback_idempotency | its own retain_until, equality-guarded to review_feedback | append-only |
-| audit_events (Phase D actions only) | owning review/feedback boundary | append-only |
-| audit_event_portfolios (Phase D associations) | its own retain_until, equality-guarded to audit owner | append-only |
-| activity_events (Phase D rows) | its own retain_until, equality-guarded to audit owner | append-only (existing triggers) |
+Every immutable parent and child, idempotency row, Phase-D audit association, and Phase-D Activity row has a non-null boundary at least seven years after its operation; children inherit the parent's boundary through owner equality guards. Existing mutable operational `machine_principals` configuration is intentionally not an immutable attribution source. The append-only mutation matrix covers browser principals, review snapshot keys and holdings, advisory reviews, targets, risks, counterarguments, conditions, metrics, evidence, sourced facts, fact/evidence links, both permission tables, both idempotency tables, feedback, Phase-D audit rows, audit associations, and Phase-D Activity rows. The verifier attempts UPDATE and DELETE for every class; only machine-principal lifecycle fields are intentionally mutable.
 
+The verifier extracts this single SQL fence verbatim, runs migrations 001–007, seeds one canonical legacy Activity row with NULL source and one with a non-null source plus its audit row, and runs the fence with `PRAGMA foreign_keys=ON`. It requires the installed `activity_events` columns/FK/indexes/triggers, no `activity_events_new`, preserved old columns/payloads and row count, exact non-null association boundary, preserved null source, migration record, and empty `foreign_key_check`. It then runs valid review and feedback transactions through audit association and Activity, and reruns owner, retention, attribution, zero-additional, wrong-kind/ID, permission, URL, feedback bound, timestamp, target 100/101, decimal/date, HTTP/error/header/Allow/Location/challenge, lifecycle, pagination, replay, and every mutation probe. OpenAPI is parsed, all references/examples/branches and seven-operation response rows are validated, and cached Redocly 2.62.1 is run when available; blocked threat-intelligence access is reported honestly rather than claimed as a pass.
 
-The verification matrix probes UPDATE and DELETE for every row class in this table, not a sample.
-
-## 7. Canonical reconstruction and retention rules
-
-A committed review is reconstructed only from the normalized graph, in this exact order: read `advisory_reviews` by `(portfolio_id,id)`; map `id -> review_id`, `snapshot_id`, `calculation_version`, `scope_type -> scope.type`, `historical_status -> status`, scalar text/model/timestamp/provenance columns to the identically named wire fields, and read `review_submission_permission_snapshots ORDER BY ordinal` for the immutable `submitted_by.principal_id`, `principal_type`, and permissions (never read current `machine_principals` permissions); read `review_targets ORDER BY ordinal` for the holding scope's positional `holding_ids` and `instrument_ids` (portfolio scope emits the required empty arrays); then read risks, counterarguments, conditions, and metrics each by ascending `ordinal`, evidence by ascending `ordinal`, and sourced facts by ascending `fact_ordinal`; resolve each fact's `review_fact_evidence` rows by ascending `evidence_ordinal` and emit the referenced evidence ID array in that deterministic order. `published_at` remains omitted when NULL. The database `id` is the wire `review_id`; `generated_at` and `submitted_at` map directly to their wire timestamps. `lifecycle` is the only derived portion: it is computed from the current snapshot while all historical columns remain unchanged.
-
-Feedback reconstruction reads `review_feedback` and `feedback_permission_snapshots ORDER BY ordinal` and maps those committed rows field-for-field to `ReviewFeedback.submitted_by`; it never reads the mutable browser principal/session configuration. Permission vocabulary is the closed set in the schema, order is the stored ordinal order, each snapshot has at least one row and at most two, and the review machine snapshot is committed in deterministic vocabulary order (`portfolio:read`, then `reviews:write` when granted); browser feedback snapshots use the stable `local-owner` ID, `browser_user`, and its committed `portfolio:read` permission.
-
-For a same-key replay, read `review_idempotency` by `(principal_id, portfolio_id, idempotency_key)`, compare the canonical request fingerprint, then read this same committed normalized graph by its stored `review_id`. A matching fingerprint returns exactly the reconstructed immutable representation and original `201`/`Location` semantics; a different fingerprint returns `409`. No replay path reads an opaque payload or relies on a provider. The write transaction commits the complete graph, audit association, and Activity row atomically before a replay can observe it.
-
-`retain_until` is canonical UTC text and must be at least seven years after the owning `submitted_at`, `occurred_at`, or `created_at` (as applicable), checked by the Phase-D owner/child triggers with `julianday` comparisons. Child and association INSERT triggers require equality with the owner boundary, preventing a shorter or mismatched boundary. The application has no purge/delete endpoint or background purge; append-only triggers reject deletion, idempotency keys remain reserved indefinitely, and no key reuse is in contract. A future purge requires a new reviewed/versioned migration that atomically processes this entire graph and replaces/disables append-only triggers.
-
-## 8. Lifecycle and implementation obligations
-
-`ReviewLifecycle` is an OpenAPI branch: `current_snapshot_id:null` requires `outdated:false`; a non-null current snapshot has an explicit current (`outdated:false`) or outdated (`outdated:true`) branch. Normatively `outdated=false` iff IDs match and `outdated=true` iff they differ; JSON Schema cannot compare two IDs, so the handler/store must enforce this equality.
-
-The exact historical snapshot, calculation version, targets, evidence, facts, recommendation, and status never change when a newer snapshot arrives. A missing current snapshot reports `current_snapshot_id:null` and `outdated:false` without rewriting history.
-
-The contract intentionally leaves all runtime pipeline work unchecked: migration implementation, domain/store transaction tests, machine auth, HTTP handlers, frontend, Hermes adapter, and dated-snapshot end-to-end tests. This record defines their required behavior only.
-
-## 9. Required verification cases
-
-A contract verifier must prove that OpenAPI rejects: portfolio scope with targets; holding scope with empty arrays or duplicate arrays; complete review with empty evidence/facts; complete review with `no_recommendation`; incomplete review with a recommendation; unavailable/stale evidence in a complete review; contradictory snapshot `state`/`complete`; contradictory lifecycle ID/null/`outdated`; final page with `next_cursor`; and non-final page without a cursor.
-
-The storage verifier must additionally accept a synthetic holding review with exactly 100 target pairs (`ordinal` 0–99) and reject ordinal 100/101 or a 101-item wire scope. Decimal probes accept `0`, `-0`, `12`, `-12`, and `12.50` only when they match the exact application regex `^-?(?:0|[1-9][0-9]*)(?:[.][0-9]+)?$`; `.`, `+`, `-`, `1.`, `01`, `1.2.3`, exponent notation, whitespace, and embedded controls are rejected. Timestamp probes accept only canonical UTC values and reject invalid dates, offsets, missing fractional digits, bad times, and bad nullable publication timestamps. URL probes accept the two positive examples above and reject empty hosts, whitespace/control characters, userinfo, wrong schemes, invalid ports, and overlength values. Foreign-portfolio audit association and Activity probes are run after an otherwise valid review/feedback audit and must fail owner checks.
-
-The scratch SQLite migration probe must execute actual migrations `001_initial.sql` through `007_thesis.sql` with `PRAGMA foreign_keys=ON`, seed one valid legacy Activity row with `source_audit_event_id IS NULL` and one with a non-null source plus its existing audit row, execute the documented `008_scoped_reviews.sql` transaction, and verify both rows are byte-for-byte preserved, `PRAGMA foreign_key_check` is empty, the source/order indexes and append-only triggers are recreated, and rollback restores the pre-migration schema on any failure. It must then insert a full Phase-D review/feedback graph with every scalar and child field, accept a correctly scoped Activity row with matching retention, and reject Phase-D Activity rows with NULL source, missing/mismatched retention, and cross-portfolio source association. It must also reject Phase-D audit payloads containing forbidden keys or a mismatched owner boundary while accepting the exact allowlisted payload.
-
-The normalized reconstruction probe must populate every `Review` field, all three text arrays, metrics, evidence including optional publication date, sourced facts and ordered fact/evidence links, targets, model provenance, principal attribution, idempotency row, audit association, and Activity. It must reconstruct field-for-field in the declared order from normalized tables alone (not `snapshots.payload` or an audit payload), replay the same key with the same fingerprint as `201` with the original `Location`, and reject a different fingerprint as `409`. A fresh in-memory SQLite probe with foreign keys enabled must reject: a review target from another portfolio/snapshot; a target whose instrument differs from the snapshot holding; a fact linked to evidence from another review; review idempotency with a principal/portfolio mismatch; feedback with a browser-principal/portfolio/review mismatch; feedback idempotency with a different feedback owner; and an Activity row whose audit association has another portfolio. It must accept the corresponding same-owner rows.
+A complete reconstruction is field-for-field from normalized rows only: parent scalars and timestamps, scope targets, three text arrays, metrics, component URL evidence, sourced facts and ordered links, model provenance, immutable attribution, lifecycle, idempotency, audit association, and Activity. No `snapshots.payload`, audit payload, opaque snapshot, current principal, full URL, or external store is a response source. The exact verification record must report the local commit SHA, commands, counts, blocked tools if any, exactly the two allowed changed files, `git diff --check 179f60ebc79d8f18f0ef97b803159d560aba072f..HEAD`, and a clean worktree.
