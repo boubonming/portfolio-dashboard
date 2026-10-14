@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,17 @@ import (
 	"testing"
 	"time"
 )
+
+func insertActivityFixture(t *testing.T, db *sql.DB, id, portfolioID, summary, occurredAt string) {
+	t.Helper()
+	retainUntil := "2033-01-02T12:00:00.000000000Z"
+	if _, timestamp, err := canonicalActivityTime(occurredAt); err == nil {
+		retainUntil = timestamp.AddDate(7, 0, 0).Format(activityTimestampFormat)
+	}
+	if _, err := db.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time,retain_until) VALUES(?,?,?,?,?,?,?,?,?,?)`, id, portfolioID, "system", "portfolio.snapshot.created", "portfolio", summary, "", occurredAt, occurredAt, retainUntil); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestActivityIsPortfolioScopedAndPaginatesDeterministically(t *testing.T) {
 	ctx := context.Background()
@@ -85,18 +97,14 @@ func TestActivityCursorIsBoundCanonicalAndStableAcrossReopen(t *testing.T) {
 		if index == 1 {
 			occurred = "2026-01-02T11:00:00.000000000Z"
 		}
-		if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time) VALUES(?,?,?,?,?,?,?,?,?)`, id, "cursor-a", "system", "portfolio.snapshot.created", "portfolio", id, "", occurred, occurred); err != nil {
-			t.Fatal(err)
-		}
+		insertActivityFixture(t, s.DB, id, "cursor-a", id, occurred)
 	}
 	page, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Limit: 1})
 	if err != nil || !page.HasMore || page.NextCursor == nil {
 		t.Fatalf("first page=%+v err=%v", page, err)
 	}
 	cursor := *page.NextCursor
-	if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time) VALUES(?,?,?,?,?,?,?,?,?)`, "event-new", "cursor-a", "system", "portfolio.snapshot.created", "portfolio", "event-new", "", "2026-01-02T12:00:01.000000000Z", "2026-01-02T12:00:01.000000000Z"); err != nil {
-		t.Fatal(err)
-	}
+	insertActivityFixture(t, s.DB, "event-new", "cursor-a", "event-new", "2026-01-02T12:00:01.000000000Z")
 	next, err := s.Activity(ctx, "cursor-a", ActivityPageOptions{Limit: 1, Cursor: cursor})
 	if err != nil || len(next.Items) != 1 || next.Items[0].ID != "event-old" {
 		t.Fatalf("stable keyset page=%+v err=%v", next, err)
@@ -148,9 +156,7 @@ func TestActivityDeepTupleRangePlanIsIndependentOfCursorDepth(t *testing.T) {
 	}
 	for index := 0; index < 2000; index++ {
 		id := fmt.Sprintf("deep-event-%04d", index)
-		if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time) VALUES(?,?,?,?,?,?,?,?,?)`, id, "deep-portfolio", "system", "portfolio.snapshot.created", "portfolio", id, "", now, now); err != nil {
-			t.Fatal(err)
-		}
+		insertActivityFixture(t, s.DB, id, "deep-portfolio", id, now)
 	}
 	first, err := s.Activity(ctx, "deep-portfolio", ActivityPageOptions{Limit: 20})
 	if err != nil || first.NextCursor == nil {
@@ -207,9 +213,7 @@ func TestActivityIsAppendOnlyAndUsesBoundedOrderIndex(t *testing.T) {
 	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "immutable-portfolio", "Immutable", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time) VALUES(?,?,?,?,?,?,?,?,?)`, "immutable-event", "immutable-portfolio", "system", "portfolio.snapshot.created", "portfolio", "summary", "", "2026-01-02T12:00:00.000000000Z", "2026-01-02T12:00:00.000000000Z"); err != nil {
-		t.Fatal(err)
-	}
+	insertActivityFixture(t, s.DB, "immutable-event", "immutable-portfolio", "summary", "2026-01-02T12:00:00.000000000Z")
 	if _, err := s.DB.Exec(`UPDATE activity_events SET summary='changed' WHERE id='immutable-event'`); err == nil {
 		t.Fatal("activity update unexpectedly succeeded")
 	}

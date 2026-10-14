@@ -421,6 +421,7 @@ func verifyActivitySchema(ctx context.Context, db *sql.DB) error {
 		{"action", "TEXT", 1, 0}, {"category", "TEXT", 1, 0}, {"entity_type", "TEXT", 0, 0},
 		{"entity_id", "TEXT", 0, 0}, {"summary", "TEXT", 1, 0}, {"details", "TEXT", 1, 0},
 		{"occurred_at", "TEXT", 1, 0}, {"sort_time", "TEXT", 1, 0}, {"source_audit_event_id", "TEXT", 0, 0},
+		{"retain_until", "TEXT", 1, 0},
 	}
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info(activity_events)")
 	if err != nil {
@@ -454,11 +455,8 @@ func verifyActivitySchema(ctx context.Context, db *sql.DB) error {
 	if foreignKeyCount != 1 {
 		return errors.New("activity_events portfolio foreign key is missing or incorrect")
 	}
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_list('activity_events') WHERE "table"='audit_events' AND "from"='source_audit_event_id' AND "to"='id'`).Scan(&foreignKeyCount); err != nil {
+	if err := verifyForeignKey(ctx, db, "activity_events", []string{"source_audit_event_id", "portfolio_id"}, "audit_event_portfolios", []string{"audit_event_id", "portfolio_id"}); err != nil {
 		return err
-	}
-	if foreignKeyCount != 1 {
-		return errors.New("activity_events audit foreign key is missing or incorrect")
 	}
 	var unique int
 	if err := db.QueryRowContext(ctx, `SELECT "unique" FROM pragma_index_list('activity_events') WHERE name='idx_activity_source_portfolio'`).Scan(&unique); err != nil {
@@ -478,7 +476,7 @@ func verifyActivitySchema(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("activity table definition: %w", err)
 	}
 	lowerSQL := strings.ToLower(tableSQL)
-	for _, fragment := range []string{"length(occurred_at) = 30", "glob", "strftime", "julianday", "1970-01-01t00:00:00.000000000z", "sort_time = occurred_at"} {
+	for _, fragment := range []string{"length(occurred_at)=30", "glob", "strftime", "julianday", "sort_time=occurred_at", "length(retain_until)=30"} {
 		if !strings.Contains(lowerSQL, fragment) {
 			return fmt.Errorf("activity timestamp check is missing %q", fragment)
 		}
