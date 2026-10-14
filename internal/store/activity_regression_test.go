@@ -32,7 +32,7 @@ func activitySchemaReplacement(includeForeignKeys, includeTimestampCheck bool) s
 	}
 	auditForeignKey := ""
 	if includeForeignKeys {
-		auditForeignKey = " REFERENCES audit_events(id)"
+		auditForeignKey = ",\n FOREIGN KEY(source_audit_event_id,portfolio_id) REFERENCES audit_event_portfolios(audit_event_id,portfolio_id)"
 	}
 	check := ""
 	if includeTimestampCheck {
@@ -56,7 +56,8 @@ CREATE TABLE activity_events (
  details TEXT NOT NULL DEFAULT '',
  occurred_at TEXT NOT NULL` + check + `,
  sort_time TEXT NOT NULL CHECK (sort_time = occurred_at),
- source_audit_event_id TEXT` + auditForeignKey + `
+ source_audit_event_id TEXT,
+ retain_until TEXT NOT NULL CHECK (length(retain_until) = 30)` + auditForeignKey + `
 );
 CREATE UNIQUE INDEX idx_activity_source_portfolio ON activity_events(source_audit_event_id, portfolio_id);
 CREATE INDEX idx_activity_portfolio_order ON activity_events(portfolio_id, sort_time DESC, id DESC);`
@@ -172,7 +173,7 @@ func TestActivitySchemaRejectsImpossibleCalendarValues(t *testing.T) {
 	if _, err = s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "calendar-portfolio", "Calendar", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time) VALUES(?,?,?,?,?,?,?,?,?)`, "bad-date", "calendar-portfolio", "system", "test", "test", "bad", "", "2026-02-30T12:00:00.000000000Z", "2026-02-30T12:00:00.000000000Z")
+	_, err = s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,summary,details,occurred_at,sort_time,retain_until) VALUES(?,?,?,?,?,?,?,?,?,?)`, "bad-date", "calendar-portfolio", "system", "test", "test", "bad", "", "2026-02-30T12:00:00.000000000Z", "2026-02-30T12:00:00.000000000Z", "2033-01-02T12:00:00.000000000Z")
 	if err == nil {
 		t.Fatal("impossible calendar date accepted")
 	}

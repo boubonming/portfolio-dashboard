@@ -184,16 +184,54 @@ func recordActivity(ctx context.Context, tx *sql.Tx, portfolioID, actor, action,
 	if strings.TrimSpace(portfolioID) == "" {
 		return errors.New("activity portfolio is required")
 	}
-	canonicalOccurredAt, _, err := canonicalActivityTime(occurredAt)
+	canonicalOccurredAt, occurredTime, err := canonicalActivityTime(occurredAt)
 	if err != nil {
 		return fmt.Errorf("invalid activity timestamp: %w", err)
+	}
+	retainUntil := occurredTime.AddDate(7, 0, 0).Format(activityTimestampFormat)
+	if strings.TrimSpace(sourceAuditID) != "" {
+		var auditCreatedAt string
+		var auditRetainUntil sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT created_at, retain_until FROM audit_events WHERE id=?`, sourceAuditID).Scan(&auditCreatedAt, &auditRetainUntil); err != nil {
+			return fmt.Errorf("activity source audit %q: %w", sourceAuditID, err)
+		}
+		_, auditCreatedTime, err := canonicalActivityTime(auditCreatedAt)
+		if err != nil {
+			return fmt.Errorf("invalid source audit timestamp: %w", err)
+		}
+		minimumRetentionTime := occurredTime.AddDate(7, 0, 0)
+		if auditMinimum := auditCreatedTime.AddDate(7, 0, 0); auditMinimum.After(minimumRetentionTime) {
+			minimumRetentionTime = auditMinimum
+		}
+		if auditRetainUntil.Valid && auditRetainUntil.String != "" {
+			canonicalAuditRetainUntil, auditRetainTime, err := canonicalActivityTime(auditRetainUntil.String)
+			if err != nil || auditRetainTime.Before(minimumRetentionTime) {
+				return fmt.Errorf("invalid source audit retention")
+			}
+			retainUntil = canonicalAuditRetainUntil
+		} else {
+			retainUntil = minimumRetentionTime.Format(activityTimestampFormat)
+			if _, err := tx.ExecContext(ctx, `UPDATE audit_events SET retain_until=? WHERE id=? AND retain_until IS NULL`, retainUntil, sourceAuditID); err != nil {
+				return fmt.Errorf("set source audit retention: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_event_portfolios(audit_event_id,portfolio_id,retain_until) VALUES(?,?,?) ON CONFLICT(audit_event_id,portfolio_id) DO NOTHING`, sourceAuditID, portfolioID, retainUntil); err != nil {
+			return fmt.Errorf("associate source audit: %w", err)
+		}
+		var associationRetention sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT retain_until FROM audit_event_portfolios WHERE audit_event_id=? AND portfolio_id=?`, sourceAuditID, portfolioID).Scan(&associationRetention); err != nil {
+			return fmt.Errorf("read source audit association: %w", err)
+		}
+		if !associationRetention.Valid || associationRetention.String != retainUntil {
+			return fmt.Errorf("source audit ownership or retention mismatch")
+		}
 	}
 	id := deterministicID("activity", sourceAuditID, portfolioID)
 	actor = safeActorCategory(actor)
 	_, err = tx.ExecContext(ctx, `INSERT INTO activity_events
-		(id,portfolio_id,actor_category,action,category,entity_type,entity_id,summary,details,occurred_at,sort_time,source_audit_event_id)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, portfolioID, actor, action, category,
-		nullableStringValue(entityType), nullableStringValue(entityID), summary, details, canonicalOccurredAt, canonicalOccurredAt, nullableStringValue(sourceAuditID))
+		(id,portfolio_id,actor_category,action,category,entity_type,entity_id,summary,details,occurred_at,sort_time,source_audit_event_id,retain_until)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, portfolioID, actor, action, category,
+		nullableStringValue(entityType), nullableStringValue(entityID), summary, details, canonicalOccurredAt, canonicalOccurredAt, nullableStringValue(sourceAuditID), retainUntil)
 	return err
 }
 
