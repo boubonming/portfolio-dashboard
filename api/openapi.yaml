@@ -404,8 +404,7 @@ components:
         Opaque machine credential for the fixed Hermes principal. The token is
         injected into the Hermes environment, compared in constant time, and
         never stored in SQLite, returned, logged, placed in a URL, or exposed
-        to browser code. The principal is configured with portfolio:read and,
-        only for review submission, reviews:write.
+        to browser code. The same active principal requires reviews:write for review submission; portfolio:read is the only optional additional permission.
   headers:
     NoStore:
       description: Private responses are never stored by shared or browser caches.
@@ -585,7 +584,7 @@ components:
       format: uri
       minLength: 1
       maxLength: 2048
-      pattern: '^https://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?:[/?][A-Za-z0-9._~:/?$&''()*+,;=%!-]*)?$'
+      pattern: '^https://(?=[^/?]{1,253}(?:[/?]|$))[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?:[/?][A-Za-z0-9._~:/?$&''()*+,;=%!-]*)?$'
       description: >-
         Canonical HTTPS URL accepted by the Go net/url store boundary. Host
         labels are lowercase ASCII DNS labels (1-63 bytes, total at most 253);
@@ -1099,6 +1098,13 @@ components:
         principal_id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
         principal_type: { type: string, enum: [browser_user, machine] }
         permissions: { type: array, minItems: 1, maxItems: 2, uniqueItems: true, items: { type: string, enum: [portfolio:read, reviews:write] } }
+      description: >-
+        Immutable effective permissions captured at authentication time. A
+        machine review attribution always has reviews:write as its primary
+        permission and may include portfolio:read only when that same active
+        portfolio-bound principal had it enabled. A browser attribution is the
+        stable local-owner principal with the fixed portfolio:read permission;
+        callers cannot claim arbitrary or currently disabled permissions.
     ReviewPage:
       oneOf:
         - $ref: '#/components/schemas/ReviewPageFinal'
