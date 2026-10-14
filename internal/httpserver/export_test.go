@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/auth"
+	"github.com/boubonming/portfolio-dashboard/internal/domain"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 )
 
@@ -240,6 +241,39 @@ func TestExportTextEscapesFormulaPrefixesAndPreservesCanonicalValues(t *testing.
 	date := "2026-01-02"
 	if got := optionalDate(&date); got != date {
 		t.Fatalf("canonical date changed: %q", got)
+	}
+}
+
+func TestExportHoldingRowLeavesAbsentAndZeroSourceRowsBlank(t *testing.T) {
+	view := domain.PortfolioOverview{Portfolio: domain.PortfolioSummary{ID: "portfolio-source-row"}}
+	for _, test := range []struct {
+		name      string
+		sourceRow int
+		want      string
+	}{
+		{name: "absent", sourceRow: 0, want: ""},
+		{name: "positive", sourceRow: 12, want: "12"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			holding := domain.HoldingView{SourceRow: test.sourceRow}
+			row := exportHoldingRow(view, holding)
+			if got := row[26]; got != test.want {
+				t.Fatalf("source_row=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRenderPortfolioCSVReturnsNoPartialBytesWhenGenerationIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	body, err := renderPortfolioCSV(ctx, domain.PortfolioOverview{Holdings: []domain.HoldingView{{LotID: "lot-never-written"}}})
+	if err == nil {
+		t.Fatal("expected canceled generation to fail")
+	}
+	if body != nil {
+		t.Fatalf("canceled generation returned partial CSV bytes: %q", body)
 	}
 }
 

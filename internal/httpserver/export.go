@@ -133,9 +133,16 @@ func exportHoldingRow(view domain.PortfolioOverview, holding domain.HoldingView)
 		holding.Quantity, exportText(holding.Currency), optionalDecimal(holding.UnitCost), optionalDecimal(holding.CostBasis),
 		optionalDecimal(holding.LatestPrice), optionalDecimal(holding.LatestValue), optionalDecimal(holding.ReportingValue),
 		exportText(holding.QuoteSource), exportTimestamp(holding.Freshness.MarketAt), exportText(holding.Freshness.Status), exportText(holding.Freshness.Age),
-		optionalText(holding.Broker), optionalDate(holding.AcquisitionDate), fmt.Sprintf("%d", holding.SourceRow),
+		optionalText(holding.Broker), optionalDate(holding.AcquisitionDate), optionalSourceRow(holding.SourceRow),
 		fmt.Sprintf("%t", holding.MissingBroker), fmt.Sprintf("%t", holding.MissingAcquisitionDate), exportText(strings.Join(holding.DataQuality, "|")),
 	}
+}
+
+func optionalSourceRow(value int) string {
+	if value <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", value)
 }
 
 func optionalDecimal(value *string) string {

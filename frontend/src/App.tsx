@@ -148,6 +148,22 @@ export function safeCSVFilename(contentDisposition: string | null, currency: str
   return filename && filename.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*\.csv$/i.test(filename) ? filename : fallback
 }
 
+export function isCSVContentType(contentType: string | null) {
+  if (!contentType) return false
+  const [mediaType, ...parameters] = contentType.split(';')
+  if (mediaType.trim().toLowerCase() !== 'text/csv') return false
+  return parameters.every((parameter) => /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+\s*=\s*(?:[!#$%&'*+\-.^_`|~0-9A-Za-z]+|"(?:[^"\\]|\\.)*")$/.test(parameter.trim()))
+}
+
+function validPortfolioID(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128 && value === value.trim() && !/[/?#\u0000-\u001f\u007f]/.test(value)
+}
+
+function currentPortfolioID(value: PortfolioOverview | null) {
+  const candidate = value?.portfolio?.id
+  return validPortfolioID(candidate) ? candidate : null
+}
+
 function qualityLabel(holding: Holding) {
   const flags = [...holding.data_quality]
   if (holding.freshness.status && holding.freshness.status !== 'fresh' && !flags.includes(holding.freshness.status)) flags.unshift(holding.freshness.status)
@@ -427,6 +443,7 @@ export default function App() {
       .then((response) => jsonResponse<PortfolioOverview>(response))
       .then((overview) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== loadGeneration.current) return
+        if (!currentPortfolioID(overview)) throw new Error('Invalid portfolio overview')
         setData(overview)
         setState('ready')
       })
@@ -440,6 +457,13 @@ export default function App() {
 
   const downloadCSV = useCallback(() => {
     if (authState !== 'authenticated' || exportState === 'loading') return
+    const portfolioID = currentPortfolioID(data)
+    if (state !== 'ready' || !portfolioID) {
+      setExportError('Unable to download CSV: no valid portfolio overview is loaded.')
+      setExportAnnouncement('CSV download failed. Please try again.')
+      setExportState('error')
+      return
+    }
     const authGenerationAtStart = authGeneration.current
     const generation = ++exportGeneration.current
     exportControllerRef.current?.abort()
@@ -448,20 +472,25 @@ export default function App() {
     setExportState('loading')
     setExportError('')
     setExportAnnouncement('Preparing CSV download…')
-    apiFetch(`/api/v1/portfolios/${activityPortfolioID}/export.csv?currency=${encodeURIComponent(currency)}`, { signal: controller.signal })
+    apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioID)}/export.csv?currency=${encodeURIComponent(currency)}`, { signal: controller.signal, headers: { Accept: 'text/csv' } })
       .then(async (response) => {
         if (!response.ok) throw new APIError(response.status)
+        if (!isCSVContentType(response.headers.get('Content-Type'))) throw new Error('Invalid CSV response MIME type')
         const blob = await response.blob()
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== exportGeneration.current) return
         const objectURL = URL.createObjectURL(blob)
-        const link = document.createElement('a')
-        link.href = objectURL
-        link.download = safeCSVFilename(response.headers.get('Content-Disposition'), currency)
-        link.style.display = 'none'
-        document.body.appendChild(link)
-        link.click()
-        link.remove()
-        window.setTimeout(() => URL.revokeObjectURL(objectURL), 0)
+        let link: HTMLAnchorElement | null = null
+        try {
+          link = document.createElement('a')
+          link.href = objectURL
+          link.download = safeCSVFilename(response.headers.get('Content-Disposition'), currency)
+          link.style.display = 'none'
+          document.body.appendChild(link)
+          link.click()
+        } finally {
+          try { link?.remove() } finally { URL.revokeObjectURL(objectURL) }
+        }
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== exportGeneration.current) return
         setExportState('idle')
         setExportAnnouncement('CSV download started.')
       })
@@ -469,13 +498,13 @@ export default function App() {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== exportGeneration.current) return
         if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
         setExportError(reason instanceof Error ? reason.message : 'Unable to download CSV')
-        setExportAnnouncement('')
+        setExportAnnouncement('CSV download failed. Please try again.')
         setExportState('error')
       })
       .finally(() => {
         if (exportControllerRef.current === controller) exportControllerRef.current = null
       })
-  }, [authState, clearPrivateState, currency, exportState, view])
+  }, [authState, clearPrivateState, currency, data, exportState, state, view])
 
   useEffect(() => {
     exportGeneration.current += 1
