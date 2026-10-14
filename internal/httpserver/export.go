@@ -76,7 +76,7 @@ func portfolioExport(database *store.Store) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-		w.Header().Set("Content-Disposition", `attachment; filename="portfolio-export-`+currency+`.csv"`)
+		w.Header().Set("Content-Disposition", "attachment; filename=\"portfolio-export-"+currency+".csv\"")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)

@@ -83,20 +83,25 @@ afterEach(() => {
 })
 
 describe('Portfolio Dashboard', () => {
-	it('accepts only a safe server CSV filename and falls back for malformed values', () => {
-		expect(safeCSVFilename('attachment; filename="portfolio-export-USD.csv"', 'USD')).toBe('portfolio-export-USD.csv')
+	it('accepts the exact backend CSV filename and falls back for malformed values', () => {
+		expect(safeCSVFilename('attachment; filename="portfolio-export-MYR.csv"', 'USD')).toBe('portfolio-export-MYR.csv')
+		expect(safeCSVFilename(String.raw`attachment; filename=\"portfolio-export-MYR.csv\"`, 'USD')).toBe('portfolio-export-USD.csv')
 		expect(safeCSVFilename('attachment; filename="../../private.csv"', 'USD')).toBe('portfolio-export-USD.csv')
+		expect(safeCSVFilename('attachment; filename="nested/private.csv"', 'USD')).toBe('portfolio-export-USD.csv')
+		expect(safeCSVFilename(String.raw`attachment; filename="nested\private.csv"`, 'USD')).toBe('portfolio-export-USD.csv')
 		expect(safeCSVFilename('attachment; filename="evil\r\nX.csv"', 'USD')).toBe('portfolio-export-USD.csv')
+		expect(safeCSVFilename(`attachment; filename="${'a'.repeat(129)}.csv"`, 'USD')).toBe('portfolio-export-USD.csv')
 	})
 
 	it('downloads the selected reporting currency using the server filename and revokes its blob URL', async () => {
-		vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+		let downloadedFilename = ''
+		vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { downloadedFilename = this.download })
 		const createObjectURL = vi.fn(() => 'blob:fixture')
 		const revokeObjectURL = vi.fn()
 		Object.assign(URL, { createObjectURL, revokeObjectURL })
 		const fetchMock = vi.fn((input: RequestInfo | URL) => {
 			const url = String(input)
-			if (url.includes('/api/v1/portfolios/') && url.includes('/export.csv')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ 'Content-Disposition': 'attachment; filename="portfolio-export-USD.csv"' }), blob: async () => new Blob(['portfolio_id\n']) } as Response)
+			if (url.includes('/api/v1/portfolios/') && url.includes('/export.csv')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ 'Content-Disposition': 'attachment; filename="portfolio-export-USD-20261014.csv"' }), blob: async () => new Blob(['portfolio_id\n']) } as Response)
 			return Promise.resolve({ ok: true, status: 200, json: async () => url.includes('currency=USD') ? { ...completeOverview, reporting_currency: 'USD' } : completeOverview } as Response)
 		})
 		vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
@@ -108,6 +113,7 @@ describe('Portfolio Dashboard', () => {
 		await waitFor(() => expect(createObjectURL).toHaveBeenCalledOnce())
 		const exportCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/export.csv'))
 		expect(String(exportCall?.[0])).toContain('currency=USD')
+		expect(downloadedFilename).toBe('portfolio-export-USD-20261014.csv')
 		await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith('blob:fixture'))
 	})
 

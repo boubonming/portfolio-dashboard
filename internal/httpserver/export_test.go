@@ -36,6 +36,9 @@ func TestPortfolioExportCSVUsesOverviewDecimalsAndStableLotRows(t *testing.T) {
 	if got := response.Header().Get("Content-Disposition"); got != `attachment; filename="portfolio-export-MYR.csv"` {
 		t.Fatalf("content disposition=%q", got)
 	}
+	if strings.Contains(response.Header().Get("Content-Disposition"), `\`) {
+		t.Fatalf("content disposition contains a backslash: %q", response.Header().Get("Content-Disposition"))
+	}
 	if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("security headers cache=%q nosniff=%q", response.Header().Get("Cache-Control"), response.Header().Get("X-Content-Type-Options"))
 	}
