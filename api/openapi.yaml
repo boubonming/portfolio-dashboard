@@ -144,7 +144,7 @@ paths:
           content:
             text/csv:
               schema: { type: string, format: binary }
-        '400': { description: Missing, unsupported, duplicate, unknown, or non-canonical currency query }
+        '400': { description: 'Missing, unsupported, duplicate, unknown, or non-canonical currency query' }
         '401': { description: Authentication is required; response is never cacheable }
         '404': { description: Portfolio or API route not found }
         '405': { description: Read-only endpoint does not accept mutation methods }
