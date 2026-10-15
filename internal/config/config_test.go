@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -22,6 +23,9 @@ func setValidEnvironment(t *testing.T) {
 	t.Setenv("PORTFOLIO_COOKIE_SECURE", "true")
 	t.Setenv("PORTFOLIO_SESSION_TTL", "12h")
 	t.Setenv("PORTFOLIO_ENV", "production")
+	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET", "PORTFOLIO_MACHINE_PORTFOLIO_READ"} {
+		t.Setenv(name, "")
+	}
 }
 
 func TestLoadFailsClosedForCookieAndOriginDeploymentModes(t *testing.T) {
@@ -85,5 +89,70 @@ func TestLoadValidatesSecretAndSessionTTL(t *testing.T) {
 				t.Fatalf("session TTL %s rejected: %v", ttl, err)
 			}
 		})
+	}
+}
+
+func TestLoadMachineConfigurationIsDisabledOrFailClosed(t *testing.T) {
+	t.Run("absent is disabled", func(t *testing.T) {
+		setValidEnvironment(t)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Auth.Machine.Enabled() {
+			t.Fatal("machine authentication unexpectedly enabled")
+		}
+	})
+	tests := []struct {
+		name string
+		set  func(*testing.T)
+	}{
+		{"partial principal", func(t *testing.T) { t.Setenv("PORTFOLIO_MACHINE_PRINCIPAL_ID", "machine") }},
+		{"partial portfolio", func(t *testing.T) { t.Setenv("PORTFOLIO_MACHINE_PORTFOLIO_ID", "portfolio") }},
+		{"partial secret", func(t *testing.T) {
+			t.Setenv("PORTFOLIO_MACHINE_BEARER_SECRET", "machine-secret-that-is-long-but-not-a-complete-config-0123456789")
+		}},
+		{"grant without principal", func(t *testing.T) { t.Setenv("PORTFOLIO_MACHINE_PORTFOLIO_READ", "true") }},
+		{"weak secret", func(t *testing.T) {
+			t.Setenv("PORTFOLIO_MACHINE_PRINCIPAL_ID", "machine")
+			t.Setenv("PORTFOLIO_MACHINE_PORTFOLIO_ID", "portfolio")
+			t.Setenv("PORTFOLIO_MACHINE_BEARER_SECRET", "ssssssssssssssssssssssssssssssss")
+		}},
+		{"invalid grant", func(t *testing.T) { t.Setenv("PORTFOLIO_MACHINE_PORTFOLIO_READ", "maybe") }},
+		{"secret newline", func(t *testing.T) {
+			t.Setenv("PORTFOLIO_MACHINE_PRINCIPAL_ID", "machine")
+			t.Setenv("PORTFOLIO_MACHINE_PORTFOLIO_ID", "portfolio")
+			t.Setenv("PORTFOLIO_MACHINE_BEARER_SECRET", "machine-secret-with-enough-diversity-0123456789\n")
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setValidEnvironment(t)
+			tc.set(t)
+			if _, err := Load(); err == nil {
+				t.Fatal("invalid machine configuration was accepted")
+			} else if strings.Contains(err.Error(), "machine-secret") {
+				t.Fatalf("machine secret leaked in configuration error: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadValidMachineConfigurationDoesNotExposeSecret(t *testing.T) {
+	setValidEnvironment(t)
+	secret := "machine-secret-with-enough-diversity-0123456789-ABCDEF"
+	t.Setenv("PORTFOLIO_MACHINE_PRINCIPAL_ID", "machine-reader")
+	t.Setenv("PORTFOLIO_MACHINE_PORTFOLIO_ID", "portfolio-api")
+	t.Setenv("PORTFOLIO_MACHINE_BEARER_SECRET", secret)
+	t.Setenv("PORTFOLIO_MACHINE_PORTFOLIO_READ", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Auth.Machine.Enabled() || !cfg.Auth.Machine.PortfolioRead {
+		t.Fatalf("machine config = %s", cfg.Auth.Machine)
+	}
+	if strings.Contains(cfg.Auth.Machine.String(), secret) {
+		t.Fatal("machine secret leaked in String rendering")
 	}
 }

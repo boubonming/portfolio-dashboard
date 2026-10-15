@@ -234,3 +234,29 @@ func fixtureAuthenticatorWithClock(t *testing.T, clock *time.Time) *Authenticato
 	}
 	return authenticator
 }
+
+func TestMachineConfigValidationAndConstantTimeTokenBoundary(t *testing.T) {
+	if err := (MachineConfig{}).Validate(); err != nil {
+		t.Fatalf("disabled machine configuration rejected: %v", err)
+	}
+	if err := (MachineConfig{PortfolioRead: true}).Validate(); err == nil {
+		t.Fatal("grant-only machine configuration was accepted")
+	}
+	config := MachineConfig{PrincipalID: "machine-reader", PortfolioID: "portfolio-api", BearerSecret: "machine-secret-with-enough-diversity-0123456789-ABCDEF", PortfolioRead: true}
+	if err := config.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !config.MachineTokenValid(config.BearerSecret) || config.MachineTokenValid(config.BearerSecret+"x") {
+		t.Fatal("machine token boundary was not enforced")
+	}
+	for _, invalid := range []MachineConfig{
+		{PrincipalID: "machine", PortfolioID: "portfolio", BearerSecret: "short"},
+		{PrincipalID: "machine", PortfolioID: "portfolio", BearerSecret: "ssssssssssssssssssssssssssssssss"},
+		{PrincipalID: "machine", PortfolioID: "portfolio", BearerSecret: "machine-secret-with-enough-diversity-0123456789\n-ABCDEF"},
+		{PrincipalID: "machine/escape", PortfolioID: "portfolio", BearerSecret: config.BearerSecret},
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("invalid machine configuration accepted: %s", invalid)
+		}
+	}
+}

@@ -38,6 +38,7 @@ type Config struct {
 	Username      string
 	PasswordHash  string
 	SessionSecret string
+	Machine       MachineConfig
 	PublicOrigin  string
 	Environment   string
 	CookieSecure  bool
@@ -46,6 +47,9 @@ type Config struct {
 }
 
 func (c Config) Validate() error {
+	if err := c.Machine.Validate(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.Username) == "" || len(c.Username) > 256 {
 		return fmt.Errorf("%w: username is required", ErrInvalidConfig)
 	}
@@ -128,6 +132,14 @@ func (a *Authenticator) ActivityCursorSecret() []byte {
 	mac := hmac.New(sha256.New, a.secret)
 	_, _ = mac.Write([]byte("portfolio-dashboard/activity-cursor/v1"))
 	return mac.Sum(nil)
+}
+
+func (a *Authenticator) MachinePrincipal() MachinePrincipal {
+	return a.config.Machine.Principal()
+}
+
+func (a *Authenticator) MachineTokenValid(token string) bool {
+	return a.config.Machine.MachineTokenValid(token)
 }
 
 func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request, request LoginRequest) (SessionResponse, bool) {

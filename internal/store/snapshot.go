@@ -77,7 +77,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 	digest := sha256.Sum256(hashInput)
 	inputHash := hex.EncodeToString(digest[:])
 	snapshotID := deterministicID("snapshot", request.PortfolioID, request.CalculationVersion, inputHash)
-	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	createdAt := canonicalSnapshotTime(time.Now().UTC())
 	sourceHashes := []string{}
 	seenSource := map[string]bool{}
 	for _, lot := range input.Lots {
@@ -87,7 +87,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		}
 	}
 	sort.Strings(sourceHashes)
-	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: request.AsOf.Format(time.RFC3339Nano), MaxAge: request.MaxAge, SourceHashes: sourceHashes, Input: input, Valuation: valuation}
+	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: canonicalSnapshotTime(request.AsOf), MaxAge: request.MaxAge, SourceHashes: sourceHashes, Input: input, Valuation: valuation}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return domain.SnapshotStatus{}, err
@@ -107,6 +107,14 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 			return domain.SnapshotStatus{}, readErr
 		}
 		return statusFromPayload(existing)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO review_snapshots(portfolio_id,snapshot_id,calculation_version) VALUES(?,?,?)`, request.PortfolioID, snapshotID, request.CalculationVersion); err != nil {
+		return domain.SnapshotStatus{}, fmt.Errorf("persist review snapshot: %w", err)
+	}
+	for _, lot := range input.Lots {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO snapshot_holdings(portfolio_id,snapshot_id,holding_id,instrument_id) VALUES(?,?,?,?)`, request.PortfolioID, snapshotID, lot.ID, lot.InstrumentID); err != nil {
+			return domain.SnapshotStatus{}, fmt.Errorf("persist snapshot holding: %w", err)
+		}
 	}
 	auditID := deterministicID("audit", "snapshot", snapshotID)
 	auditPayload, _ := json.Marshal(map[string]any{"complete": valuation.Complete, "calculation_version": request.CalculationVersion})
