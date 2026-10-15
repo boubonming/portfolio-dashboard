@@ -55,6 +55,16 @@ set `PORTFOLIO_ENV=development PORTFOLIO_COOKIE_SECURE=false`; there are no
 default credentials or secrets. CSRF tokens are returned by session bootstrap,
 kept in frontend memory, and required on unsafe same-origin API requests.
 
+The optional scoped machine reader is configured only through
+`PORTFOLIO_MACHINE_PRINCIPAL_ID`, `PORTFOLIO_MACHINE_PORTFOLIO_ID`,
+`PORTFOLIO_MACHINE_BEARER_SECRET`, and `PORTFOLIO_MACHINE_PORTFOLIO_READ=true`.
+Leave all four unset to disable machine authentication. A partial configuration,
+invalid grant, or bearer secret shorter than 32 printable random bytes fails
+closed. The bearer secret is never written to SQLite, logs, URLs, frontend
+assets, or diagnostics; only the non-secret principal binding is registered in
+the database. The fixed principal retains `reviews:write` for the later review
+submission slice.
+
 ## Non-mutating import preview
 
 Preview the authoritative note without changing the note or SQLite:

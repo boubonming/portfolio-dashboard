@@ -62,22 +62,26 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 	if err != nil {
 		return domain.SnapshotStatus{}, err
 	}
+	if len(input.Lots) > maxSnapshotHoldings {
+		return domain.SnapshotStatus{}, ErrSnapshotCorrupt
+	}
 	valuation, err := domain.Calculate(input)
 	if err != nil {
 		return domain.SnapshotStatus{}, err
 	}
-	hashInput, err := json.Marshal(struct {
-		Version string                `json:"version"`
-		MaxAge  time.Duration         `json:"max_age"`
-		Input   domain.ValuationInput `json:"input"`
-	}{request.CalculationVersion, request.MaxAge, input})
+	if !canonicalSnapshotLots(input.Lots, valuation.Lots) {
+		return domain.SnapshotStatus{}, ErrSnapshotCorrupt
+	}
+	if len(input.Lots) > maxSnapshotHoldings {
+		return domain.SnapshotStatus{}, ErrSnapshotCorrupt
+	}
+	digest, err := snapshotInputDigest(request.CalculationVersion, request.MaxAge, input)
 	if err != nil {
 		return domain.SnapshotStatus{}, err
 	}
-	digest := sha256.Sum256(hashInput)
 	inputHash := hex.EncodeToString(digest[:])
 	snapshotID := deterministicID("snapshot", request.PortfolioID, request.CalculationVersion, inputHash)
-	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	createdAt := canonicalSnapshotTime(time.Now().UTC())
 	sourceHashes := []string{}
 	seenSource := map[string]bool{}
 	for _, lot := range input.Lots {
@@ -87,7 +91,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		}
 	}
 	sort.Strings(sourceHashes)
-	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: request.AsOf.Format(time.RFC3339Nano), MaxAge: request.MaxAge, SourceHashes: sourceHashes, Input: input, Valuation: valuation}
+	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: canonicalSnapshotTime(request.AsOf), MaxAge: request.MaxAge, SourceHashes: sourceHashes, Input: input, Valuation: valuation}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return domain.SnapshotStatus{}, err
@@ -108,6 +112,14 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		}
 		return statusFromPayload(existing)
 	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO review_snapshots(portfolio_id,snapshot_id,calculation_version) VALUES(?,?,?)`, request.PortfolioID, snapshotID, request.CalculationVersion); err != nil {
+		return domain.SnapshotStatus{}, fmt.Errorf("persist review snapshot: %w", err)
+	}
+	for _, lot := range input.Lots {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO snapshot_holdings(portfolio_id,snapshot_id,holding_id,instrument_id) VALUES(?,?,?,?)`, request.PortfolioID, snapshotID, lot.ID, lot.InstrumentID); err != nil {
+			return domain.SnapshotStatus{}, fmt.Errorf("persist snapshot holding: %w", err)
+		}
+	}
 	auditID := deterministicID("audit", "snapshot", snapshotID)
 	auditPayload, _ := json.Marshal(map[string]any{"complete": valuation.Complete, "calculation_version": request.CalculationVersion})
 	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)`, auditID, "system-snapshot", "portfolio.snapshot.created", "snapshot", snapshotID, auditPayload, createdAt); err != nil {
@@ -120,6 +132,21 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		return domain.SnapshotStatus{}, err
 	}
 	return statusFromPayload(encoded)
+}
+
+// snapshotInputDigest is the single canonical witness calculation for the
+// immutable input persisted in a snapshot. Keep its inputs and JSON shape in
+// sync with CreateSnapshot and reconstruction verification.
+func snapshotInputDigest(calculationVersion string, maxAge time.Duration, input domain.ValuationInput) ([sha256.Size]byte, error) {
+	hashInput, err := json.Marshal(struct {
+		Version string                `json:"version"`
+		MaxAge  time.Duration         `json:"max_age"`
+		Input   domain.ValuationInput `json:"input"`
+	}{calculationVersion, maxAge, input})
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(hashInput), nil
 }
 
 func isUniqueError(err error) bool {

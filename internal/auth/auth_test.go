@@ -2,6 +2,8 @@ package auth
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -233,4 +235,72 @@ func fixtureAuthenticatorWithClock(t *testing.T, clock *time.Time) *Authenticato
 		t.Fatal(err)
 	}
 	return authenticator
+}
+
+func TestMachineConfigValidationAndConstantTimeTokenBoundary(t *testing.T) {
+	if err := (MachineConfig{}).Validate(); err != nil {
+		t.Fatalf("disabled machine configuration rejected: %v", err)
+	}
+	if err := (MachineConfig{PortfolioRead: true}).Validate(); err == nil {
+		t.Fatal("grant-only machine configuration was accepted")
+	}
+	config := MachineConfig{PrincipalID: "machine-reader", PortfolioID: "portfolio-api", BearerSecret: "machine-secret-with-enough-diversity-0123456789-ABCDEF", PortfolioRead: true}
+	if err := config.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !config.MachineTokenValid(config.BearerSecret) || config.MachineTokenValid(config.BearerSecret+"x") {
+		t.Fatal("machine token boundary was not enforced")
+	}
+	for _, invalid := range []MachineConfig{
+		{PrincipalID: "machine", PortfolioID: "portfolio", BearerSecret: "short"},
+		{PrincipalID: "machine", PortfolioID: "portfolio", BearerSecret: "ssssssssssssssssssssssssssssssss"},
+		{PrincipalID: "machine", PortfolioID: "portfolio", BearerSecret: "machine-secret-with-enough-diversity-0123456789\n-ABCDEF"},
+		{PrincipalID: "machine/escape", PortfolioID: "portfolio", BearerSecret: config.BearerSecret},
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("invalid machine configuration accepted: %s", invalid)
+		}
+	}
+}
+
+func TestMachineBearerGrammarAndRedaction(t *testing.T) {
+	secret := "machine-secret-with-enough-diversity-0123456789-ABCDEF"
+	config := MachineConfig{PrincipalID: "machine-reader", PortfolioID: "portfolio-api", BearerSecret: secret, PortfolioRead: true}
+	for _, format := range []string{"%v", "%+v", "%#v"} {
+		formatted := fmt.Sprintf(format, config)
+		if strings.Contains(formatted, secret) || !strings.Contains(formatted, "<redacted>") {
+			t.Fatalf("format %s exposed machine secret: %s", format, formatted)
+		}
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "bearer_secret") {
+		t.Fatalf("JSON exposed machine secret: %s", encoded)
+	}
+
+	for _, value := range []string{
+		"Bearer " + strings.Repeat("x", MachineSecretMin-1),
+		"Bearer " + strings.Repeat("x", MachineSecretMax+1),
+		"Bearer " + secret + " ",
+		"bearer " + secret,
+		"Bearer " + secret[:len(secret)-1] + "	X",
+		"Bearer " + secret + "é",
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request.Header.Set("Authorization", value)
+		if _, present, wellFormed := BearerToken(request); !present || wellFormed {
+			t.Fatalf("BearerToken(%q) accepted malformed value", value)
+		}
+	}
+	multiple := httptest.NewRequest(http.MethodGet, "/", nil)
+	multiple.Header.Add("Authorization", "Bearer "+secret)
+	multiple.Header.Add("Authorization", "Bearer "+secret)
+	if _, present, wellFormed := BearerToken(multiple); !present || wellFormed {
+		t.Fatal("multiple Authorization values were accepted")
+	}
+	if !config.MachineTokenValid(secret) || config.MachineTokenValid(strings.Repeat("x", MachineSecretMax+1)) {
+		t.Fatal("bounded token validation failed")
+	}
 }

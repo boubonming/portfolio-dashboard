@@ -45,8 +45,23 @@ func FromEnv() Config {
 		Auth: auth.Config{
 			Username: os.Getenv("PORTFOLIO_AUTH_USERNAME"), PasswordHash: os.Getenv("PORTFOLIO_AUTH_PASSWORD_HASH"),
 			SessionSecret: os.Getenv("PORTFOLIO_SESSION_SECRET"), PublicOrigin: os.Getenv("PORTFOLIO_PUBLIC_ORIGIN"), Environment: os.Getenv("PORTFOLIO_ENV"), CookieSecure: cookieSecure, SessionTTL: ttl,
+			Machine: auth.MachineConfig{
+				PrincipalID:   os.Getenv("PORTFOLIO_MACHINE_PRINCIPAL_ID"),
+				PortfolioID:   os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_ID"),
+				BearerSecret:  os.Getenv("PORTFOLIO_MACHINE_BEARER_SECRET"),
+				PortfolioRead: machinePortfolioRead(),
+			},
 		},
 	}
+}
+
+func machinePortfolioRead() bool {
+	value := os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_READ")
+	if value == "" {
+		return false
+	}
+	parsed, err := strconv.ParseBool(value)
+	return err == nil && parsed
 }
 
 // Load reads and validates all server configuration. Authentication is
@@ -60,6 +75,11 @@ func Load() (Config, error) {
 	}
 	if _, err := time.ParseDuration(envOr("PORTFOLIO_SESSION_TTL", "12h")); err != nil {
 		return Config{}, fmt.Errorf("authentication configuration: invalid PORTFOLIO_SESSION_TTL")
+	}
+	if value := os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_READ"); value != "" {
+		if _, err := strconv.ParseBool(value); err != nil {
+			return Config{}, fmt.Errorf("machine authentication configuration: invalid PORTFOLIO_MACHINE_PORTFOLIO_READ")
+		}
 	}
 	if !cfg.Auth.CookieSecure && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "development") && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "test") {
 		return Config{}, fmt.Errorf("authentication configuration: insecure cookies require PORTFOLIO_ENV=development or test")

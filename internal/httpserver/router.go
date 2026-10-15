@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,9 @@ func NewHandlerWithAuth(database *store.Store, config auth.Config) (http.Handler
 		if err := database.SetActivityCursorSecret(authenticator.ActivityCursorSecret()); err != nil {
 			return nil, err
 		}
+		if err := database.RegisterMachinePrincipalIdentity(context.Background(), authenticator.MachinePrincipal()); err != nil {
+			return nil, err
+		}
 	}
 	return newHandler(database, authenticator)
 }
@@ -53,6 +57,17 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 	mux.HandleFunc("/api/v1/auth", apiNotFound)
 	mux.HandleFunc("/api/v1/portfolios", apiNotFound)
 	mux.HandleFunc("/api/v1/auth/", authRoutes(authenticator))
+	if authenticator != nil {
+		snapshot := noStorePrivate(snapshotRoutes(database, authenticator))
+		mux.Handle("/api/v1/portfolios/{portfolioId}/snapshots/latest", snapshot)
+		mux.Handle("/api/v1/portfolios/{portfolioId}/snapshots/{snapshotId}", snapshot)
+		// Catch malformed snapshot targets before the broader portfolio handler
+		// can turn them into a browser-only authentication response. This keeps
+		// generic target validation ahead of authentication and prevents
+		// ServeMux's path-cleaning redirect from disclosing route shape.
+		mux.Handle("/api/v1/portfolios/{portfolioId}/snapshots/", snapshot)
+		mux.Handle("/api/v1/portfolios/{portfolioId}/snapshots", snapshot)
+	}
 	portfolio := http.Handler(portfolioRoutes(database))
 	if authenticator != nil {
 		portfolio = portfolioCSRF(authenticator, portfolio)
@@ -62,7 +77,45 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 	mux.Handle("/api/v1/portfolios/", portfolio)
 	mux.HandleFunc("/api/", apiNotFound)
 	mux.HandleFunc("/", spa(files))
-	return mux, nil
+	return privatePathGuard(mux), nil
+}
+
+// privatePathGuard runs before ServeMux. ServeMux canonicalizes paths that
+// contain dot segments by issuing a redirect, which would bypass the
+// snapshot endpoint's generic-target validation and disclose a route shape.
+func privatePathGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath()) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Vary", "Cookie")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func snapshotNamespacePath(escapedPath string) bool {
+	parts := strings.Split(strings.TrimPrefix(escapedPath, "/"), "/")
+	if len(parts) >= 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[4] == "snapshots" {
+		return true
+	}
+	// Keep malformed/encoded variants in the same generic safety gate instead
+	// of allowing the broader portfolio handler or ServeMux to respond first.
+	return strings.Contains(strings.ToLower(escapedPath), "snapshots")
+}
+
+func unsafeSnapshotPath(escapedPath string) bool {
+	if strings.Contains(escapedPath, "%") || strings.Contains(escapedPath, "//") {
+		return true
+	}
+	for _, part := range strings.Split(strings.TrimPrefix(escapedPath, "/"), "/") {
+		if part == "." || part == ".." || part == "" {
+			return true
+		}
+	}
+	return strings.HasSuffix(escapedPath, "/")
 }
 
 func portfolioCSRF(authenticator *auth.Authenticator, next http.Handler) http.Handler {
@@ -485,6 +538,7 @@ func noStorePrivate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Vary", "Cookie")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
 	})
 }

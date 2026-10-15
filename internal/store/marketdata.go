@@ -391,6 +391,13 @@ func (s *Store) persistFXTx(ctx context.Context, tx *sql.Tx, fx domain.FXRate, p
 
 func (s *Store) loadValuationInput(ctx context.Context, portfolioID, reportingCurrency string, asOf time.Time, maxAge time.Duration) (domain.ValuationInput, error) {
 	input := domain.ValuationInput{ReportingCurrency: reportingCurrency, AsOf: asOf, MaxAge: maxAge, Lots: []domain.ValuationLot{}}
+	var lotCount int
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM lots WHERE portfolio_id=?", portfolioID).Scan(&lotCount); err != nil {
+		return input, err
+	}
+	if lotCount > maxSnapshotHoldings {
+		return input, ErrSnapshotCorrupt
+	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT l.id,COALESCE((SELECT id FROM import_runs ir WHERE ir.source_sha256=l.source_sha256 AND ir.status='applied' ORDER BY ir.created_at DESC LIMIT 1),''),l.source_sha256,l.instrument_id,i.symbol,l.currency,l.quantity,l.unit_cost,l.cost_basis FROM lots l JOIN instruments i ON i.id=l.instrument_id WHERE l.portfolio_id = ? ORDER BY l.id`, portfolioID)
 	if err != nil {
 		return input, err
@@ -412,6 +419,9 @@ func (s *Store) loadValuationInput(ctx context.Context, portfolioID, reportingCu
 	}
 	if err := rows.Err(); err != nil {
 		return input, err
+	}
+	if len(input.Lots) > maxSnapshotHoldings {
+		return input, ErrSnapshotCorrupt
 	}
 	quoteRows, err := s.DB.QueryContext(ctx, `SELECT q.id,q.instrument_id,i.symbol,q.price,q.currency,q.source,q.market_at,q.fetched_at,q.basis,q.provenance FROM quotes q JOIN instruments i ON i.id=q.instrument_id WHERE EXISTS (SELECT 1 FROM lots l WHERE l.portfolio_id = ? AND l.instrument_id = q.instrument_id) ORDER BY q.market_at DESC,q.fetched_at DESC`, portfolioID)
 	if err != nil {
