@@ -389,6 +389,9 @@ func TestEvidenceURLFidelityAndBoundaryMatrix(t *testing.T) {
 			t.Fatalf("URL %q -> host=%q suffix=%q err=%v", tc.raw, host, suffix, err)
 		}
 	}
+	if _, _, err := canonicalEvidenceURL(valid[2].raw); !errors.Is(err, ErrReviewInvalid) {
+		t.Fatalf("explicit default port accepted: err=%v", err)
+	}
 	for _, raw := range []string{"https://example.test:444/path", "https://user@example.test/path", "https://example.test/path#fragment", " https://example.test/path", "https://example.test/path ", "https://EXAMPLE.test/path", "https://example..test/path", "https://-example.test/path", "https://example.test/path\t", "https://example.test/path\x00", "https://example.test?bad["} {
 		if _, _, err := canonicalEvidenceURL(raw); !errors.Is(err, ErrReviewInvalid) {
 			t.Fatalf("invalid URL accepted: %q err=%v", raw, err)
@@ -536,5 +539,118 @@ func TestReviewConflictingIdempotencyIsDeterministic(t *testing.T) {
 	_, replay, err := f.store.SubmitAdvisoryReview(context.Background(), f.principal, f.portfolio, "conflict-key", fingerprint, conflicting)
 	if !errors.Is(err, ErrReviewIdempotencyConflict) || replay {
 		t.Fatalf("conflict replay=%v err=%v", replay, err)
+	}
+}
+
+func TestReviewTargetSnapshotVersionCorruptionFailsClosed(t *testing.T) {
+	f := newReviewRegressionFixture(t)
+	defer f.close()
+	f.submission.Scope = domain.ReviewScope{Type: "holding", HoldingIDs: []string{f.snapshot.Holdings[0].HoldingID}, InstrumentIDs: []string{f.snapshot.Holdings[0].InstrumentID}}
+	created, replay := submitRegressionReview(t, f, "target-corruption-key", f.submission)
+	if replay {
+		t.Fatal("target corruption fixture was a replay")
+	}
+	if _, err := f.store.DB.Exec(`DROP TRIGGER phase_d_review_targets_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.DB.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.DB.Exec(`UPDATE review_targets SET snapshot_id='wrong-snapshot', calculation_version='wrong-version' WHERE review_id=?`, created.ReviewID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.DB.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := ReviewFingerprint(f.submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, replay, err = f.store.SubmitAdvisoryReview(context.Background(), f.principal, f.portfolio, "target-corruption-key", fingerprint, f.submission)
+	if replay || !errors.Is(err, ErrReviewCorrupt) {
+		t.Fatalf("corrupt target replay=%v err=%v", replay, err)
+	}
+}
+
+func TestReviewFactEvidenceOrphanAndForeignRowsFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  string
+		args []any
+	}{
+		{name: "orphan-fact", row: `INSERT INTO review_fact_evidence(review_id,portfolio_id,fact_ordinal,evidence_id,evidence_ordinal) VALUES(?,?,?,?,?)`, args: []any{"REVIEW", "review-portfolio", 31, "e1", 0}},
+		{name: "foreign-portfolio", row: `INSERT INTO review_fact_evidence(review_id,portfolio_id,fact_ordinal,evidence_id,evidence_ordinal) VALUES(?,?,?,?,?)`, args: []any{"REVIEW", "foreign-portfolio", 0, "e1", 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReviewRegressionFixture(t)
+			defer f.close()
+			created, _ := submitRegressionReview(t, f, "fact-link-"+tc.name, f.submission)
+			if _, err := f.store.DB.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+				t.Fatal(err)
+			}
+			args := append([]any{created.ReviewID}, tc.args[1:]...)
+			if tc.name == "foreign-portfolio" {
+				args = []any{created.ReviewID, "foreign-portfolio", 0, "e2", 1}
+			} else {
+				args = []any{created.ReviewID, "review-portfolio", 31, "e1", 0}
+			}
+			if _, err := f.store.DB.Exec(tc.row, args...); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.DB.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+				t.Fatal(err)
+			}
+			fingerprint, err := ReviewFingerprint(f.submission)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, replay, err := f.store.SubmitAdvisoryReview(context.Background(), f.principal, f.portfolio, "fact-link-"+tc.name, fingerprint, f.submission)
+			if replay || !errors.Is(err, ErrReviewCorrupt) {
+				t.Fatalf("corrupt fact link replay=%v err=%v", replay, err)
+			}
+		})
+	}
+}
+
+func TestReviewReplayAttributionMismatchFailsClosed(t *testing.T) {
+	f := newReviewRegressionFixture(t)
+	defer f.close()
+	created, _ := submitRegressionReview(t, f, "attribution-corruption-key", f.submission)
+	if _, err := f.store.DB.Exec(`DROP TRIGGER phase_d_review_append_only_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.DB.Exec(`UPDATE advisory_reviews SET submitted_by_id='other-machine' WHERE id=?`, created.ReviewID); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := ReviewFingerprint(f.submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, replay, err := f.store.SubmitAdvisoryReview(context.Background(), f.principal, f.portfolio, "attribution-corruption-key", fingerprint, f.submission)
+	if replay || !errors.Is(err, ErrReviewCorrupt) {
+		t.Fatalf("corrupt attribution replay=%v err=%v", replay, err)
+	}
+}
+
+func TestReviewRetryRejectsAbortLockMessageAndCanceledContext(t *testing.T) {
+	f := newReviewRegressionFixture(t)
+	defer f.close()
+	if _, err := f.store.DB.Exec(`CREATE TRIGGER review_retry_abort_message BEFORE INSERT ON advisory_reviews BEGIN SELECT RAISE(ABORT, 'database is locked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	defer f.store.DB.Exec(`DROP TRIGGER review_retry_abort_message`)
+	fingerprint, err := ReviewFingerprint(f.submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, replay, err := f.store.SubmitAdvisoryReview(context.Background(), f.principal, f.portfolio, "abort-lock-message-key", fingerprint, f.submission)
+	if replay || err == nil || isSQLiteBusy(err) {
+		t.Fatalf("abort message replay=%v err=%v busy=%v", replay, err, isSQLiteBusy(err))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, replay, err = f.store.SubmitAdvisoryReview(ctx, f.principal, f.portfolio, "canceled-before-work-key", fingerprint, f.submission)
+	if replay || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled submission replay=%v err=%v", replay, err)
 	}
 }

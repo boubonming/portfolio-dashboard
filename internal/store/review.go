@@ -20,6 +20,8 @@ import (
 
 	"github.com/boubonming/portfolio-dashboard/internal/auth"
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var (
@@ -331,19 +333,52 @@ func isASCII(value string) bool {
 // that expected contention on the idempotency path instead of exposing a
 // spurious SQLITE_BUSY error to callers.
 func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.MachinePrincipal, portfolioID, idempotencyKey, fingerprint string, submission domain.ReviewSubmission) (domain.AdvisoryReview, bool, error) {
-	for attempt := 0; attempt < 4; attempt++ {
+	const maxAttempts = 4
+	const maxRetryElapsed = 250 * time.Millisecond
+	started := time.Now()
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return domain.AdvisoryReview{}, false, err
+		}
 		result, replay, err := s.submitAdvisoryReviewOnce(ctx, principal, portfolioID, idempotencyKey, fingerprint, submission)
-		if err == nil || !isSQLiteBusy(err) || attempt == 3 {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return domain.AdvisoryReview{}, false, ctxErr
+		}
+		if err == nil || !isSQLiteBusy(err) || attempt == maxAttempts-1 {
 			return result, replay, err
 		}
-		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return domain.AdvisoryReview{}, false, ctxErr
+		}
+		backoff := time.Duration(attempt+1) * 10 * time.Millisecond
+		if elapsed := time.Since(started); elapsed+backoff > maxRetryElapsed {
+			return domain.AdvisoryReview{}, false, err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return domain.AdvisoryReview{}, false, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return domain.AdvisoryReview{}, false, errors.New("review submission retry exhausted")
+	return domain.AdvisoryReview{}, false, ctx.Err()
 }
 
 func isSQLiteBusy(err error) bool {
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "database is locked") || strings.Contains(message, "sqlite_busy")
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	switch sqliteErr.Code() {
+	case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_BUSY_RECOVERY, sqlite3.SQLITE_BUSY_SNAPSHOT, sqlite3.SQLITE_BUSY_TIMEOUT,
+		sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_LOCKED_SHAREDCACHE:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.MachinePrincipal, portfolioID, idempotencyKey, fingerprint string, submission domain.ReviewSubmission) (domain.AdvisoryReview, bool, error) {
@@ -374,7 +409,7 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 		if !sameSecretText(existingFingerprint, fingerprint) {
 			return domain.AdvisoryReview{}, false, ErrReviewIdempotencyConflict
 		}
-		result, readErr := reconstructAdvisoryReview(ctx, tx, portfolioID, existingReviewID)
+		result, readErr := reconstructAdvisoryReview(ctx, tx, portfolioID, existingReviewID, principal.PrincipalID)
 		if readErr != nil {
 			return domain.AdvisoryReview{}, false, readErr
 		}
@@ -417,7 +452,7 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 		if !sameSecretText(existingFingerprint, fingerprint) {
 			return domain.AdvisoryReview{}, false, ErrReviewIdempotencyConflict
 		}
-		result, readErr := reconstructAdvisoryReview(ctx, tx, portfolioID, existingReviewID)
+		result, readErr := reconstructAdvisoryReview(ctx, tx, portfolioID, existingReviewID, principal.PrincipalID)
 		if readErr != nil {
 			return domain.AdvisoryReview{}, false, readErr
 		}
@@ -538,7 +573,7 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 	if err := recordActivity(ctx, tx, portfolioID, "hermes", "review_submitted", "review", "advisory_review", reviewID, "Advisory review submitted", "An immutable advisory review was submitted.", submittedAt, auditID); err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
-	result, err := reconstructAdvisoryReview(ctx, tx, portfolioID, reviewID)
+	result, err := reconstructAdvisoryReview(ctx, tx, portfolioID, reviewID, principal.PrincipalID)
 	if err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
@@ -571,7 +606,7 @@ func (s *Store) replayReviewIdempotency(ctx context.Context, principalID, portfo
 	if !sameSecretText(storedFingerprint, fingerprint) {
 		return domain.AdvisoryReview{}, false, ErrReviewIdempotencyConflict
 	}
-	result, err := reconstructAdvisoryReview(ctx, tx, portfolioID, reviewID)
+	result, err := reconstructAdvisoryReview(ctx, tx, portfolioID, reviewID, principalID)
 	if err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
@@ -604,7 +639,7 @@ func randomReviewID() (string, error) {
 	return "rev-" + base64.RawURLEncoding.EncodeToString(bytes[:]), nil
 }
 
-func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID, reviewID string) (domain.AdvisoryReview, error) {
+func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID, reviewID, expectedPrincipalID string) (domain.AdvisoryReview, error) {
 	var result domain.AdvisoryReview
 	var scopeType, status, generatedAt, submittedAt, submittedByID, submittedByKind, primaryPermission string
 	var primaryEvidenceID, primaryEvidenceAvailability, primaryEvidenceFreshness, primaryFactOrdinal, primaryTargetHoldingID sql.NullString
@@ -621,10 +656,10 @@ func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID
 	result.Status = status
 	result.Scope = domain.ReviewScope{Type: scopeType, HoldingIDs: []string{}, InstrumentIDs: []string{}}
 	result.Risks, result.Counterarguments, result.Conditions, result.Metrics, result.Evidence, result.SourcedFacts = []string{}, []string{}, []string{}, []domain.ReviewMetric{}, []domain.ReviewEvidence{}, []domain.SourcedFact{}
-	if !validReviewID(result.ReviewID, 128) || result.PortfolioID != portfolioID || !validReviewID(result.SnapshotID, 128) || !validReviewID(result.CalculationVersion, 128) || (scopeType != "portfolio" && scopeType != "holding") || (status != "complete" && status != "incomplete") || !validRecommendation(result.Recommendation) || !validReviewText(result.Rationale, 8000) || !validReviewText(result.ModelOpinion, 8000) || !validCanonicalReviewTime(generatedAt) || !validCanonicalReviewTime(submittedAt) || !validReviewID(submittedByID, 128) || submittedByKind != "machine" || primaryPermission != "reviews:write" || !validateReviewModel(result.Model) {
+	if !validReviewID(result.ReviewID, 128) || result.PortfolioID != portfolioID || !validReviewID(result.SnapshotID, 128) || !validReviewID(result.CalculationVersion, 128) || (scopeType != "portfolio" && scopeType != "holding") || (status != "complete" && status != "incomplete") || !validRecommendation(result.Recommendation) || !validReviewText(result.Rationale, 8000) || !validReviewText(result.ModelOpinion, 8000) || !validCanonicalReviewTime(generatedAt) || !validCanonicalReviewTime(submittedAt) || !validReviewID(submittedByID, 128) || submittedByKind != "machine" || primaryPermission != "reviews:write" || !validateReviewModel(result.Model) || (expectedPrincipalID != "" && submittedByID != expectedPrincipalID) {
 		return domain.AdvisoryReview{}, ErrReviewCorrupt
 	}
-	if err := loadReviewTargets(ctx, q, portfolioID, reviewID, &result.Scope); err != nil {
+	if err := loadReviewTargets(ctx, q, portfolioID, reviewID, result.SnapshotID, result.CalculationVersion, &result.Scope); err != nil {
 		return domain.AdvisoryReview{}, err
 	}
 	if err := loadReviewTextChildren(ctx, q, "review_risks", "text", portfolioID, reviewID, &result.Risks); err != nil {
@@ -694,24 +729,23 @@ func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID
 		return domain.AdvisoryReview{}, ErrReviewCorrupt
 	}
 	permissions := []string{"reviews:write"}
-	rows, err := q.QueryContext(ctx, `SELECT ordinal,permission FROM review_submission_permission_snapshots WHERE review_id=? AND portfolio_id=? ORDER BY ordinal`, reviewID, portfolioID)
+	rows, err := q.QueryContext(ctx, `SELECT ordinal,portfolio_id,permission FROM review_submission_permission_snapshots WHERE review_id=? ORDER BY ordinal`, reviewID)
 	if err != nil {
 		return domain.AdvisoryReview{}, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var ordinal int
-		var permission string
-		if err := rows.Scan(&ordinal, &permission); err != nil {
-			rows.Close()
-			return domain.AdvisoryReview{}, err
+		var rowPortfolioID, permission string
+		if err := rows.Scan(&ordinal, &rowPortfolioID, &permission); err != nil {
+			return domain.AdvisoryReview{}, ErrReviewCorrupt
 		}
-		if ordinal != 1 || permission != "portfolio:read" {
-			rows.Close()
+		if rowPortfolioID != portfolioID || ordinal != 1 || permission != "portfolio:read" {
 			return domain.AdvisoryReview{}, ErrReviewCorrupt
 		}
 		permissions = append(permissions, permission)
 	}
-	if err := rows.Close(); err != nil {
+	if err := rows.Err(); err != nil {
 		return domain.AdvisoryReview{}, err
 	}
 	if len(permissions) != 2 {
@@ -726,8 +760,8 @@ func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID
 	return result, nil
 }
 
-func loadReviewTargets(ctx context.Context, q reviewQueryer, portfolioID, reviewID string, scope *domain.ReviewScope) error {
-	rows, err := q.QueryContext(ctx, `SELECT ordinal,holding_id,instrument_id FROM review_targets WHERE review_id=? AND portfolio_id=? ORDER BY ordinal`, reviewID, portfolioID)
+func loadReviewTargets(ctx context.Context, q reviewQueryer, portfolioID, reviewID, snapshotID, calculationVersion string, scope *domain.ReviewScope) error {
+	rows, err := q.QueryContext(ctx, `SELECT ordinal,portfolio_id,snapshot_id,calculation_version,holding_id,instrument_id FROM review_targets WHERE review_id=? ORDER BY ordinal`, reviewID)
 	if err != nil {
 		return err
 	}
@@ -736,11 +770,18 @@ func loadReviewTargets(ctx context.Context, q reviewQueryer, portfolioID, review
 	seenHoldings, seenInstruments := map[string]bool{}, map[string]bool{}
 	for rows.Next() {
 		var ordinal int
-		var holdingID, instrumentID string
-		if err := rows.Scan(&ordinal, &holdingID, &instrumentID); err != nil {
+		var rowPortfolioID, rowSnapshotID, rowCalculationVersion, holdingID, instrumentID string
+		if err := rows.Scan(&ordinal, &rowPortfolioID, &rowSnapshotID, &rowCalculationVersion, &holdingID, &instrumentID); err != nil {
+			return ErrReviewCorrupt
+		}
+		if rowPortfolioID != portfolioID || rowSnapshotID != snapshotID || rowCalculationVersion != calculationVersion || ordinal != want || !validReviewID(holdingID, 128) || !validReviewID(instrumentID, 128) || seenHoldings[holdingID] || seenInstruments[instrumentID] || want >= 100 {
+			return ErrReviewCorrupt
+		}
+		var members int
+		if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM snapshot_holdings WHERE portfolio_id=? AND snapshot_id=? AND holding_id=? AND instrument_id=?`, portfolioID, snapshotID, holdingID, instrumentID).Scan(&members); err != nil {
 			return err
 		}
-		if ordinal != want || !validReviewID(holdingID, 128) || !validReviewID(instrumentID, 128) || seenHoldings[holdingID] || seenInstruments[instrumentID] || want >= 100 {
+		if members != 1 {
 			return ErrReviewCorrupt
 		}
 		seenHoldings[holdingID], seenInstruments[instrumentID] = true, true
@@ -761,7 +802,7 @@ func loadReviewTargets(ctx context.Context, q reviewQueryer, portfolioID, review
 }
 
 func loadReviewTextChildren(ctx context.Context, q reviewQueryer, table, column, portfolioID, reviewID string, target *[]string) error {
-	rows, err := q.QueryContext(ctx, `SELECT ordinal,`+column+` FROM `+table+` WHERE review_id=? AND portfolio_id=? ORDER BY ordinal`, reviewID, portfolioID)
+	rows, err := q.QueryContext(ctx, `SELECT ordinal,portfolio_id,`+column+` FROM `+table+` WHERE review_id=? ORDER BY ordinal`, reviewID)
 	if err != nil {
 		return err
 	}
@@ -769,11 +810,11 @@ func loadReviewTextChildren(ctx context.Context, q reviewQueryer, table, column,
 	want := 0
 	for rows.Next() {
 		var ordinal int
-		var value string
-		if err := rows.Scan(&ordinal, &value); err != nil {
-			return err
+		var rowPortfolioID, value string
+		if err := rows.Scan(&ordinal, &rowPortfolioID, &value); err != nil {
+			return ErrReviewCorrupt
 		}
-		if ordinal != want || !validReviewText(value, 2000) {
+		if rowPortfolioID != portfolioID || ordinal != want || !validReviewText(value, 2000) {
 			return ErrReviewCorrupt
 		}
 		*target = append(*target, value)
@@ -783,7 +824,7 @@ func loadReviewTextChildren(ctx context.Context, q reviewQueryer, table, column,
 }
 
 func loadReviewMetrics(ctx context.Context, q reviewQueryer, portfolioID, reviewID string, target *[]domain.ReviewMetric) error {
-	rows, err := q.QueryContext(ctx, `SELECT ordinal,name,value,unit,as_of,source,deterministic FROM review_metrics WHERE review_id=? AND portfolio_id=? ORDER BY ordinal`, reviewID, portfolioID)
+	rows, err := q.QueryContext(ctx, `SELECT ordinal,portfolio_id,name,value,unit,as_of,source,deterministic FROM review_metrics WHERE review_id=? ORDER BY ordinal`, reviewID)
 	if err != nil {
 		return err
 	}
@@ -791,12 +832,13 @@ func loadReviewMetrics(ctx context.Context, q reviewQueryer, portfolioID, review
 	want := 0
 	for rows.Next() {
 		var ordinal, deterministic int
+		var rowPortfolioID string
 		var item domain.ReviewMetric
-		if err := rows.Scan(&ordinal, &item.Name, &item.Value, &item.Unit, &item.AsOf, &item.Source, &deterministic); err != nil {
-			return err
+		if err := rows.Scan(&ordinal, &rowPortfolioID, &item.Name, &item.Value, &item.Unit, &item.AsOf, &item.Source, &deterministic); err != nil {
+			return ErrReviewCorrupt
 		}
 		item.Deterministic = deterministic == 1
-		if ordinal != want || !validateReviewMetrics([]domain.ReviewMetric{item}) {
+		if rowPortfolioID != portfolioID || ordinal != want || !validateReviewMetrics([]domain.ReviewMetric{item}) {
 			return ErrReviewCorrupt
 		}
 		*target = append(*target, item)
@@ -806,28 +848,31 @@ func loadReviewMetrics(ctx context.Context, q reviewQueryer, portfolioID, review
 }
 
 func loadReviewEvidence(ctx context.Context, q reviewQueryer, portfolioID, reviewID string, target *[]domain.ReviewEvidence) error {
-	rows, err := q.QueryContext(ctx, `SELECT ordinal,evidence_id,url_host,url_suffix,title,published_at,accessed_at,availability,freshness,excerpt FROM review_evidence WHERE review_id=? AND portfolio_id=? ORDER BY ordinal`, reviewID, portfolioID)
+	rows, err := q.QueryContext(ctx, `SELECT ordinal,portfolio_id,evidence_id,url_host,url_suffix,title,published_at,accessed_at,availability,freshness,excerpt FROM review_evidence WHERE review_id=? ORDER BY ordinal`, reviewID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	want := 0
+	seenEvidence := map[string]bool{}
 	for rows.Next() {
 		var ordinal int
+		var rowPortfolioID string
 		var item domain.ReviewEvidence
 		var host, suffix string
 		var published sql.NullString
-		if err := rows.Scan(&ordinal, &item.EvidenceID, &host, &suffix, &item.Title, &published, &item.AccessedAt, &item.Availability, &item.Freshness, &item.Excerpt); err != nil {
-			return err
+		if err := rows.Scan(&ordinal, &rowPortfolioID, &item.EvidenceID, &host, &suffix, &item.Title, &published, &item.AccessedAt, &item.Availability, &item.Freshness, &item.Excerpt); err != nil {
+			return ErrReviewCorrupt
 		}
 		if published.Valid {
 			item.PublishedAt = &published.String
 		}
 		item.URL = "https://" + host + suffix
 		storedHost, storedSuffix, urlErr := canonicalEvidenceURL(item.URL)
-		if urlErr != nil || storedHost != host || storedSuffix != suffix || ordinal != want || !validateReviewEvidence([]domain.ReviewEvidence{item}) {
+		if rowPortfolioID != portfolioID || seenEvidence[item.EvidenceID] || urlErr != nil || storedHost != host || storedSuffix != suffix || ordinal != want || !validateReviewEvidence([]domain.ReviewEvidence{item}) {
 			return ErrReviewCorrupt
 		}
+		seenEvidence[item.EvidenceID] = true
 		*target = append(*target, item)
 		want++
 	}
@@ -835,48 +880,64 @@ func loadReviewEvidence(ctx context.Context, q reviewQueryer, portfolioID, revie
 }
 
 func loadReviewFacts(ctx context.Context, q reviewQueryer, portfolioID, reviewID string, target *[]domain.SourcedFact) error {
-	rows, err := q.QueryContext(ctx, `SELECT fact_ordinal,statement FROM review_sourced_facts WHERE review_id=? AND portfolio_id=? ORDER BY fact_ordinal`, reviewID, portfolioID)
+	rows, err := q.QueryContext(ctx, `SELECT fact_ordinal,portfolio_id,statement FROM review_sourced_facts WHERE review_id=? ORDER BY fact_ordinal`, reviewID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	want := 0
+	factIndexes := map[int]int{}
 	for rows.Next() {
 		var ordinal int
+		var rowPortfolioID string
 		var fact domain.SourcedFact
-		if err := rows.Scan(&ordinal, &fact.Statement); err != nil {
-			return err
-		}
-		if ordinal != want || !validReviewText(fact.Statement, 2000) {
+		if err := rows.Scan(&ordinal, &rowPortfolioID, &fact.Statement); err != nil {
 			return ErrReviewCorrupt
 		}
-		links, linkErr := q.QueryContext(ctx, `SELECT evidence_ordinal,evidence_id FROM review_fact_evidence WHERE review_id=? AND portfolio_id=? AND fact_ordinal=? ORDER BY evidence_ordinal`, reviewID, portfolioID, ordinal)
-		if linkErr != nil {
-			return linkErr
-		}
-		linkWant := 0
-		for links.Next() {
-			var linkOrdinal int
-			var evidenceID string
-			if err := links.Scan(&linkOrdinal, &evidenceID); err != nil {
-				links.Close()
-				return err
-			}
-			if linkOrdinal != linkWant || !validReviewID(evidenceID, 128) {
-				links.Close()
-				return ErrReviewCorrupt
-			}
-			fact.EvidenceIDs = append(fact.EvidenceIDs, evidenceID)
-			linkWant++
-		}
-		if err := links.Close(); err != nil {
-			return err
-		}
-		if len(fact.EvidenceIDs) == 0 || len(fact.EvidenceIDs) > 16 {
+		if rowPortfolioID != portfolioID || ordinal != want || !validReviewText(fact.Statement, 2000) || ordinal >= 32 {
 			return ErrReviewCorrupt
 		}
+		factIndexes[ordinal] = len(*target)
 		*target = append(*target, fact)
 		want++
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	links, err := q.QueryContext(ctx, `SELECT portfolio_id,fact_ordinal,evidence_id,evidence_ordinal FROM review_fact_evidence WHERE review_id=? ORDER BY fact_ordinal,evidence_ordinal`, reviewID)
+	if err != nil {
+		return err
+	}
+	defer links.Close()
+	linkOrdinals := map[int]int{}
+	seenLinks := map[int]map[string]bool{}
+	for links.Next() {
+		var rowPortfolioID, evidenceID string
+		var factOrdinal, evidenceOrdinal int
+		if err := links.Scan(&rowPortfolioID, &factOrdinal, &evidenceID, &evidenceOrdinal); err != nil {
+			return ErrReviewCorrupt
+		}
+		index, ok := factIndexes[factOrdinal]
+		if rowPortfolioID != portfolioID || !ok || evidenceOrdinal != linkOrdinals[factOrdinal] || !validReviewID(evidenceID, 128) || evidenceOrdinal >= 16 {
+			return ErrReviewCorrupt
+		}
+		if seenLinks[factOrdinal] == nil {
+			seenLinks[factOrdinal] = map[string]bool{}
+		}
+		if seenLinks[factOrdinal][evidenceID] {
+			return ErrReviewCorrupt
+		}
+		seenLinks[factOrdinal][evidenceID] = true
+		(*target)[index].EvidenceIDs = append((*target)[index].EvidenceIDs, evidenceID)
+		linkOrdinals[factOrdinal]++
+	}
+	if err := links.Err(); err != nil {
+		return err
+	}
+	for _, fact := range *target {
+		if len(fact.EvidenceIDs) == 0 || len(fact.EvidenceIDs) > 16 {
+			return ErrReviewCorrupt
+		}
+	}
+	return nil
 }
