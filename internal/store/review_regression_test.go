@@ -378,19 +378,25 @@ func TestEvidenceURLFidelityAndBoundaryMatrix(t *testing.T) {
 	valid := []struct {
 		raw    string
 		suffix string
+		valid  bool
 	}{
-		{"https://example.test?", "?"},
-		{"https://example.test/path?", "/path?"},
-		{"https://example.test:443/path", ""}, // rejected: explicit port is not persisted
+		{"https://example.test?", "?", true},
+		{"https://example.test/path?", "/path?", true},
+		{"https://example.test:443/path", "", false}, // explicit port is not persisted
 	}
-	for _, tc := range valid[:2] {
-		host, suffix, err := canonicalEvidenceURL(tc.raw)
-		if err != nil || host != "example.test" || suffix != tc.suffix {
-			t.Fatalf("URL %q -> host=%q suffix=%q err=%v", tc.raw, host, suffix, err)
-		}
-	}
-	if _, _, err := canonicalEvidenceURL(valid[2].raw); !errors.Is(err, ErrReviewInvalid) {
-		t.Fatalf("explicit default port accepted: err=%v", err)
+	for _, tc := range valid {
+		t.Run(tc.raw, func(t *testing.T) {
+			host, suffix, err := canonicalEvidenceURL(tc.raw)
+			if tc.valid {
+				if err != nil || host != "example.test" || suffix != tc.suffix {
+					t.Fatalf("URL %q -> host=%q suffix=%q err=%v", tc.raw, host, suffix, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrReviewInvalid) {
+				t.Fatalf("invalid URL accepted: %q err=%v", tc.raw, err)
+			}
+		})
 	}
 	for _, raw := range []string{"https://example.test:444/path", "https://user@example.test/path", "https://example.test/path#fragment", " https://example.test/path", "https://example.test/path ", "https://EXAMPLE.test/path", "https://example..test/path", "https://-example.test/path", "https://example.test/path\t", "https://example.test/path\x00", "https://example.test?bad["} {
 		if _, _, err := canonicalEvidenceURL(raw); !errors.Is(err, ErrReviewInvalid) {

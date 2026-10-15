@@ -38,8 +38,8 @@ func reviewRoutes(database *store.Store, authenticator *auth.Authenticator) http
 			return
 		}
 		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", "GET, POST")
-			writePhaseDError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET and POST are supported for this resource.")
+			w.Header().Set("Allow", http.MethodPost)
+			writePhaseDError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST is supported for this resource.")
 			return
 		}
 		if database == nil {

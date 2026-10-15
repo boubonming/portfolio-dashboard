@@ -364,9 +364,25 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 		if err := ctx.Err(); err != nil {
 			return domain.AdvisoryReview{}, false, err
 		}
-		result, replay, err := s.submitAdvisoryReviewOnce(ctx, principal, portfolioID, idempotencyKey, fingerprint, submission)
+		remaining := maxRetryElapsed - time.Since(started)
+		if remaining <= 0 {
+			return domain.AdvisoryReview{}, false, context.DeadlineExceeded
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, remaining)
+		result, replay, err := s.submitAdvisoryReviewOnce(attemptCtx, principal, portfolioID, idempotencyKey, fingerprint, submission)
+		attemptErr := attemptCtx.Err()
+		cancel()
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return domain.AdvisoryReview{}, false, ctxErr
+		}
+		// The retry budget covers BeginTx, every statement in the attempt,
+		// reconstruction, and commit. Do not let a driver-level busy timeout
+		// carry an attempt past that deadline or start another attempt.
+		if attemptErr != nil {
+			if err == nil {
+				return domain.AdvisoryReview{}, false, attemptErr
+			}
+			return domain.AdvisoryReview{}, false, err
 		}
 		if err == nil || !isSQLiteBusy(err) || attempt == maxAttempts-1 {
 			return result, replay, err
@@ -375,7 +391,7 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 			return domain.AdvisoryReview{}, false, ctxErr
 		}
 		backoff := time.Duration(attempt+1) * 10 * time.Millisecond
-		if elapsed := time.Since(started); elapsed+backoff > maxRetryElapsed {
+		if elapsed := time.Since(started); elapsed+backoff+25*time.Millisecond > maxRetryElapsed {
 			return domain.AdvisoryReview{}, false, err
 		}
 		if reviewBackoffHook != nil {
@@ -408,14 +424,60 @@ func isSQLiteBusy(err error) bool {
 	}
 }
 
+func (s *Store) beginReviewTx(ctx context.Context) (*sql.Tx, func(), error) {
+	conn, err := s.DB.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	var previousTimeout int
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&previousTimeout); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	timeout := previousTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		milliseconds := int(remaining / time.Millisecond)
+		if remaining > time.Duration(milliseconds)*time.Millisecond {
+			milliseconds++
+		}
+		if milliseconds < 0 {
+			milliseconds = 0
+		}
+		if timeout == 0 || milliseconds < timeout {
+			timeout = milliseconds
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=`+strconv.Itoa(timeout)); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	restore := func() {
+		_, _ = conn.ExecContext(context.Background(), `PRAGMA busy_timeout=`+strconv.Itoa(previousTimeout))
+		_ = conn.Close()
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		restore()
+		return nil, nil, err
+	}
+	return tx, restore, nil
+}
+
 func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.MachinePrincipal, portfolioID, idempotencyKey, fingerprint string, submission domain.ReviewSubmission) (domain.AdvisoryReview, bool, error) {
 	if principal.PrincipalID == "" || portfolioID != principal.PortfolioID || !principal.PortfolioRead || !principal.ReviewsWrite {
 		return domain.AdvisoryReview{}, false, auth.ErrForbidden
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, release, err := s.beginReviewTx(ctx)
 	if err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
 	defer tx.Rollback()
 	// Recheck the persisted identity and grants before looking at either the
 	// idempotency reservation or the historical review graph. This is the
@@ -464,6 +526,8 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 	// ReviewSnapshot may use another pooled connection. Reopen and recheck the
 	// principal before any write, and re-read idempotency to close this race.
 	_ = tx.Rollback()
+	release()
+	released = true
 	snapshot, err := s.ReviewSnapshot(ctx, portfolioID, submission.SnapshotID, false)
 	if err != nil {
 		return domain.AdvisoryReview{}, false, err
@@ -471,10 +535,11 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 	if err := ValidateReviewSubmission(submission, snapshot); err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
-	tx, err = s.DB.BeginTx(ctx, nil)
+	tx, release, err = s.beginReviewTx(ctx)
 	if err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
+	released = false
 	defer tx.Rollback()
 	if err := tx.QueryRowContext(ctx, `SELECT active,permission_portfolio_read,permission_reviews_write FROM machine_principals WHERE id=? AND portfolio_id=?`, principal.PrincipalID, portfolioID).Scan(&active, &readGrant, &writeGrant); err != nil {
 		if err == sql.ErrNoRows {
@@ -596,6 +661,8 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 	}
 	if affected, affectedErr := insertResult.RowsAffected(); affectedErr == nil && affected == 0 {
 		_ = tx.Rollback()
+		release()
+		released = true
 		return s.replayReviewIdempotency(ctx, principal.PrincipalID, portfolioID, idempotencyKey, fingerprint)
 	}
 	auditID, err := randomReviewID()
@@ -623,10 +690,11 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 }
 
 func (s *Store) replayReviewIdempotency(ctx context.Context, principalID, portfolioID, key, fingerprint string) (domain.AdvisoryReview, bool, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, release, err := s.beginReviewTx(ctx)
 	if err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
+	defer release()
 	defer tx.Rollback()
 	var active, readGrant, writeGrant int
 	if err := tx.QueryRowContext(ctx, `SELECT active,permission_portfolio_read,permission_reviews_write FROM machine_principals WHERE id=? AND portfolio_id=?`, principalID, portfolioID).Scan(&active, &readGrant, &writeGrant); err != nil {

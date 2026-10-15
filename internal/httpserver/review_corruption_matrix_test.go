@@ -106,6 +106,29 @@ func TestReviewHTTPNormalizedCorruptionMatrix(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{"target-duplicate-holding", func(t *testing.T, db *store.Store, id string) {
+			replaceReviewTargetsWithoutConstraints(t, db, id, func(row reviewTargetCorruptionRow) reviewTargetCorruptionRow {
+				row.instrumentID = "duplicate-instrument"
+				row.ordinal = 1
+				return row
+			})
+		}},
+		{"target-duplicate-instrument", func(t *testing.T, db *store.Store, id string) {
+			replaceReviewTargetsWithoutConstraints(t, db, id, func(row reviewTargetCorruptionRow) reviewTargetCorruptionRow {
+				row.holdingID = "duplicate-holding"
+				row.ordinal = 1
+				return row
+			})
+		}},
+		{"target-hidden-foreign-owner-row", func(t *testing.T, db *store.Store, id string) {
+			replaceReviewTargetsWithoutConstraints(t, db, id, func(row reviewTargetCorruptionRow) reviewTargetCorruptionRow {
+				row.portfolioID = "foreign-portfolio"
+				row.holdingID = "foreign-holding"
+				row.instrumentID = "foreign-instrument"
+				row.ordinal = 1
+				return row
+			})
+		}},
 		{"target-ordinal-gap", func(t *testing.T, db *store.Store, id string) {
 			_, err := db.DB.Exec(`UPDATE review_targets SET ordinal=7 WHERE review_id=?`, id)
 			if err != nil {
@@ -338,6 +361,39 @@ func TestReviewHTTPNormalizedCorruptionMatrix(t *testing.T) {
 				t.Fatalf("counts changed before=%v after=%v", before, after)
 			}
 		})
+	}
+}
+
+type reviewTargetCorruptionRow struct {
+	reviewID, portfolioID, snapshotID, calculationVersion string
+	holdingID, instrumentID                               string
+	ordinal                                               int
+}
+
+func replaceReviewTargetsWithoutConstraints(t *testing.T, database *store.Store, reviewID string, mutate func(reviewTargetCorruptionRow) reviewTargetCorruptionRow) {
+	t.Helper()
+	var original reviewTargetCorruptionRow
+	if err := database.DB.QueryRow(`SELECT review_id,portfolio_id,snapshot_id,calculation_version,holding_id,instrument_id,ordinal FROM review_targets WHERE review_id=? ORDER BY ordinal LIMIT 1`, reviewID).Scan(&original.reviewID, &original.portfolioID, &original.snapshotID, &original.calculationVersion, &original.holdingID, &original.instrumentID, &original.ordinal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`CREATE TABLE review_targets_corrupt AS SELECT review_id,portfolio_id,snapshot_id,calculation_version,holding_id,instrument_id,ordinal FROM review_targets`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`DROP TABLE review_targets`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`CREATE TABLE review_targets (review_id TEXT NOT NULL, portfolio_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, calculation_version TEXT NOT NULL, holding_id TEXT NOT NULL, instrument_id TEXT NOT NULL, ordinal INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO review_targets SELECT review_id,portfolio_id,snapshot_id,calculation_version,holding_id,instrument_id,ordinal FROM review_targets_corrupt`); err != nil {
+		t.Fatal(err)
+	}
+	extra := mutate(original)
+	if _, err := database.DB.Exec(`INSERT INTO review_targets(review_id,portfolio_id,snapshot_id,calculation_version,holding_id,instrument_id,ordinal) VALUES(?,?,?,?,?,?,?)`, extra.reviewID, extra.portfolioID, extra.snapshotID, extra.calculationVersion, extra.holdingID, extra.instrumentID, extra.ordinal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`DROP TABLE review_targets_corrupt`); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func withReviewRetryHooks(attempt, backoff func(int)) func() {
@@ -65,6 +66,50 @@ func TestReviewRetryConvergesAfterRealSQLiteBusyWithExactAttempts(t *testing.T) 
 	}
 	if got := attempts.Load(); got != 2 {
 		t.Fatalf("attempts=%d want 2", got)
+	}
+}
+
+func TestReviewRetryExclusiveLockHonorsWholeOperationBudget(t *testing.T) {
+	f := newReviewRegressionFixture(t)
+	defer f.close()
+	second, err := Open(context.Background(), f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if _, err := second.DB.Exec(`BEGIN EXCLUSIVE`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = second.DB.Exec(`ROLLBACK`) }()
+
+	fingerprint, err := ReviewFingerprint(f.submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempts atomic.Int32
+	restore := withReviewRetryHooks(func(int) { attempts.Add(1) }, nil)
+	defer restore()
+	started := time.Now()
+	_, replay, submitErr := f.store.SubmitAdvisoryReview(context.Background(), f.principal, f.portfolio, "exclusive-budget-key", fingerprint, f.submission)
+	elapsed := time.Since(started)
+	t.Logf("exclusive replay=%v err=%v elapsed=%s attempts=%d", replay, submitErr, elapsed, attempts.Load())
+	if replay || submitErr == nil {
+		t.Fatalf("replay=%v err=%v", replay, submitErr)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("exclusive lock elapsed=%s, want within 250ms budget plus 750ms tolerance", elapsed)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts=%d want 1 for a lock wait that exhausted the budget", attempts.Load())
+	}
+	if !errors.Is(submitErr, context.DeadlineExceeded) && !isSQLiteBusy(submitErr) {
+		t.Fatalf("unexpected lock classification: %v", submitErr)
+	}
+	if _, err := second.DB.Exec(`ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	if counts := reviewTableCounts(t, f.store); counts["advisory_reviews"] != 0 || counts["review_idempotency"] != 0 {
+		t.Fatalf("exclusive-lock failure wrote rows: %v", counts)
 	}
 }
 
