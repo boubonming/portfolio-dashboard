@@ -44,7 +44,7 @@ type MachinePrincipal struct {
 // field empty, but rejects every partial or weak configuration.
 func (c MachineConfig) Validate() error {
 	empty := c.PrincipalID == "" && c.PortfolioID == "" && c.BearerSecret == ""
-	if empty && !c.PortfolioRead {
+	if empty && !c.PortfolioRead && !c.ReviewsWrite {
 		return nil
 	}
 	if c.PrincipalID == "" || c.PortfolioID == "" || c.BearerSecret == "" {

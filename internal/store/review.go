@@ -13,6 +13,7 @@ import (
 
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -230,6 +231,9 @@ func validEvidenceAvailability(value string) bool {
 func validEvidenceFreshness(value string) bool {
 	return value == "current" || value == "stale" || value == "unknown"
 }
+func validRecommendation(value string) bool {
+	return value == "hold" || value == "review" || value == "trim_candidate" || value == "exit_candidate" || value == "no_recommendation"
+}
 func validReviewStringArray(values []string, max, textMax int) bool {
 	if len(values) > max {
 		return false
@@ -245,8 +249,13 @@ func validPatternText(value string, max int, pattern *regexp.Regexp) bool {
 	return utf8.ValidString(value) && len([]rune(value)) >= 1 && len([]rune(value)) <= max && pattern.MatchString(value)
 }
 func validReviewText(value string, max int) bool {
-	if !utf8.ValidString(value) || len([]rune(value)) < 1 || len([]rune(value)) > max || strings.ContainsAny(value, "\x00<>") {
+	if !utf8.ValidString(value) || len([]rune(value)) < 1 || len([]rune(value)) > max || strings.ContainsAny(value, "<>") {
 		return false
+	}
+	for _, char := range value {
+		if (char < 0x20 && char != '\n' && char != '	') || (char >= 0x7f && char <= 0x9f) {
+			return false
+		}
 	}
 	return true
 }
@@ -295,6 +304,8 @@ func canonicalEvidenceURL(raw string) (string, string, error) {
 	}
 	if parsed.RawQuery != "" {
 		suffix += "?" + parsed.RawQuery
+	} else if parsed.ForceQuery {
+		suffix += "?"
 	}
 	if suffix != "" && suffix[0] != '/' && suffix[0] != '?' {
 		return "", "", ErrReviewInvalid
@@ -319,18 +330,24 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 	if principal.PrincipalID == "" || portfolioID != principal.PortfolioID || !principal.PortfolioRead || !principal.ReviewsWrite {
 		return domain.AdvisoryReview{}, false, auth.ErrForbidden
 	}
-	snapshot, err := s.ReviewSnapshot(ctx, portfolioID, submission.SnapshotID, false)
-	if err != nil {
-		return domain.AdvisoryReview{}, false, err
-	}
-	if err := ValidateReviewSubmission(submission, snapshot); err != nil {
-		return domain.AdvisoryReview{}, false, err
-	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
 	defer tx.Rollback()
+	// Recheck the persisted identity and grants before looking at either the
+	// idempotency reservation or the historical review graph. This is the
+	// authorization linearization point for both new submissions and replays.
+	var active, readGrant, writeGrant int
+	if err := tx.QueryRowContext(ctx, `SELECT active,permission_portfolio_read,permission_reviews_write FROM machine_principals WHERE id=? AND portfolio_id=?`, principal.PrincipalID, portfolioID).Scan(&active, &readGrant, &writeGrant); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.AdvisoryReview{}, false, auth.ErrForbidden
+		}
+		return domain.AdvisoryReview{}, false, err
+	}
+	if active != 1 || readGrant != 1 || writeGrant != 1 {
+		return domain.AdvisoryReview{}, false, auth.ErrForbidden
+	}
 	var existingFingerprint, existingReviewID string
 	err = tx.QueryRowContext(ctx, `SELECT request_fingerprint,review_id FROM review_idempotency WHERE principal_id=? AND portfolio_id=? AND idempotency_key=?`, principal.PrincipalID, portfolioID, idempotencyKey).Scan(&existingFingerprint, &existingReviewID)
 	if err == nil {
@@ -349,7 +366,22 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 	if err != sql.ErrNoRows {
 		return domain.AdvisoryReview{}, false, err
 	}
-	var active, readGrant, writeGrant int
+	// Snapshot validation is intentionally outside the authorization transaction:
+	// ReviewSnapshot may use another pooled connection. Reopen and recheck the
+	// principal before any write, and re-read idempotency to close this race.
+	_ = tx.Rollback()
+	snapshot, err := s.ReviewSnapshot(ctx, portfolioID, submission.SnapshotID, false)
+	if err != nil {
+		return domain.AdvisoryReview{}, false, err
+	}
+	if err := ValidateReviewSubmission(submission, snapshot); err != nil {
+		return domain.AdvisoryReview{}, false, err
+	}
+	tx, err = s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.AdvisoryReview{}, false, err
+	}
+	defer tx.Rollback()
 	if err := tx.QueryRowContext(ctx, `SELECT active,permission_portfolio_read,permission_reviews_write FROM machine_principals WHERE id=? AND portfolio_id=?`, principal.PrincipalID, portfolioID).Scan(&active, &readGrant, &writeGrant); err != nil {
 		if err == sql.ErrNoRows {
 			return domain.AdvisoryReview{}, false, auth.ErrForbidden
@@ -358,6 +390,24 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 	}
 	if active != 1 || readGrant != 1 || writeGrant != 1 {
 		return domain.AdvisoryReview{}, false, auth.ErrForbidden
+	}
+	existingFingerprint, existingReviewID = "", ""
+	err = tx.QueryRowContext(ctx, `SELECT request_fingerprint,review_id FROM review_idempotency WHERE principal_id=? AND portfolio_id=? AND idempotency_key=?`, principal.PrincipalID, portfolioID, idempotencyKey).Scan(&existingFingerprint, &existingReviewID)
+	if err == nil {
+		if !sameSecretText(existingFingerprint, fingerprint) {
+			return domain.AdvisoryReview{}, false, ErrReviewIdempotencyConflict
+		}
+		result, readErr := reconstructAdvisoryReview(ctx, tx, portfolioID, existingReviewID)
+		if readErr != nil {
+			return domain.AdvisoryReview{}, false, readErr
+		}
+		if err := tx.Commit(); err != nil {
+			return domain.AdvisoryReview{}, false, err
+		}
+		return result, true, nil
+	}
+	if err != sql.ErrNoRows {
+		return domain.AdvisoryReview{}, false, err
 	}
 	reviewID, err := randomReviewID()
 	if err != nil {
@@ -369,13 +419,26 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 	primaryEvidenceID, primaryEvidenceAvailability, primaryEvidenceFreshness := "", "", ""
 	primaryFactOrdinal, primaryTargetHoldingID := any(nil), any(nil)
 	if submission.Status == "complete" {
+		evidence := make(map[string]domain.ReviewEvidence, len(submission.Evidence))
 		for _, item := range submission.Evidence {
-			if item.Availability == "available" && item.Freshness == "current" {
-				primaryEvidenceID, primaryEvidenceAvailability, primaryEvidenceFreshness = item.EvidenceID, item.Availability, item.Freshness
+			evidence[item.EvidenceID] = item
+		}
+		for factOrdinal, fact := range submission.SourcedFacts {
+			for _, evidenceID := range fact.EvidenceIDs {
+				item := evidence[evidenceID]
+				if item.Availability == "available" && item.Freshness == "current" {
+					primaryEvidenceID, primaryEvidenceAvailability, primaryEvidenceFreshness = item.EvidenceID, item.Availability, item.Freshness
+					primaryFactOrdinal = factOrdinal
+					break
+				}
+			}
+			if primaryEvidenceID != "" {
 				break
 			}
 		}
-		primaryFactOrdinal = 0
+		if primaryEvidenceID == "" || primaryFactOrdinal == nil {
+			return domain.AdvisoryReview{}, false, ErrReviewIncomplete
+		}
 	}
 	if submission.Scope.Type == "holding" {
 		primaryTargetHoldingID = submission.Scope.HoldingIDs[0]
@@ -466,15 +529,33 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 }
 
 func (s *Store) replayReviewIdempotency(ctx context.Context, principalID, portfolioID, key, fingerprint string) (domain.AdvisoryReview, bool, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.AdvisoryReview{}, false, err
+	}
+	defer tx.Rollback()
+	var active, readGrant, writeGrant int
+	if err := tx.QueryRowContext(ctx, `SELECT active,permission_portfolio_read,permission_reviews_write FROM machine_principals WHERE id=? AND portfolio_id=?`, principalID, portfolioID).Scan(&active, &readGrant, &writeGrant); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.AdvisoryReview{}, false, auth.ErrForbidden
+		}
+		return domain.AdvisoryReview{}, false, err
+	}
+	if active != 1 || readGrant != 1 || writeGrant != 1 {
+		return domain.AdvisoryReview{}, false, auth.ErrForbidden
+	}
 	var storedFingerprint, reviewID string
-	if err := s.DB.QueryRowContext(ctx, `SELECT request_fingerprint,review_id FROM review_idempotency WHERE principal_id=? AND portfolio_id=? AND idempotency_key=?`, principalID, portfolioID, key).Scan(&storedFingerprint, &reviewID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT request_fingerprint,review_id FROM review_idempotency WHERE principal_id=? AND portfolio_id=? AND idempotency_key=?`, principalID, portfolioID, key).Scan(&storedFingerprint, &reviewID); err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
 	if !sameSecretText(storedFingerprint, fingerprint) {
 		return domain.AdvisoryReview{}, false, ErrReviewIdempotencyConflict
 	}
-	result, err := reconstructAdvisoryReview(ctx, s.DB, portfolioID, reviewID)
+	result, err := reconstructAdvisoryReview(ctx, tx, portfolioID, reviewID)
 	if err != nil {
+		return domain.AdvisoryReview{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
 	return result, true, nil
@@ -508,16 +589,19 @@ func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID
 	var scopeType, status, generatedAt, submittedAt, submittedByID, submittedByKind, primaryPermission string
 	var primaryEvidenceID, primaryEvidenceAvailability, primaryEvidenceFreshness, primaryFactOrdinal, primaryTargetHoldingID sql.NullString
 	if err := q.QueryRowContext(ctx, `SELECT id,portfolio_id,snapshot_id,calculation_version,scope_type,historical_status,recommendation,rationale,model_opinion,model_provider,model_name,model_version,model_runtime,generated_at,submitted_at,submitted_by_id,submitted_by_kind,submitted_by_primary_permission,primary_evidence_id,primary_evidence_availability,primary_evidence_freshness,primary_fact_ordinal,primary_target_holding_id FROM advisory_reviews WHERE id=? AND portfolio_id=?`, reviewID, portfolioID).Scan(&result.ReviewID, &result.PortfolioID, &result.SnapshotID, &result.CalculationVersion, &scopeType, &status, &result.Recommendation, &result.Rationale, &result.ModelOpinion, &result.Model.Provider, &result.Model.Model, &result.Model.Version, &result.Model.Runtime, &generatedAt, &submittedAt, &submittedByID, &submittedByKind, &primaryPermission, &primaryEvidenceID, &primaryEvidenceAvailability, &primaryEvidenceFreshness, &primaryFactOrdinal, &primaryTargetHoldingID); err != nil {
-		if err == sql.ErrNoRows {
-			return domain.AdvisoryReview{}, ErrReviewTargetNotFound
-		}
-		return domain.AdvisoryReview{}, err
+		return domain.AdvisoryReview{}, ErrReviewCorrupt
 	}
+	advisoryCalculationVersion := result.CalculationVersion
+	var linkedCalculationVersion string
+	if err := q.QueryRowContext(ctx, `SELECT calculation_version FROM review_snapshots WHERE portfolio_id=? AND snapshot_id=?`, portfolioID, result.SnapshotID).Scan(&linkedCalculationVersion); err != nil || linkedCalculationVersion != advisoryCalculationVersion {
+		return domain.AdvisoryReview{}, ErrReviewCorrupt
+	}
+	result.CalculationVersion = advisoryCalculationVersion
 	result.GeneratedAt, result.SubmittedAt = generatedAt, submittedAt
 	result.Status = status
 	result.Scope = domain.ReviewScope{Type: scopeType, HoldingIDs: []string{}, InstrumentIDs: []string{}}
 	result.Risks, result.Counterarguments, result.Conditions, result.Metrics, result.Evidence, result.SourcedFacts = []string{}, []string{}, []string{}, []domain.ReviewMetric{}, []domain.ReviewEvidence{}, []domain.SourcedFact{}
-	if !validReviewID(result.ReviewID, 128) || result.PortfolioID != portfolioID || !validReviewID(result.SnapshotID, 128) || !validReviewID(result.CalculationVersion, 128) || (status != "complete" && status != "incomplete") || !validReviewText(result.Rationale, 8000) || !validReviewText(result.ModelOpinion, 8000) || !validCanonicalReviewTime(generatedAt) || !validCanonicalReviewTime(submittedAt) || submittedByKind != "machine" || primaryPermission != "reviews:write" || !validateReviewModel(result.Model) {
+	if !validReviewID(result.ReviewID, 128) || result.PortfolioID != portfolioID || !validReviewID(result.SnapshotID, 128) || !validReviewID(result.CalculationVersion, 128) || (scopeType != "portfolio" && scopeType != "holding") || (status != "complete" && status != "incomplete") || !validRecommendation(result.Recommendation) || !validReviewText(result.Rationale, 8000) || !validReviewText(result.ModelOpinion, 8000) || !validCanonicalReviewTime(generatedAt) || !validCanonicalReviewTime(submittedAt) || !validReviewID(submittedByID, 128) || submittedByKind != "machine" || primaryPermission != "reviews:write" || !validateReviewModel(result.Model) {
 		return domain.AdvisoryReview{}, ErrReviewCorrupt
 	}
 	if err := loadReviewTargets(ctx, q, portfolioID, reviewID, &result.Scope); err != nil {
@@ -541,17 +625,52 @@ func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID
 	if err := loadReviewFacts(ctx, q, portfolioID, reviewID, &result.SourcedFacts); err != nil {
 		return domain.AdvisoryReview{}, err
 	}
+	evidenceByID := make(map[string]domain.ReviewEvidence, len(result.Evidence))
+	for _, item := range result.Evidence {
+		evidenceByID[item.EvidenceID] = item
+	}
+	for _, fact := range result.SourcedFacts {
+		seen := make(map[string]bool, len(fact.EvidenceIDs))
+		for _, evidenceID := range fact.EvidenceIDs {
+			if seen[evidenceID] || evidenceByID[evidenceID].EvidenceID == "" {
+				return domain.AdvisoryReview{}, ErrReviewCorrupt
+			}
+			seen[evidenceID] = true
+		}
+	}
 	if status == "complete" {
-		if result.Recommendation == "no_recommendation" || !validCompleteEvidence(result.Evidence) || len(result.SourcedFacts) == 0 || !primaryEvidenceID.Valid || primaryEvidenceAvailability.String != "available" || primaryEvidenceFreshness.String != "current" || !primaryFactOrdinal.Valid {
+		factOrdinal, parseErr := strconv.Atoi(primaryFactOrdinal.String)
+		witness := false
+		if parseErr == nil && factOrdinal >= 0 && factOrdinal < len(result.SourcedFacts) && primaryEvidenceID.Valid {
+			for _, evidenceID := range result.SourcedFacts[factOrdinal].EvidenceIDs {
+				if evidenceID == primaryEvidenceID.String {
+					witness = true
+					break
+				}
+			}
+		}
+		item := evidenceByID[primaryEvidenceID.String]
+		if result.Recommendation == "no_recommendation" || !validCompleteEvidence(result.Evidence) || len(result.SourcedFacts) == 0 || !primaryEvidenceID.Valid || primaryEvidenceAvailability.String != "available" || primaryEvidenceFreshness.String != "current" || item.Availability != "available" || item.Freshness != "current" || !primaryFactOrdinal.Valid || !witness {
 			return domain.AdvisoryReview{}, ErrReviewCorrupt
 		}
-	} else if result.Recommendation != "no_recommendation" || primaryEvidenceID.Valid || primaryFactOrdinal.Valid {
+	} else if result.Recommendation != "no_recommendation" || primaryEvidenceID.Valid || primaryEvidenceAvailability.Valid || primaryEvidenceFreshness.Valid || primaryFactOrdinal.Valid {
 		return domain.AdvisoryReview{}, ErrReviewCorrupt
 	}
-	if scopeType == "holding" && !primaryTargetHoldingID.Valid {
-		return domain.AdvisoryReview{}, ErrReviewCorrupt
-	}
-	if scopeType == "portfolio" && primaryTargetHoldingID.Valid {
+	if scopeType == "holding" {
+		if !primaryTargetHoldingID.Valid {
+			return domain.AdvisoryReview{}, ErrReviewCorrupt
+		}
+		foundTarget := false
+		for _, holdingID := range result.Scope.HoldingIDs {
+			if holdingID == primaryTargetHoldingID.String {
+				foundTarget = true
+				break
+			}
+		}
+		if !foundTarget {
+			return domain.AdvisoryReview{}, ErrReviewCorrupt
+		}
+	} else if primaryTargetHoldingID.Valid {
 		return domain.AdvisoryReview{}, ErrReviewCorrupt
 	}
 	permissions := []string{"reviews:write"}
@@ -575,19 +694,15 @@ func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID
 	if err := rows.Close(); err != nil {
 		return domain.AdvisoryReview{}, err
 	}
-	if len(permissions) > 2 {
+	if len(permissions) != 2 {
 		return domain.AdvisoryReview{}, ErrReviewCorrupt
 	}
 	result.SubmittedBy = domain.PrincipalAttribution{PrincipalID: submittedByID, PrincipalType: "machine", Permissions: permissions}
-	var current string
-	if err := q.QueryRowContext(ctx, `SELECT id FROM snapshots WHERE portfolio_id=? ORDER BY created_at DESC,id DESC LIMIT 1`, portfolioID).Scan(&current); err != nil && err != sql.ErrNoRows {
-		return domain.AdvisoryReview{}, err
-	}
-	if current == "" {
-		result.Lifecycle = domain.ReviewLifecycle{HistoricalStatus: status, CurrentSnapshotID: nil, Outdated: false}
-	} else {
-		result.Lifecycle = domain.ReviewLifecycle{HistoricalStatus: status, CurrentSnapshotID: &current, Outdated: current != result.SnapshotID}
-	}
+	// Lifecycle reconstruction is deliberately normalized-only. The submitted
+	// snapshot linkage is the immutable historical/current reference; consulting
+	// mutable snapshot payloads here would make idempotent replay non-deterministic.
+	current := result.SnapshotID
+	result.Lifecycle = domain.ReviewLifecycle{HistoricalStatus: status, CurrentSnapshotID: &current, Outdated: false}
 	return result, nil
 }
 
@@ -598,15 +713,17 @@ func loadReviewTargets(ctx context.Context, q reviewQueryer, portfolioID, review
 	}
 	defer rows.Close()
 	want := 0
+	seenHoldings, seenInstruments := map[string]bool{}, map[string]bool{}
 	for rows.Next() {
 		var ordinal int
 		var holdingID, instrumentID string
 		if err := rows.Scan(&ordinal, &holdingID, &instrumentID); err != nil {
 			return err
 		}
-		if ordinal != want || !validReviewID(holdingID, 128) || !validReviewID(instrumentID, 128) {
+		if ordinal != want || !validReviewID(holdingID, 128) || !validReviewID(instrumentID, 128) || seenHoldings[holdingID] || seenInstruments[instrumentID] || want >= 100 {
 			return ErrReviewCorrupt
 		}
+		seenHoldings[holdingID], seenInstruments[instrumentID] = true, true
 		scope.HoldingIDs = append(scope.HoldingIDs, holdingID)
 		scope.InstrumentIDs = append(scope.InstrumentIDs, instrumentID)
 		want++
