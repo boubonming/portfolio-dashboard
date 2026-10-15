@@ -326,7 +326,27 @@ func isASCII(value string) bool {
 
 // SubmitAdvisoryReview appends a complete normalized graph. The transaction
 // also owns the idempotency reservation, audit association and Activity row.
+// SQLite can reject a deferred read-to-write transaction upgrade when two
+// independent connections submit the same key at once. A bounded retry keeps
+// that expected contention on the idempotency path instead of exposing a
+// spurious SQLITE_BUSY error to callers.
 func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.MachinePrincipal, portfolioID, idempotencyKey, fingerprint string, submission domain.ReviewSubmission) (domain.AdvisoryReview, bool, error) {
+	for attempt := 0; attempt < 4; attempt++ {
+		result, replay, err := s.submitAdvisoryReviewOnce(ctx, principal, portfolioID, idempotencyKey, fingerprint, submission)
+		if err == nil || !isSQLiteBusy(err) || attempt == 3 {
+			return result, replay, err
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+	}
+	return domain.AdvisoryReview{}, false, errors.New("review submission retry exhausted")
+}
+
+func isSQLiteBusy(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") || strings.Contains(message, "sqlite_busy")
+}
+
+func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.MachinePrincipal, portfolioID, idempotencyKey, fingerprint string, submission domain.ReviewSubmission) (domain.AdvisoryReview, bool, error) {
 	if principal.PrincipalID == "" || portfolioID != principal.PortfolioID || !principal.PortfolioRead || !principal.ReviewsWrite {
 		return domain.AdvisoryReview{}, false, auth.ErrForbidden
 	}

@@ -105,6 +105,9 @@ func Load() (Config, error) {
 	if err := publicOriginEnvironment(cfg.Auth.PublicOrigin); err != nil {
 		return Config{}, err
 	}
+	if cfg.Auth.Machine.Enabled() && !cfg.Auth.Machine.PortfolioRead {
+		return Config{}, fmt.Errorf("machine authentication configuration: portfolio read is required when machine credentials are configured")
+	}
 	if err := cfg.Auth.Validate(); err != nil {
 		return Config{}, err
 	}
