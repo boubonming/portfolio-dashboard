@@ -1,0 +1,273 @@
+package httpserver
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"regexp"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/boubonming/portfolio-dashboard/internal/auth"
+	"github.com/boubonming/portfolio-dashboard/internal/domain"
+	"github.com/boubonming/portfolio-dashboard/internal/store"
+)
+
+var reviewPathID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~-]*$`)
+var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+
+func reviewRoutes(database *store.Store, authenticator *auth.Authenticator) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		portfolioCandidate := reviewPortfolioCandidate(r)
+		if portfolioCandidate == "" && authenticator != nil {
+			portfolioCandidate = authenticator.MachinePrincipal().PortfolioID
+		}
+		if !reviewAuthenticate(w, r, database, authenticator, portfolioCandidate) {
+			return
+		}
+		portfolioID, ok := reviewCollectionTarget(r)
+		if !ok {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "GET, POST")
+			writePhaseDError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET and POST are supported for this resource.")
+			return
+		}
+		if database == nil {
+			writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
+			return
+		}
+		keys := r.Header.Values("Idempotency-Key")
+		if len(keys) != 1 || !validIdempotencyKey(keys[0]) {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		mediaType, _, mediaErr := parseReviewContentType(r.Header.Values("Content-Type"))
+		if mediaErr != nil || mediaType != "application/json" {
+			writePhaseDError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json.")
+			return
+		}
+		body, tooLarge, readErr := readReviewBody(w, r)
+		if readErr != nil {
+			if tooLarge {
+				writePhaseDError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "The request body is too large.")
+			} else {
+				writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			}
+			return
+		}
+		if !utf8.Valid(body) || hasDuplicateJSONKeys(body) {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		allowed := map[string]bool{"snapshot_id": true, "calculation_version": true, "scope": true, "status": true, "recommendation": true, "rationale": true, "risks": true, "counterarguments": true, "conditions": true, "metrics": true, "sourced_facts": true, "model_opinion": true, "evidence": true, "model": true, "generated_at": true}
+		required := []string{"snapshot_id", "calculation_version", "scope", "status", "recommendation", "rationale", "risks", "counterarguments", "conditions", "metrics", "sourced_facts", "model_opinion", "evidence", "model", "generated_at"}
+		for key := range raw {
+			if !allowed[key] {
+				writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+				return
+			}
+		}
+		for _, key := range required {
+			value, exists := raw[key]
+			if !exists || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+				return
+			}
+		}
+		if !validReviewScopeJSON(raw["scope"]) {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		var submission domain.ReviewSubmission
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&submission); err != nil {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		fingerprint, err := store.ReviewFingerprint(submission)
+		if err != nil {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
+		principal := authenticator.MachinePrincipal()
+		result, replay, err := database.SubmitAdvisoryReview(r.Context(), principal, portfolioID, keys[0], fingerprint, submission)
+		if err != nil {
+			writeReviewError(w, err)
+			return
+		}
+		w.Header().Set("Location", "/api/v1/portfolios/"+portfolioID+"/reviews/"+result.ReviewID)
+		_ = replay // both creation and replay deliberately retain 201 semantics
+		writeJSON(w, http.StatusCreated, result)
+	})
+}
+
+func reviewCollectionTarget(r *http.Request) (string, bool) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "/")
+	if len(parts) != 5 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "portfolios" || parts[4] != "reviews" || !validReviewPathID(parts[3]) {
+		return "", false
+	}
+	return parts[3], true
+}
+
+func reviewPortfolioCandidate(r *http.Request) string {
+	parts := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "/")
+	if len(parts) > 3 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" {
+		return parts[3]
+	}
+	return ""
+}
+
+func validReviewScopeJSON(value json.RawMessage) bool {
+	var raw map[string]json.RawMessage
+	if len(value) == 0 || json.Unmarshal(value, &raw) != nil || raw == nil || len(raw) != 3 {
+		return false
+	}
+	for key := range raw {
+		if key != "type" && key != "holding_ids" && key != "instrument_ids" {
+			return false
+		}
+	}
+	var scopeType string
+	var holdingIDs, instrumentIDs []string
+	if err := json.Unmarshal(raw["type"], &scopeType); err != nil || scopeType == "" {
+		return false
+	}
+	if err := json.Unmarshal(raw["holding_ids"], &holdingIDs); err != nil || holdingIDs == nil {
+		return false
+	}
+	if err := json.Unmarshal(raw["instrument_ids"], &instrumentIDs); err != nil || instrumentIDs == nil {
+		return false
+	}
+	return true
+}
+
+func validReviewPathID(value string) bool {
+	return len(value) >= 1 && len(value) <= 128 && reviewPathID.MatchString(value) && !strings.Contains(value, "%")
+}
+func validIdempotencyKey(value string) bool {
+	return len(value) >= 16 && len(value) <= 128 && idempotencyKeyPattern.MatchString(value)
+}
+
+func parseReviewContentType(values []string) (string, map[string]string, error) {
+	if len(values) != 1 {
+		return "", nil, errors.New("content type count")
+	}
+	return mimeParseMediaType(values[0])
+}
+
+func mimeParseMediaType(value string) (string, map[string]string, error) {
+	// Keep parameters permitted while rejecting duplicate Content-Type headers.
+	parts := strings.Split(value, ";")
+	mediaType := strings.ToLower(strings.TrimSpace(parts[0]))
+	if mediaType == "" {
+		return "", nil, errors.New("empty content type")
+	}
+	params := map[string]string{}
+	for _, part := range parts[1:] {
+		item := strings.SplitN(part, "=", 2)
+		if len(item) != 2 || strings.TrimSpace(item[0]) == "" {
+			return "", nil, errors.New("invalid parameter")
+		}
+		params[strings.ToLower(strings.TrimSpace(item[0]))] = strings.Trim(strings.TrimSpace(item[1]), "\"")
+	}
+	return mediaType, params, nil
+}
+
+func readReviewBody(w http.ResponseWriter, r *http.Request) ([]byte, bool, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, store.ReviewBodyLimit)
+	body, err := io.ReadAll(io.LimitReader(r.Body, store.ReviewBodyLimit+1))
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return nil, true, err
+		}
+		return nil, false, err
+	}
+	if len(body) > store.ReviewBodyLimit {
+		return nil, true, nil
+	}
+	return body, false, nil
+}
+
+func reviewAuthenticate(w http.ResponseWriter, r *http.Request, database *store.Store, authenticator *auth.Authenticator, portfolioID string) bool {
+	_, cookieErr := r.Cookie(auth.SessionCookieName)
+	cookiePresent := cookieErr == nil
+	token, bearerPresent, bearerWellFormed := auth.BearerToken(r)
+	if cookiePresent && bearerPresent {
+		writeBearerUnauthorized(w)
+		return false
+	}
+	if !bearerPresent || !bearerWellFormed || authenticator == nil || !authenticator.MachineTokenValid(token) {
+		writeBearerUnauthorized(w)
+		return false
+	}
+	if database == nil {
+		writePhaseDError(w, http.StatusForbidden, "forbidden", "The credential lacks the required permission.")
+		return false
+	}
+	allowed, err := database.MachineReviewPrincipalAllowedForRuntime(r.Context(), authenticator.MachinePrincipal(), portfolioID)
+	if err != nil {
+		writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
+		return false
+	}
+	if !allowed {
+		writePhaseDError(w, http.StatusForbidden, "forbidden", "The credential lacks the required permission.")
+		return false
+	}
+	return true
+}
+
+func writeReviewError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, auth.ErrForbidden):
+		writePhaseDError(w, http.StatusForbidden, "forbidden", "The credential lacks the required permission.")
+	case errors.Is(err, store.ErrReviewInvalid):
+		writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+	case errors.Is(err, store.ErrReviewIncomplete):
+		writePhaseDError(w, http.StatusUnprocessableEntity, "incomplete_review", "The submitted review cannot support the claimed completeness.")
+	case errors.Is(err, store.ErrReviewIdempotencyConflict):
+		writePhaseDError(w, http.StatusConflict, "idempotency_conflict", "The idempotency key conflicts with an earlier request.")
+	case errors.Is(err, store.ErrPortfolioNotFound), errors.Is(err, store.ErrSnapshotNotFound), errors.Is(err, store.ErrReviewTargetNotFound):
+		writePhaseDError(w, http.StatusNotFound, "not_found", "The requested portfolio, snapshot, or target was not found.")
+	case errors.Is(err, store.ErrSnapshotCorrupt), errors.Is(err, store.ErrReviewCorrupt):
+		writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
+	default:
+		writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
+	}
+}
+
+func reviewNamespacePath(escapedPath string) bool {
+	return strings.Contains(strings.ToLower(escapedPath), "/reviews")
+}
+func unsafeReviewPath(escapedPath string) bool {
+	if strings.Contains(escapedPath, "%") || strings.Contains(escapedPath, "//") {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(escapedPath, "/"), "/")
+	for _, part := range parts {
+		if part == "." || part == ".." || part == "" {
+			return true
+		}
+	}
+	return strings.HasSuffix(escapedPath, "/")
+}

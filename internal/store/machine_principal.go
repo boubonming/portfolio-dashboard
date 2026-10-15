@@ -32,7 +32,7 @@ func (s *Store) RegisterMachinePrincipalIdentity(ctx context.Context, principal 
 		// whether a deployment has imported a particular portfolio.
 		return nil
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO machine_principals(id,portfolio_id,permission_portfolio_read,permission_reviews_write,active,created_at) VALUES(?,?,?,?,?,?)`, principal.PrincipalID, principal.PortfolioID, boolInt(principal.PortfolioRead), 1, 1, canonicalSnapshotTime(time.Now().UTC()))
+	_, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO machine_principals(id,portfolio_id,permission_portfolio_read,permission_reviews_write,active,created_at) VALUES(?,?,?,?,?,?)`, principal.PrincipalID, principal.PortfolioID, boolInt(principal.PortfolioRead), boolInt(principal.ReviewsWrite), 1, canonicalSnapshotTime(time.Now().UTC()))
 	return err
 }
 
@@ -70,4 +70,19 @@ func (s *Store) MachinePrincipalAllowedForRuntime(ctx context.Context, principal
 		return false, err
 	}
 	return active == 1 && permission == 1, nil
+}
+
+func (s *Store) MachineReviewPrincipalAllowedForRuntime(ctx context.Context, principal auth.MachinePrincipal, requestedPortfolioID string) (bool, error) {
+	if requestedPortfolioID != principal.PortfolioID || !principal.PortfolioRead || !principal.ReviewsWrite {
+		return false, nil
+	}
+	var active, read, write int
+	err := s.DB.QueryRowContext(ctx, `SELECT active,permission_portfolio_read,permission_reviews_write FROM machine_principals WHERE id=? AND portfolio_id=?`, principal.PrincipalID, requestedPortfolioID).Scan(&active, &read, &write)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return active == 1 && read == 1 && write == 1, nil
 }

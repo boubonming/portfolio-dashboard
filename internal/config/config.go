@@ -50,6 +50,7 @@ func FromEnv() Config {
 				PortfolioID:   os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_ID"),
 				BearerSecret:  os.Getenv("PORTFOLIO_MACHINE_BEARER_SECRET"),
 				PortfolioRead: machinePortfolioRead(),
+				ReviewsWrite:  machineReviewsWrite(),
 			},
 		},
 	}
@@ -57,6 +58,15 @@ func FromEnv() Config {
 
 func machinePortfolioRead() bool {
 	value := os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_READ")
+	if value == "" {
+		return false
+	}
+	parsed, err := strconv.ParseBool(value)
+	return err == nil && parsed
+}
+
+func machineReviewsWrite() bool {
+	value := os.Getenv("PORTFOLIO_MACHINE_REVIEWS_WRITE")
 	if value == "" {
 		return false
 	}
@@ -79,6 +89,11 @@ func Load() (Config, error) {
 	if value := os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_READ"); value != "" {
 		if _, err := strconv.ParseBool(value); err != nil {
 			return Config{}, fmt.Errorf("machine authentication configuration: invalid PORTFOLIO_MACHINE_PORTFOLIO_READ")
+		}
+	}
+	if value := os.Getenv("PORTFOLIO_MACHINE_REVIEWS_WRITE"); value != "" {
+		if _, err := strconv.ParseBool(value); err != nil {
+			return Config{}, fmt.Errorf("machine authentication configuration: invalid PORTFOLIO_MACHINE_REVIEWS_WRITE")
 		}
 	}
 	if !cfg.Auth.CookieSecure && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "development") && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "test") {

@@ -27,6 +27,7 @@ type MachineConfig struct {
 	PortfolioID   string `json:"portfolio_id"`
 	BearerSecret  string `json:"-"`
 	PortfolioRead bool   `json:"portfolio_read"`
+	ReviewsWrite  bool   `json:"reviews_write"`
 }
 
 // MachinePrincipal is the non-secret database identity and effective scope.
@@ -36,6 +37,7 @@ type MachinePrincipal struct {
 	PrincipalID   string
 	PortfolioID   string
 	PortfolioRead bool
+	ReviewsWrite  bool
 }
 
 // Validate permits the machine credential to be disabled by leaving every
@@ -73,7 +75,7 @@ func (c MachineConfig) Validate() error {
 func (c MachineConfig) Enabled() bool { return c.BearerSecret != "" }
 
 func (c MachineConfig) Principal() MachinePrincipal {
-	return MachinePrincipal{PrincipalID: c.PrincipalID, PortfolioID: c.PortfolioID, PortfolioRead: c.PortfolioRead}
+	return MachinePrincipal{PrincipalID: c.PrincipalID, PortfolioID: c.PortfolioID, PortfolioRead: c.PortfolioRead, ReviewsWrite: c.ReviewsWrite}
 }
 
 // String deliberately omits the bearer value. MachineConfig is passed through

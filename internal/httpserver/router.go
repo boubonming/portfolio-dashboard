@@ -67,6 +67,9 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 		// ServeMux's path-cleaning redirect from disclosing route shape.
 		mux.Handle("/api/v1/portfolios/{portfolioId}/snapshots/", snapshot)
 		mux.Handle("/api/v1/portfolios/{portfolioId}/snapshots", snapshot)
+		reviews := noStorePrivate(reviewRoutes(database, authenticator))
+		mux.Handle("/api/v1/portfolios/{portfolioId}/reviews", reviews)
+		mux.Handle("/api/v1/portfolios/{portfolioId}/reviews/", reviews)
 	}
 	portfolio := http.Handler(portfolioRoutes(database))
 	if authenticator != nil {
@@ -85,7 +88,7 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 // snapshot endpoint's generic-target validation and disclose a route shape.
 func privatePathGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath()) {
+		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Vary", "Cookie")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
