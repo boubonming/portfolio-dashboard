@@ -91,6 +91,9 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	if len(payload.Valuation.Lots) != len(payload.Input.Lots) || len(payload.Valuation.MissingDependencies) > 100 || len(payload.Valuation.StaleDependencies) > 100 || len(payload.Valuation.InvalidDependencies) > 100 {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
+	if !validSnapshotInput(payload) {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
 	seenDependencies := make(map[string]struct{})
 	for _, dependency := range append(append(append([]string{}, payload.Valuation.MissingDependencies...), payload.Valuation.StaleDependencies...), payload.Valuation.InvalidDependencies...) {
 		if !validIdentifier(dependency, 128) {
@@ -208,7 +211,24 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 		}
 		result.Holdings = append(result.Holdings, item)
 	}
+	// The payload is immutable, but its valuation is still untrusted database
+	// data. Re-run the exact calculation that created it after all ownership,
+	// cardinality, version, and order checks. The JSON representation is the
+	// payload's canonical representation, so this compares every serialized
+	// field without converting decimals through REAL or applying tolerance.
+	recomputeInput := payload.Input
+	recomputeInput.MaxAge = payload.MaxAge
+	recomputed, err := domain.Calculate(recomputeInput)
+	if err != nil || !exactValuationMatch(recomputed, payload.Valuation) {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
 	return result, nil
+}
+
+func exactValuationMatch(left, right domain.Valuation) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
 }
 
 func loadPersistedSnapshotHoldings(ctx context.Context, db *sql.DB, portfolioID, snapshotID string, expected int) (map[string]persistedSnapshotHolding, error) {
@@ -246,6 +266,9 @@ func loadPersistedSnapshotHoldings(ctx context.Context, db *sql.DB, portfolioID,
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if len(result) > maxSnapshotHoldings {
+		return nil, ErrSnapshotCorrupt
 	}
 	return result, nil
 }
@@ -319,7 +342,7 @@ func incompleteDependenciesMatch(input domain.ValuationInput, valuation []domain
 			identity := dependency[strings.IndexByte(dependency, ':')+1:]
 			if strings.Contains(identity, "/") {
 				pair := strings.Split(identity, "/")
-				if len(pair) == 2 {
+				if len(pair) == 2 && pair[0] != pair[1] && pair[1] == reportingCurrency {
 					for index, lot := range input.Lots {
 						if lot.Currency == pair[0] && valuation[index].ReportingValue == nil {
 							matched = true
@@ -328,16 +351,17 @@ func incompleteDependenciesMatch(input domain.ValuationInput, valuation []domain
 					}
 				}
 			} else {
-				fxIdentity := false
-				for _, fx := range input.FXRates {
-					if fx.ID == identity {
-						fxIdentity = true
-						break
-					}
-				}
 				for index, lot := range input.Lots {
-					if fxIdentity && valuation[index].ReportingValue == nil && lot.Currency != reportingCurrency {
-						matched = true
+					if lot.Currency == reportingCurrency || valuation[index].ReportingValue != nil {
+						continue
+					}
+					for _, fx := range input.FXRates {
+						if fx.ID == identity && fxObservationMatchesConversion(fx, lot.Currency, reportingCurrency) {
+							matched = true
+							break
+						}
+					}
+					if matched {
 						break
 					}
 				}
@@ -362,8 +386,53 @@ func validDecimal(value string) bool {
 func validDecimalPointer(value *string) bool { return value == nil || validDecimal(*value) }
 func validDecimalOptional(value string) bool { return value == "" || validDecimal(value) }
 func validCurrency(value string) bool {
-	return len(value) == 3 && value == strings.ToUpper(value) && value >= "AAA" && value <= "ZZZ"
+	if len(value) != 3 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 'A' || value[index] > 'Z' {
+			return false
+		}
+	}
+	return true
 }
+
+func validSnapshotInput(payload snapshotPayload) bool {
+	if payload.MaxAge <= 0 || !validCurrency(payload.Input.ReportingCurrency) || payload.Input.AsOf.IsZero() ||
+		canonicalSnapshotTime(payload.Input.AsOf) != payload.AsOf || payload.Input.ReportingCurrency != payload.Valuation.ReportingCurrency {
+		return false
+	}
+	for _, lot := range payload.Input.Lots {
+		if !validID(lot.ID, 128) || !validID(lot.InstrumentID, 128) || !validSymbol(lot.Symbol) ||
+			!validCurrency(lot.Currency) || !validDecimal(lot.Quantity) || !validDecimalPointer(lot.UnitCost) || !validDecimalPointer(lot.CostBasis) {
+			return false
+		}
+	}
+	for _, quote := range payload.Input.Quotes {
+		if !validID(quote.ID, 128) || !validID(quote.InstrumentID, 128) || !validDecimal(quote.Price) ||
+			!validCurrency(quote.Currency) || !validCanonicalTime(quote.MarketAt) || !validCanonicalTime(quote.FetchedAt) ||
+			strings.TrimSpace(quote.Source) == "" || len(quote.Source) > 128 {
+			return false
+		}
+	}
+	for _, fx := range payload.Input.FXRates {
+		if !validID(fx.ID, 128) || !validCurrency(fx.BaseCurrency) || !validCurrency(fx.QuoteCurrency) ||
+			fx.BaseCurrency == fx.QuoteCurrency || !validDecimal(fx.Rate) || !validCanonicalTime(fx.MarketAt) ||
+			!validCanonicalTime(fx.FetchedAt) || strings.TrimSpace(fx.Source) == "" || len(fx.Source) > 128 {
+			return false
+		}
+	}
+	return true
+}
+
+func fxObservationMatchesConversion(fx domain.FXRate, from, to string) bool {
+	if from == to {
+		return false
+	}
+	return (fx.BaseCurrency == from && fx.QuoteCurrency == to) ||
+		(fx.BaseCurrency == to && fx.QuoteCurrency == from)
+}
+
 func validIdentifier(value string, max int) bool {
 	return len(value) >= 1 && len(value) <= max && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\r\n\x00")
 }

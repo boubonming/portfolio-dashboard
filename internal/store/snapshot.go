@@ -62,11 +62,17 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 	if err != nil {
 		return domain.SnapshotStatus{}, err
 	}
+	if len(input.Lots) > maxSnapshotHoldings {
+		return domain.SnapshotStatus{}, ErrSnapshotCorrupt
+	}
 	valuation, err := domain.Calculate(input)
 	if err != nil {
 		return domain.SnapshotStatus{}, err
 	}
 	if !canonicalSnapshotLots(input.Lots, valuation.Lots) {
+		return domain.SnapshotStatus{}, ErrSnapshotCorrupt
+	}
+	if len(input.Lots) > maxSnapshotHoldings {
 		return domain.SnapshotStatus{}, ErrSnapshotCorrupt
 	}
 	hashInput, err := json.Marshal(struct {
