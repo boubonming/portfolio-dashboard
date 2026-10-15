@@ -356,6 +356,7 @@ func isASCII(value string) bool {
 func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.MachinePrincipal, portfolioID, idempotencyKey, fingerprint string, submission domain.ReviewSubmission) (domain.AdvisoryReview, bool, error) {
 	const maxAttempts = 4
 	const maxRetryElapsed = 250 * time.Millisecond
+	const retrySafetyMargin = 100 * time.Millisecond
 	started := time.Now()
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if reviewAttemptHook != nil {
@@ -391,7 +392,11 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 			return domain.AdvisoryReview{}, false, ctxErr
 		}
 		backoff := time.Duration(attempt+1) * 10 * time.Millisecond
-		if elapsed := time.Since(started); elapsed+backoff+25*time.Millisecond > maxRetryElapsed {
+		// modernc can return SQLITE_BUSY before the context timer fires while
+		// another connection holds BEGIN EXCLUSIVE. Reserve enough of the
+		// whole-operation budget to keep that bounded wait from racing into a
+		// late second attempt.
+		if elapsed := time.Since(started); elapsed+backoff+retrySafetyMargin > maxRetryElapsed {
 			return domain.AdvisoryReview{}, false, err
 		}
 		if reviewBackoffHook != nil {
