@@ -254,3 +254,41 @@ func TestSnapshotMachineGrantIntersectsRuntimeAndDatabaseState(t *testing.T) {
 		t.Fatalf("database-revoked grant status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestSnapshotMachineConfiguredPortfolioBindingSurvivesRestart(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-rebound", "Rebound", "MYR", now, now); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "machine-rebound-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ-abcdef"
+	base := auth.Config{Username: "fixture-user", PasswordHash: string(hash), SessionSecret: fixtureSessionSecret(), PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour}
+	base.Machine = auth.MachineConfig{PrincipalID: "machine-rebound", PortfolioID: "portfolio-api", BearerSecret: secret, PortfolioRead: true}
+	if _, err := NewHandlerWithAuth(database, base); err != nil {
+		t.Fatal(err)
+	}
+	base.Machine.PortfolioID = "portfolio-rebound"
+	restarted, err := NewHandlerWithAuth(database, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/snapshots/latest", nil)
+	request.Header.Set("Authorization", "Bearer "+secret)
+	response := httptest.NewRecorder()
+	restarted.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("old configured portfolio status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-rebound/snapshots/latest", nil)
+	request.Header.Set("Authorization", "Bearer "+secret)
+	response = httptest.NewRecorder()
+	restarted.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("new portfolio without DB grant status=%d body=%s", response.Code, response.Body.String())
+	}
+}

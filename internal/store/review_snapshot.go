@@ -22,6 +22,8 @@ var (
 var canonicalDecimal = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$`)
 var canonicalID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~-]*$`)
 
+const maxSnapshotHoldings = 10000
+
 type persistedSnapshotHolding struct {
 	holdingID    string
 	instrumentID string
@@ -73,6 +75,9 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	if payload.PortfolioID != portfolioID || payload.SnapshotID != storedID || payload.CalculationVersion != storedVersion || !validID(payload.PortfolioID, 128) || !validID(payload.SnapshotID, 128) || !validCalculationVersion(payload.CalculationVersion) || !validCanonicalTime(payload.CreatedAt) || !validCanonicalTime(payload.AsOf) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
+	if len(payload.Input.Lots) > maxSnapshotHoldings || len(payload.Valuation.Lots) > maxSnapshotHoldings || !canonicalSnapshotLots(payload.Input.Lots, payload.Valuation.Lots) {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
 	var reviewVersion string
 	if err := db.QueryRowContext(ctx, "SELECT calculation_version FROM review_snapshots WHERE portfolio_id=? AND snapshot_id=?", portfolioID, storedID).Scan(&reviewVersion); err != nil || reviewVersion != storedVersion {
 		if err == sql.ErrNoRows {
@@ -96,7 +101,7 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 		}
 		seenDependencies[dependency] = struct{}{}
 	}
-	if !validCurrency(payload.Valuation.ReportingCurrency) || (payload.Valuation.Complete && !validDecimal(payload.Valuation.ReportingTotal)) {
+	if !validCurrency(payload.Valuation.ReportingCurrency) || (!payload.Valuation.Complete && payload.Valuation.ReportingTotal != "") || (payload.Valuation.Complete && !validDecimal(payload.Valuation.ReportingTotal)) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
 	for _, subtotal := range payload.Valuation.Subtotals {
@@ -107,6 +112,12 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	if payload.Valuation.Complete && (len(seenDependencies) != 0 || payload.Valuation.ReportingTotal == "") {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
+	if !payload.Valuation.Complete && len(seenDependencies) == 0 && !hasIncompleteHolding(payload.Valuation.Lots) {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
+	if !payload.Valuation.Complete && !incompleteDependenciesMatch(payload.Input, payload.Valuation.Lots, payload.Valuation.MissingDependencies, payload.Valuation.StaleDependencies, payload.Valuation.InvalidDependencies, payload.Valuation.ReportingCurrency) {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
 
 	persisted, err := loadPersistedSnapshotHoldings(ctx, db, portfolioID, storedID, len(payload.Input.Lots))
 	if err != nil {
@@ -115,12 +126,15 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	if len(persisted) != len(payload.Input.Lots) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
-	seenPayloadHoldings := make(map[string]struct{}, len(payload.Input.Lots))
-	for _, lot := range payload.Input.Lots {
-		if _, duplicate := seenPayloadHoldings[lot.ID]; duplicate {
+	persistedIDs := make([]string, 0, len(persisted))
+	for holdingID := range persisted {
+		persistedIDs = append(persistedIDs, holdingID)
+	}
+	sort.Strings(persistedIDs)
+	for index, lot := range payload.Input.Lots {
+		if persistedIDs[index] != lot.ID {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 		}
-		seenPayloadHoldings[lot.ID] = struct{}{}
 		row, ok := persisted[lot.ID]
 		if !ok || row.instrumentID != lot.InstrumentID {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
@@ -178,7 +192,7 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 		}
 		if valuedLot.QuoteID != "" {
 			quote, ok := quotes[valuedLot.QuoteID]
-			if !ok || quote.InstrumentID != inputLot.InstrumentID || quote.Currency != inputLot.Currency || valuedLot.Freshness.Status == domain.Missing {
+			if !ok || quote.InstrumentID != inputLot.InstrumentID || quote.Currency != inputLot.Currency || valuedLot.Freshness.Status != domain.Fresh {
 				return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 			}
 			item.QuoteSource, item.MarketAt = quote.Source, quote.MarketAt
@@ -198,6 +212,9 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 }
 
 func loadPersistedSnapshotHoldings(ctx context.Context, db *sql.DB, portfolioID, snapshotID string, expected int) (map[string]persistedSnapshotHolding, error) {
+	if expected > maxSnapshotHoldings {
+		return nil, ErrSnapshotCorrupt
+	}
 	var rawCount int
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM snapshot_holdings WHERE portfolio_id=? AND snapshot_id=?", portfolioID, snapshotID).Scan(&rawCount); err != nil {
 		return nil, err
@@ -231,6 +248,106 @@ func loadPersistedSnapshotHoldings(ctx context.Context, db *sql.DB, portfolioID,
 		return nil, err
 	}
 	return result, nil
+}
+
+func canonicalSnapshotLots(input []domain.ValuationLot, valuation []domain.LotValuation) bool {
+	if len(input) != len(valuation) {
+		return false
+	}
+	previous := ""
+	for index, lot := range input {
+		if !validID(lot.ID, 128) || (index > 0 && lot.ID <= previous) || valuation[index].LotID != lot.ID {
+			return false
+		}
+		previous = lot.ID
+	}
+	return true
+}
+
+func hasIncompleteHolding(lots []domain.LotValuation) bool {
+	for _, lot := range lots {
+		if lot.Freshness.Status != domain.Fresh {
+			return true
+		}
+	}
+	return false
+}
+
+func incompleteDependenciesMatch(input domain.ValuationInput, valuation []domain.LotValuation, missing, stale, invalid []string, reportingCurrency string) bool {
+	dependencies := append(append(append([]string{}, missing...), stale...), invalid...)
+	if len(dependencies) == 0 {
+		return false
+	}
+	for _, dependency := range dependencies {
+		matched := false
+		switch {
+		case strings.HasPrefix(dependency, "quote:"):
+			identity := strings.TrimPrefix(dependency, "quote:")
+			for index, lot := range input.Lots {
+				value := valuation[index]
+				quoteIdentity := false
+				for _, quote := range input.Quotes {
+					if quote.ID == identity && quote.InstrumentID == lot.InstrumentID {
+						quoteIdentity = true
+						break
+					}
+				}
+				if (lot.InstrumentID == identity || value.QuoteID == identity || quoteIdentity) && (value.Freshness.Status != domain.Fresh || value.Price == "" || value.MarketValue == "" || value.ReportingValue == nil) {
+					matched = true
+					break
+				}
+			}
+		case strings.HasPrefix(dependency, "lot:"):
+			parts := strings.Split(dependency, ":")
+			if len(parts) == 3 && parts[2] == "quantity" {
+				for index, lot := range input.Lots {
+					if lot.ID == parts[1] && (valuation[index].Freshness.Status == domain.Invalid || valuation[index].Freshness.Status == "") {
+						matched = true
+						break
+					}
+				}
+			}
+		case strings.HasPrefix(dependency, "cost:"):
+			identity := strings.TrimPrefix(dependency, "cost:")
+			for index, lot := range input.Lots {
+				if lot.ID == identity && (lot.CostBasis != nil || lot.UnitCost != nil) && (valuation[index].CostBasis == nil || valuation[index].UnrealisedPnL == nil) {
+					matched = true
+					break
+				}
+			}
+		case strings.HasPrefix(dependency, "missing fx:"), strings.HasPrefix(dependency, "stale fx:"), strings.HasPrefix(dependency, "invalid fx:"), strings.HasPrefix(dependency, "ambiguous fx:"):
+			identity := dependency[strings.IndexByte(dependency, ':')+1:]
+			if strings.Contains(identity, "/") {
+				pair := strings.Split(identity, "/")
+				if len(pair) == 2 {
+					for index, lot := range input.Lots {
+						if lot.Currency == pair[0] && valuation[index].ReportingValue == nil {
+							matched = true
+							break
+						}
+					}
+				}
+			} else {
+				fxIdentity := false
+				for _, fx := range input.FXRates {
+					if fx.ID == identity {
+						fxIdentity = true
+						break
+					}
+				}
+				for index, lot := range input.Lots {
+					if fxIdentity && valuation[index].ReportingValue == nil && lot.Currency != reportingCurrency {
+						matched = true
+						break
+					}
+				}
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 // jsonUnmarshal is a small seam that keeps reconstruction's error handling

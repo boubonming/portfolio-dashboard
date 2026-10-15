@@ -102,7 +102,7 @@ func (h *snapshotEndpoint) authenticate(w http.ResponseWriter, r *http.Request, 
 			return false
 		}
 		principal := h.authenticator.MachinePrincipal()
-		allowed, err := h.database.MachinePrincipalAllowed(r.Context(), principal.PrincipalID, portfolioID, principal.PortfolioRead)
+		allowed, err := h.database.MachinePrincipalAllowedForRuntime(r.Context(), principal.PrincipalID, portfolioID, principal.PortfolioID, principal.PortfolioRead)
 		if err != nil {
 			writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
 			return false
