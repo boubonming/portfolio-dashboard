@@ -92,3 +92,9 @@ type AdvisoryReview struct {
 	SubmittedBy        PrincipalAttribution `json:"submitted_by"`
 	Lifecycle          ReviewLifecycle      `json:"lifecycle"`
 }
+
+type ReviewPage struct {
+	Items      []AdvisoryReview `json:"items"`
+	HasMore    bool             `json:"has_more"`
+	NextCursor string           `json:"next_cursor,omitempty"`
+}

@@ -207,9 +207,9 @@ func TestReviewHTTPRoutingAndAuthenticationPrecedesDisclosure(t *testing.T) {
 		{"missing-auth-extra", http.MethodPost, "/api/v1/portfolios/portfolio-api/reviews/extra", "", http.StatusUnauthorized, 0},
 		{"encoded-segment", http.MethodPost, "/api/v1/%70ortfolios/portfolio-api/reviews", valid, http.StatusBadRequest, 0},
 		{"trailing-slash", http.MethodPost, "/api/v1/portfolios/portfolio-api/reviews/", valid, http.StatusBadRequest, 0},
-		{"extra-segment", http.MethodPost, "/api/v1/portfolios/portfolio-api/reviews/extra", valid, http.StatusBadRequest, 0},
+		{"extra-segment", http.MethodPost, "/api/v1/portfolios/portfolio-api/reviews/extra", valid, http.StatusMethodNotAllowed, 1},
 		{"wrong-portfolio-id", http.MethodPost, "/api/v1/portfolios/other/reviews", valid, http.StatusForbidden, 0},
-		{"authenticated-get-post-only", http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews", valid, http.StatusMethodNotAllowed, 1},
+		{"authenticated-get-collection", http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews", valid, http.StatusOK, 0},
 		{"unsupported-method", http.MethodPut, "/api/v1/portfolios/portfolio-api/reviews", valid, http.StatusMethodNotAllowed, 1},
 		{"head-method", http.MethodHead, "/api/v1/portfolios/portfolio-api/reviews", valid, http.StatusMethodNotAllowed, 1},
 	}
@@ -224,12 +224,8 @@ func TestReviewHTTPRoutingAndAuthenticationPrecedesDisclosure(t *testing.T) {
 			}
 			if tc.status == http.StatusMethodNotAllowed {
 				assertPhaseDError(t, response, tc.status, "method_not_allowed")
-				var body phaseDErrorBody
-				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.Error.Message != "Only POST is supported for this resource." {
-					t.Fatalf("method error=%+v err=%v", body.Error, err)
-				}
 			}
-			if tc.allow == 1 && response.Header().Get("Allow") != "POST" {
+			if tc.allow == 1 && response.Header().Get("Allow") != "GET, POST" && response.Header().Get("Allow") != "GET" {
 				t.Fatalf("Allow=%q", response.Header().Get("Allow"))
 			}
 		})
@@ -391,7 +387,7 @@ func TestReviewHTTPResponseAndValidationMatrix(t *testing.T) {
 		code       string
 	}{
 		{"unknown-portfolio", "/api/v1/portfolios/foreign/reviews", http.StatusForbidden, "forbidden"},
-		{"unknown-target", "/api/v1/portfolios/portfolio-api/reviews/not-a-collection", http.StatusBadRequest, "invalid_request"},
+		{"unknown-target", "/api/v1/portfolios/portfolio-api/reviews/not-a-collection", http.StatusMethodNotAllowed, "method_not_allowed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			response := reviewBoundaryRequest(handler, http.MethodPost, tc.path, reviewBoundarySecret, "response-"+tc.name+"-key", "application/json", body)

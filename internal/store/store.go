@@ -19,9 +19,10 @@ import (
 var migrationFiles embed.FS
 
 type Store struct {
-	DB        *sql.DB
-	cursorKey []byte
-	clock     func() time.Time
+	DB              *sql.DB
+	cursorKey       []byte
+	reviewCursorKey []byte
+	clock           func() time.Time
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -120,6 +121,16 @@ func (s *Store) SetActivityCursorSecret(secret []byte) error {
 		return fmt.Errorf("activity cursor secret must contain at least 32 bytes")
 	}
 	s.cursorKey = append(s.cursorKey[:0], secret...)
+	return nil
+}
+
+// SetReviewCursorSecret installs the process-local, purpose-specific key used
+// to sign review list cursors. It is never persisted or logged.
+func (s *Store) SetReviewCursorSecret(secret []byte) error {
+	if len(secret) < 32 {
+		return fmt.Errorf("review cursor secret must contain at least 32 bytes")
+	}
+	s.reviewCursorKey = append(s.reviewCursorKey[:0], secret...)
 	return nil
 }
 
