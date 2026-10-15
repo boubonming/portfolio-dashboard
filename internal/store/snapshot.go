@@ -75,15 +75,10 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 	if len(input.Lots) > maxSnapshotHoldings {
 		return domain.SnapshotStatus{}, ErrSnapshotCorrupt
 	}
-	hashInput, err := json.Marshal(struct {
-		Version string                `json:"version"`
-		MaxAge  time.Duration         `json:"max_age"`
-		Input   domain.ValuationInput `json:"input"`
-	}{request.CalculationVersion, request.MaxAge, input})
+	digest, err := snapshotInputDigest(request.CalculationVersion, request.MaxAge, input)
 	if err != nil {
 		return domain.SnapshotStatus{}, err
 	}
-	digest := sha256.Sum256(hashInput)
 	inputHash := hex.EncodeToString(digest[:])
 	snapshotID := deterministicID("snapshot", request.PortfolioID, request.CalculationVersion, inputHash)
 	createdAt := canonicalSnapshotTime(time.Now().UTC())
@@ -137,6 +132,21 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 		return domain.SnapshotStatus{}, err
 	}
 	return statusFromPayload(encoded)
+}
+
+// snapshotInputDigest is the single canonical witness calculation for the
+// immutable input persisted in a snapshot. Keep its inputs and JSON shape in
+// sync with CreateSnapshot and reconstruction verification.
+func snapshotInputDigest(calculationVersion string, maxAge time.Duration, input domain.ValuationInput) ([sha256.Size]byte, error) {
+	hashInput, err := json.Marshal(struct {
+		Version string                `json:"version"`
+		MaxAge  time.Duration         `json:"max_age"`
+		Input   domain.ValuationInput `json:"input"`
+	}{calculationVersion, maxAge, input})
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(hashInput), nil
 }
 
 func isUniqueError(err error) bool {

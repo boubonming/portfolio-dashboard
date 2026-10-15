@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,13 +48,14 @@ func (s *Store) ReviewSnapshot(ctx context.Context, portfolioID, snapshotID stri
 
 	var encoded []byte
 	var storedID, calculationVersion string
-	query := `SELECT id,payload,calculation_version FROM snapshots WHERE portfolio_id=? AND id=?`
+	var storedInputHash, storedCreatedAt any
+	query := `SELECT id,payload,calculation_version,input_hash,created_at FROM snapshots WHERE portfolio_id=? AND id=?`
 	args := []any{portfolioID, snapshotID}
 	if latest {
-		query = `SELECT id,payload,calculation_version FROM snapshots WHERE portfolio_id=? ORDER BY created_at DESC,id DESC LIMIT 1`
+		query = `SELECT id,payload,calculation_version,input_hash,created_at FROM snapshots WHERE portfolio_id=? ORDER BY created_at DESC,id DESC LIMIT 1`
 		args = []any{portfolioID}
 	}
-	if err := s.DB.QueryRowContext(ctx, query, args...).Scan(&storedID, &encoded, &calculationVersion); err != nil {
+	if err := s.DB.QueryRowContext(ctx, query, args...).Scan(&storedID, &encoded, &calculationVersion, &storedInputHash, &storedCreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			if latest {
 				return noReviewSnapshot(portfolioID), nil
@@ -60,22 +64,38 @@ func (s *Store) ReviewSnapshot(ctx context.Context, portfolioID, snapshotID stri
 		}
 		return domain.ReviewSnapshot{}, err
 	}
-	return reconstructReviewSnapshot(ctx, s.DB, portfolioID, storedID, calculationVersion, encoded)
+	return reconstructReviewSnapshot(ctx, s.DB, portfolioID, storedID, calculationVersion, encoded, storedInputHash, storedCreatedAt)
 }
 
 func noReviewSnapshot(portfolioID string) domain.ReviewSnapshot {
 	return domain.ReviewSnapshot{PortfolioID: portfolioID, State: "no_snapshot", Complete: false, MissingDependencies: []string{}, StaleDependencies: []string{}, InvalidDependencies: []string{}, Holdings: []domain.ReviewHoldingContext{}}
 }
 
-func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, storedID, storedVersion string, encoded []byte) (domain.ReviewSnapshot, error) {
+func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, storedID, storedVersion string, encoded []byte, storedInputHash, storedCreatedAt any) (domain.ReviewSnapshot, error) {
 	var payload snapshotPayload
 	if err := jsonUnmarshal(encoded, &payload); err != nil {
 		return domain.ReviewSnapshot{}, fmt.Errorf("%w: payload: %v", ErrSnapshotCorrupt, err)
 	}
-	if payload.PortfolioID != portfolioID || payload.SnapshotID != storedID || payload.CalculationVersion != storedVersion || !validID(payload.PortfolioID, 128) || !validID(payload.SnapshotID, 128) || !validCalculationVersion(payload.CalculationVersion) || !validCanonicalTime(payload.CreatedAt) || !validCanonicalTime(payload.AsOf) {
+	storedHashText, hashTypeOK := storedInputHash.(string)
+	storedCreatedAtText, createdAtTypeOK := storedCreatedAt.(string)
+	if !hashTypeOK || !createdAtTypeOK || len(storedHashText) != sha256.Size*2 || !validCanonicalTime(storedCreatedAtText) ||
+		payload.PortfolioID != portfolioID || payload.SnapshotID != storedID || payload.CalculationVersion != storedVersion ||
+		!validID(payload.PortfolioID, 128) || !validID(payload.SnapshotID, 128) || !validCalculationVersion(payload.CalculationVersion) ||
+		!validCanonicalTime(payload.CreatedAt) || !validCanonicalTime(payload.AsOf) || payload.CreatedAt != storedCreatedAtText {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
-	if len(payload.Input.Lots) > maxSnapshotHoldings || len(payload.Valuation.Lots) > maxSnapshotHoldings || !canonicalSnapshotLots(payload.Input.Lots, payload.Valuation.Lots) {
+	if len(payload.Input.Lots) > maxSnapshotHoldings || len(payload.Valuation.Lots) > maxSnapshotHoldings {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
+	var storedDigest [sha256.Size]byte
+	if _, err := hex.Decode(storedDigest[:], []byte(storedHashText)); err != nil {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
+	expectedDigest, err := snapshotInputDigest(payload.CalculationVersion, payload.MaxAge, payload.Input)
+	if err != nil || subtle.ConstantTimeCompare(expectedDigest[:], storedDigest[:]) != 1 {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
+	if !canonicalSnapshotLots(payload.Input.Lots, payload.Valuation.Lots) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
 	var reviewVersion string

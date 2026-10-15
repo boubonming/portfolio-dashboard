@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -42,6 +43,105 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	canonical := raw.(snapshotPayload)
+	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, canonical.SnapshotID, false); err != nil {
+		t.Fatalf("valid snapshot rejected: %v", err)
+	}
+	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, "ignored", true); err != nil {
+		t.Fatalf("valid latest snapshot rejected: %v", err)
+	}
+
+	clonePayload := func(input snapshotPayload) snapshotPayload {
+		encoded, marshalErr := json.Marshal(input)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		var output snapshotPayload
+		if unmarshalErr := json.Unmarshal(encoded, &output); unmarshalErr != nil {
+			t.Fatal(unmarshalErr)
+		}
+		return output
+	}
+	inputHash := func(version string, input domain.ValuationInput) string {
+		digest, digestErr := snapshotInputDigest(version, canonical.MaxAge, input)
+		if digestErr != nil {
+			t.Fatal(digestErr)
+		}
+		return hex.EncodeToString(digest[:])
+	}
+	insertCorrupt := func(payload snapshotPayload, storedHash, rowCreatedAt any) {
+		encoded, marshalErr := json.Marshal(payload)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if _, insertErr := s.DB.Exec(`INSERT INTO snapshots(id,portfolio_id,calculation_version,payload,created_at,input_hash) VALUES(?,?,?,?,?,?)`, payload.SnapshotID, payload.PortfolioID, payload.CalculationVersion, encoded, rowCreatedAt, storedHash); insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		if _, insertErr := s.DB.Exec(`INSERT INTO review_snapshots(portfolio_id,snapshot_id,calculation_version) VALUES(?,?,?)`, payload.PortfolioID, payload.SnapshotID, payload.CalculationVersion); insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		for _, lot := range payload.Input.Lots {
+			if _, insertErr := s.DB.Exec(`INSERT INTO snapshot_holdings(portfolio_id,snapshot_id,holding_id,instrument_id) VALUES(?,?,?,?)`, payload.PortfolioID, payload.SnapshotID, lot.ID, lot.InstrumentID); insertErr != nil {
+				t.Fatal(insertErr)
+			}
+		}
+	}
+
+	// Use a distinct calculation version for each corruption row so the
+	// snapshot input uniqueness constraint does not mask the ReviewSnapshot
+	// integrity check. The stored witness is calculated before mutating the
+	// payload, just as it was when the snapshot was created.
+	inputMutation := clonePayload(canonical)
+	inputMutation.SnapshotID = "corrupt-input-source"
+	inputMutation.CalculationVersion = "semantic.v2"
+	storedHash := inputHash(inputMutation.CalculationVersion, inputMutation.Input)
+	inputMutation.Input.Quotes[0].Source = "mutated-source"
+	insertCorrupt(inputMutation, storedHash, canonical.CreatedAt)
+	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, inputMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
+		t.Fatalf("input-only mutation was accepted: %v", err)
+	}
+
+	correlatedMutation := clonePayload(canonical)
+	correlatedMutation.SnapshotID = "corrupt-input-valuation"
+	correlatedMutation.CalculationVersion = "semantic.v3"
+	storedHash = inputHash(correlatedMutation.CalculationVersion, correlatedMutation.Input)
+	correlatedMutation.Input.Lots[0].Quantity = "3"
+	correlatedMutation.Valuation.Lots[0].Quantity = "3"
+	insertCorrupt(correlatedMutation, storedHash, canonical.CreatedAt)
+	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, correlatedMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
+		t.Fatalf("correlated input/valuation mutation was accepted: %v", err)
+	}
+
+	timestampMutation := clonePayload(canonical)
+	timestampMutation.SnapshotID = "corrupt-payload-timestamp"
+	timestampMutation.CalculationVersion = "semantic.v4"
+	storedHash = inputHash(timestampMutation.CalculationVersion, timestampMutation.Input)
+	createdAt, parseErr := time.Parse("2006-01-02T15:04:05.000000000Z", canonical.CreatedAt)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	timestampMutation.CreatedAt = canonicalSnapshotTime(createdAt.Add(time.Second))
+	insertCorrupt(timestampMutation, storedHash, canonical.CreatedAt)
+	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, timestampMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
+		t.Fatalf("payload/row timestamp mismatch was accepted: %v", err)
+	}
+
+	rowTimestampMutation := clonePayload(canonical)
+	rowTimestampMutation.SnapshotID = "corrupt-row-timestamp"
+	rowTimestampMutation.CalculationVersion = "semantic.v5"
+	storedHash = inputHash(rowTimestampMutation.CalculationVersion, rowTimestampMutation.Input)
+	insertCorrupt(rowTimestampMutation, storedHash, "not-a-timestamp")
+	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, rowTimestampMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
+		t.Fatalf("malformed row timestamp was accepted: %v", err)
+	}
+
+	storedHashTypeMutation := clonePayload(canonical)
+	storedHashTypeMutation.SnapshotID = "corrupt-input-hash-type"
+	storedHashTypeMutation.CalculationVersion = "semantic.v6"
+	storedHash = inputHash(storedHashTypeMutation.CalculationVersion, storedHashTypeMutation.Input)
+	insertCorrupt(storedHashTypeMutation, []byte(storedHash), canonical.CreatedAt)
+	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, storedHashTypeMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
+		t.Fatalf("non-text input hash was accepted: %v", err)
+	}
 
 	corruptions := map[string]func(*snapshotPayload){
 		"arithmetic-and-cost-pnl": func(payload *snapshotPayload) {
