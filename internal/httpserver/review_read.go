@@ -75,9 +75,15 @@ func parseReviewListQuery(raw string) (store.ReviewListFilter, error) {
 		if err != nil {
 			return store.ReviewListFilter{}, err
 		}
+		if keyRaw != key {
+			return store.ReviewListFilter{}, errors.New("non-canonical query key")
+		}
 		value, err := url.QueryUnescape(valueRaw)
 		if err != nil {
 			return store.ReviewListFilter{}, err
+		}
+		if url.QueryEscape(value) != valueRaw {
+			return store.ReviewListFilter{}, errors.New("non-canonical query value")
 		}
 		if seen[key] {
 			return store.ReviewListFilter{}, errors.New("duplicate query key")

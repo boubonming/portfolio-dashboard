@@ -188,7 +188,7 @@ func (s *Store) GetAdvisoryReview(ctx context.Context, portfolioID, reviewID str
 func (s *Store) currentReviewSnapshot(ctx context.Context, portfolioID string) (string, error) {
 	// The current snapshot is derived only from normalized snapshot metadata and
 	// its review association. Payload JSON is intentionally never read here.
-	rows, err := s.DB.QueryContext(ctx, `SELECT s.id,s.calculation_version,s.created_at,rs.snapshot_id,rs.calculation_version FROM snapshots s LEFT JOIN review_snapshots rs ON rs.portfolio_id=s.portfolio_id AND rs.snapshot_id=s.id WHERE s.portfolio_id=? ORDER BY s.created_at DESC,s.id DESC`, portfolioID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT s.id,s.calculation_version,s.created_at,rs.portfolio_id,rs.snapshot_id,rs.calculation_version FROM snapshots s LEFT JOIN review_snapshots rs ON rs.portfolio_id=s.portfolio_id AND rs.snapshot_id=s.id WHERE s.portfolio_id=? ORDER BY s.created_at DESC,s.id DESC`, portfolioID)
 	if err != nil {
 		return "", err
 	}
@@ -197,11 +197,18 @@ func (s *Store) currentReviewSnapshot(ctx context.Context, portfolioID string) (
 	seen := 0
 	for rows.Next() {
 		var snapshotID, snapshotVersion, createdAt string
-		var associatedID, associatedVersion sql.NullString
-		if err := rows.Scan(&snapshotID, &snapshotVersion, &createdAt, &associatedID, &associatedVersion); err != nil {
+		var associatedPortfolioID, associatedID, associatedVersion sql.NullString
+		if err := rows.Scan(&snapshotID, &snapshotVersion, &createdAt, &associatedPortfolioID, &associatedID, &associatedVersion); err != nil {
 			return "", err
 		}
-		if !validID(snapshotID, 128) || !validID(snapshotVersion, 128) || !validCanonicalReviewTime(createdAt) || !associatedID.Valid || !associatedVersion.Valid || associatedID.String != snapshotID || associatedVersion.String != snapshotVersion {
+		if !validID(snapshotID, 128) || !validID(snapshotVersion, 128) || !validCanonicalReviewTime(createdAt) {
+			return "", ErrReviewCorrupt
+		}
+		if associatedPortfolioID.Valid {
+			if !validID(associatedPortfolioID.String, 128) || associatedPortfolioID.String != portfolioID || !associatedID.Valid || !associatedVersion.Valid || associatedID.String != snapshotID || associatedVersion.String != snapshotVersion {
+				return "", ErrReviewCorrupt
+			}
+		} else if associatedID.Valid || associatedVersion.Valid {
 			return "", ErrReviewCorrupt
 		}
 		if seen == 0 {
