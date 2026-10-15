@@ -2,11 +2,54 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/boubonming/portfolio-dashboard/internal/marketdata"
 )
+
+func TestOpenRejectsSharedCacheURIsAndSupportsOtherSQLiteModes(t *testing.T) {
+	ctx := context.Background()
+	for _, path := range []string{
+		"file:" + filepath.Join(t.TempDir(), "shared.sqlite") + "?cache=shared",
+		"file:" + filepath.Join(t.TempDir(), "shared-case.sqlite") + "?mode=memory&CACHE=ShArEd",
+		"file:" + filepath.Join(t.TempDir(), "shared-duplicate.sqlite") + "?cache=private&cache=SHARED",
+	} {
+		store, err := Open(ctx, path)
+		if err == nil {
+			store.Close()
+			t.Fatalf("Open(%q) succeeded for unsupported shared-cache URI", path)
+		}
+		if !strings.Contains(err.Error(), "shared-cache mode is not supported") {
+			t.Fatalf("Open(%q) error = %v, want shared-cache rejection", path, err)
+		}
+	}
+
+	plainPath := filepath.Join(t.TempDir(), "plain.sqlite")
+	plain, err := Open(ctx, plainPath)
+	if err != nil {
+		t.Fatalf("plain SQLite path: %v", err)
+	}
+	plain.Close()
+
+	memory, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf(":memory: SQLite path: %v", err)
+	}
+	memory.Close()
+
+	uriPath := filepath.Join(t.TempDir(), "private.sqlite")
+	private, err := Open(ctx, "file:"+uriPath+"?mode=rwc&cache=private")
+	if err != nil {
+		t.Fatalf("non-shared SQLite URI: %v", err)
+	}
+	private.Close()
+	if _, err := os.Stat(uriPath); err != nil {
+		t.Fatalf("non-shared URI did not create database: %v", err)
+	}
+}
 
 func TestMigrationsAreIdempotentAndEnforceDecimalText(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "portfolio.sqlite")

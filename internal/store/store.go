@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"strings"
 	"time"
 
@@ -43,6 +44,9 @@ func OpenWithActivityCursorSecret(ctx context.Context, path string, secret []byt
 }
 
 func openWithActivityCursorKey(ctx context.Context, path string, key []byte) (*Store, error) {
+	if err := rejectUnsupportedSQLiteURI(path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -61,6 +65,35 @@ func openWithActivityCursorKey(ctx context.Context, path string, key []byte) (*S
 		return nil, err
 	}
 	return &Store{DB: db, cursorKey: append([]byte(nil), key...), clock: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// modernc.org/sqlite cannot bound or cancel its internal table-lock retry for
+// SQLITE_LOCKED_SHAREDCACHE. Shared-cache URIs are therefore not a supported
+// Store configuration; keep the defensive error classification in review.go,
+// but reject this mode before opening a database connection.
+func rejectUnsupportedSQLiteURI(path string) error {
+	if !strings.HasPrefix(strings.ToLower(path), "file:") {
+		return nil
+	}
+	queryStart := strings.IndexByte(path, '?')
+	if queryStart < 0 {
+		return nil
+	}
+	for _, parameter := range strings.Split(path[queryStart+1:], "&") {
+		key, value, ok := strings.Cut(parameter, "=")
+		if !ok {
+			continue
+		}
+		decodedKey, keyErr := url.QueryUnescape(key)
+		decodedValue, valueErr := url.QueryUnescape(value)
+		if keyErr != nil || valueErr != nil {
+			continue
+		}
+		if strings.EqualFold(decodedKey, "cache") && strings.EqualFold(decodedValue, "shared") {
+			return fmt.Errorf("unsupported sqlite URI: shared-cache mode is not supported")
+		}
+	}
+	return nil
 }
 
 // SetClock provides deterministic time to validation tests and callers that
