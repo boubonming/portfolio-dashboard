@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-
+	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,6 +68,17 @@ func submitReviewFixture(t *testing.T, database *store.Store, submission domain.
 		t.Fatalf("submit %s replay=%t err=%v", key, replay, err)
 	}
 	return result
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestReviewHTTPBrowserMachineAuthorizationDisclosureMatrix(t *testing.T) {
@@ -407,7 +421,6 @@ func TestReviewHTTPPaginationConcurrentInsertionKeysetMatrix(t *testing.T) {
 	principal := auth.MachinePrincipal{PrincipalID: "review-boundary-machine", PortfolioID: "portfolio-api", PortfolioRead: true, ReviewsWrite: true}
 	when := time.Date(2026, 2, 2, 10, 0, 0, 0, time.UTC)
 	database.SetClock(func() time.Time { return when })
-	when = time.Date(2026, 2, 2, 10, 0, 0, 0, time.UTC)
 	firstReview := submitReviewFixture(t, database, submission, principal, "pagination-concurrent-first-key")
 	when = time.Date(2026, 2, 2, 9, 0, 0, 0, time.UTC)
 	secondReview := submitReviewFixture(t, database, submission, principal, "pagination-concurrent-second-key")
@@ -418,24 +431,114 @@ func TestReviewHTTPPaginationConcurrentInsertionKeysetMatrix(t *testing.T) {
 	if len(first.Items) != 1 || first.Items[0].ReviewID != firstReview.ReviewID || first.NextCursor == "" {
 		t.Fatalf("initial boundary=%+v", first)
 	}
-	// A row inserted before the saved boundary must not be replayed on page two.
-	when = time.Date(2026, 2, 2, 11, 0, 0, 0, time.UTC)
-	before := submitReviewFixture(t, database, submission, principal, "pagination-concurrent-before-key")
-	// A row inserted after the boundary and before the next old row must be
-	// returned by keyset pagination.
-	when = time.Date(2026, 2, 2, 8, 30, 0, 0, time.UTC)
-	between := submitReviewFixture(t, database, submission, principal, "pagination-concurrent-between-key")
-	page2, _ := reviewPageIDs(t, reviewMachineRequest(handler, http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews?limit=2&cursor="+first.NextCursor, reviewBoundarySecret))
-	if len(page2.Items) != 2 || page2.Items[0].ReviewID != secondReview.ReviewID || page2.Items[1].ReviewID != between.ReviewID {
+
+	// The read goroutine is held at the page boundary while two independent
+	// insertion goroutines commit. This is a real concurrent operation, but the
+	// channel barrier makes the intended keyset timing deterministic: both rows
+	// exist before the boundary query runs, without relying on sleeps.
+	readReady := make(chan struct{})
+	readGate := make(chan struct{})
+	type pageResult struct {
+		page domain.ReviewPage
+		err  error
+	}
+	pageResults := make(chan pageResult, 1)
+	go func() {
+		close(readReady)
+		<-readGate
+		request := reviewMachineRequest(handler, http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews?limit=2&cursor="+first.NextCursor, reviewBoundarySecret)
+		var page domain.ReviewPage
+		err := json.Unmarshal(request.Body.Bytes(), &page)
+		if request.Code != http.StatusOK && err == nil {
+			err = fmt.Errorf("page 2 status=%d body=%s", request.Code, request.Body.String())
+		}
+		pageResults <- pageResult{page: page, err: err}
+	}()
+	<-readReady
+
+	insertStart := make(chan struct{})
+	beforeInserted := make(chan struct{})
+	type insertResult struct {
+		name   string
+		review domain.AdvisoryReview
+		err    error
+	}
+	insertResults := make(chan insertResult, 2)
+	var insertGroup sync.WaitGroup
+	insertGroup.Add(1)
+	go func() {
+		defer insertGroup.Done()
+		<-insertStart
+		when = time.Date(2026, 2, 2, 11, 0, 0, 0, time.UTC)
+		review, _, err := func() (domain.AdvisoryReview, bool, error) {
+			fingerprint, fingerprintErr := store.ReviewFingerprint(submission)
+			if fingerprintErr != nil {
+				return domain.AdvisoryReview{}, false, fingerprintErr
+			}
+			return database.SubmitAdvisoryReview(context.Background(), principal, principal.PortfolioID, "pagination-concurrent-before-key", fingerprint, submission)
+		}()
+		insertResults <- insertResult{name: "before", review: review, err: err}
+		close(beforeInserted)
+	}()
+	insertGroup.Add(1)
+	go func() {
+		defer insertGroup.Done()
+		<-insertStart
+		<-beforeInserted
+		when = time.Date(2026, 2, 2, 8, 30, 0, 0, time.UTC)
+		review, _, err := func() (domain.AdvisoryReview, bool, error) {
+			fingerprint, fingerprintErr := store.ReviewFingerprint(submission)
+			if fingerprintErr != nil {
+				return domain.AdvisoryReview{}, false, fingerprintErr
+			}
+			return database.SubmitAdvisoryReview(context.Background(), principal, principal.PortfolioID, "pagination-concurrent-between-key", fingerprint, submission)
+		}()
+		insertResults <- insertResult{name: "between", review: review, err: err}
+	}()
+	close(insertStart)
+	insertGroup.Wait()
+	close(insertResults)
+	inserted := map[string]domain.AdvisoryReview{}
+	for result := range insertResults {
+		if result.err != nil {
+			t.Fatalf("concurrent insertion %s: %v", result.name, result.err)
+		}
+		if result.review.ReviewID == "" {
+			t.Fatalf("concurrent insertion %s returned no review", result.name)
+		}
+		inserted[result.name] = result.review
+	}
+	if len(inserted) != 2 {
+		t.Fatalf("collected %d concurrent insertion results", len(inserted))
+	}
+	close(readGate)
+	result := <-pageResults
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	page2 := result.page
+	if len(page2.Items) != 2 || page2.Items[0].ReviewID != secondReview.ReviewID || page2.Items[1].ReviewID != inserted["between"].ReviewID || page2.NextCursor == "" {
 		t.Fatalf("concurrent page2=%+v", page2)
 	}
-	for _, item := range page2.Items {
-		if item.ReviewID == firstReview.ReviewID || item.ReviewID == before.ReviewID {
-			t.Fatalf("keyset replayed pre-boundary review=%s", item.ReviewID)
-		}
+	if page2.Items[0].ReviewID == inserted["before"].ReviewID || page2.Items[1].ReviewID == inserted["before"].ReviewID {
+		t.Fatalf("keyset replayed before-boundary review=%s", inserted["before"].ReviewID)
 	}
-	if thirdReview.ReviewID == between.ReviewID {
-		t.Fatal("concurrent insertion IDs collided")
+
+	page3, page3IDs := reviewPageIDs(t, reviewMachineRequest(handler, http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews?limit=2&cursor="+page2.NextCursor, reviewBoundarySecret))
+	if len(page3IDs) != 1 || len(page3.Items) != 1 || page3.Items[0].ReviewID != thirdReview.ReviewID || page3.HasMore || page3.NextCursor != "" {
+		t.Fatalf("concurrent page3=%+v", page3)
+	}
+	seen := map[string]bool{}
+	for _, item := range append(append([]domain.AdvisoryReview{}, page2.Items...), page3.Items...) {
+		if seen[item.ReviewID] {
+			t.Fatalf("concurrent traversal duplicated review=%s", item.ReviewID)
+		}
+		seen[item.ReviewID] = true
+	}
+	for _, reviewID := range []string{secondReview.ReviewID, inserted["between"].ReviewID, thirdReview.ReviewID} {
+		if !seen[reviewID] {
+			t.Fatalf("concurrent traversal omitted review=%s", reviewID)
+		}
 	}
 }
 
@@ -450,27 +553,54 @@ func TestReviewHTTPFilterCombinationAndCursorBindingMatrix(t *testing.T) {
 	incomplete.Recommendation = "no_recommendation"
 	incomplete.SourcedFacts = []domain.SourcedFact{}
 	incomplete.Evidence = []domain.ReviewEvidence{}
-	submitReviewFixture(t, database, completeHolding, principal, "filter-complete-holding-key")
-	submitReviewFixture(t, database, incomplete, principal, "filter-incomplete-portfolio-key")
-	submitReviewFixture(t, database, func() domain.ReviewSubmission { value := incomplete; value.Scope = completeHolding.Scope; return value }(), principal, "filter-incomplete-holding-key")
+	oldCompleteHolding := submitReviewFixture(t, database, completeHolding, principal, "filter-old-complete-holding-key")
+	oldIncompletePortfolio := submitReviewFixture(t, database, incomplete, principal, "filter-old-incomplete-portfolio-key")
+	oldIncompleteHolding := submitReviewFixture(t, database, func() domain.ReviewSubmission { value := incomplete; value.Scope = completeHolding.Scope; return value }(), principal, "filter-old-incomplete-holding-key")
+
+	// Add a newer immutable snapshot through the production/store setup. The
+	// changed quote and calculation version ensure this is a distinct snapshot;
+	// all three reviews above remain historical and the review below is current.
+	if _, err := database.AddQuote(context.Background(), store.QuoteInput{ID: "filter-current-quote", InstrumentID: "instrument-api", Price: "124.4500", Currency: "USD", Source: "fixture", MarketAt: time.Now().UTC().Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	currentStatus, err := database.CreateSnapshot(context.Background(), store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "MYR", CalculationVersion: "review.v2", AsOf: time.Now().UTC(), MaxAge: 2 * time.Hour})
+	if err != nil || !currentStatus.Complete {
+		t.Fatalf("current snapshot=%+v err=%v", currentStatus, err)
+	}
+	currentSnapshot, err := database.ReviewSnapshot(context.Background(), "portfolio-api", currentStatus.SnapshotID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentSubmission := completeHolding
+	currentSubmission.SnapshotID = currentSnapshot.SnapshotID
+	currentSubmission.CalculationVersion = currentSnapshot.CalculationVersion
+	currentReview := submitReviewFixture(t, database, currentSubmission, principal, "filter-current-complete-holding-key")
+	if currentReview.SnapshotID != currentSnapshot.SnapshotID {
+		t.Fatalf("current review snapshot=%s want=%s", currentReview.SnapshotID, currentSnapshot.SnapshotID)
+	}
 
 	cases := []struct {
 		name, query string
-		wantMin     int
+		expected    []string
+		holding     string
+		status      string
+		outdated    *bool
 	}{
-		{"holding", "holding_id=lot-api", 2},
-		{"status-complete", "status=complete", 1},
-		{"status-incomplete", "status=incomplete", 2},
-		{"outdated-absent", "", 3},
-		{"outdated-false", "outdated=false", 3},
-		{"holding-status-complete", "holding_id=lot-api&status=complete", 1},
-		{"holding-status-incomplete", "holding_id=lot-api&status=incomplete", 1},
-		{"holding-outdated", "holding_id=lot-api&outdated=false", 2},
-		{"status-outdated-complete", "status=complete&outdated=false", 1},
-		{"status-outdated-incomplete", "status=incomplete&outdated=false", 2},
-		{"holding-status-outdated-complete", "holding_id=lot-api&status=complete&outdated=false", 1},
-		{"holding-status-outdated-incomplete", "holding_id=lot-api&status=incomplete&outdated=false", 1},
-		{"foreign-holding-empty", "holding_id=foreign-holding", 0},
+		{"holding", "holding_id=lot-api", []string{oldCompleteHolding.ReviewID, oldIncompleteHolding.ReviewID, currentReview.ReviewID}, "lot-api", "", nil},
+		{"status-complete", "status=complete", []string{oldCompleteHolding.ReviewID, currentReview.ReviewID}, "", "complete", nil},
+		{"status-incomplete", "status=incomplete", []string{oldIncompletePortfolio.ReviewID, oldIncompleteHolding.ReviewID}, "", "incomplete", nil},
+		{"outdated-absent", "", []string{oldCompleteHolding.ReviewID, oldIncompletePortfolio.ReviewID, oldIncompleteHolding.ReviewID, currentReview.ReviewID}, "", "", nil},
+		{"outdated-true", "outdated=true", []string{oldCompleteHolding.ReviewID, oldIncompletePortfolio.ReviewID, oldIncompleteHolding.ReviewID}, "", "", boolPointer(true)},
+		{"outdated-false", "outdated=false", []string{currentReview.ReviewID}, "", "", boolPointer(false)},
+		{"holding-status-complete", "holding_id=lot-api&status=complete", []string{oldCompleteHolding.ReviewID, currentReview.ReviewID}, "lot-api", "complete", nil},
+		{"holding-status-incomplete", "holding_id=lot-api&status=incomplete", []string{oldIncompleteHolding.ReviewID}, "lot-api", "incomplete", nil},
+		{"holding-outdated-true", "holding_id=lot-api&outdated=true", []string{oldCompleteHolding.ReviewID, oldIncompleteHolding.ReviewID}, "lot-api", "", boolPointer(true)},
+		{"holding-outdated-false", "holding_id=lot-api&outdated=false", []string{currentReview.ReviewID}, "lot-api", "", boolPointer(false)},
+		{"status-outdated-complete", "status=complete&outdated=true", []string{oldCompleteHolding.ReviewID}, "", "complete", boolPointer(true)},
+		{"status-outdated-incomplete", "status=incomplete&outdated=true", []string{oldIncompletePortfolio.ReviewID, oldIncompleteHolding.ReviewID}, "", "incomplete", boolPointer(true)},
+		{"holding-status-outdated-complete", "holding_id=lot-api&status=complete&outdated=false", []string{currentReview.ReviewID}, "lot-api", "complete", boolPointer(false)},
+		{"holding-status-outdated-incomplete", "holding_id=lot-api&status=incomplete&outdated=false", []string{}, "lot-api", "incomplete", boolPointer(false)},
+		{"foreign-holding-empty", "holding_id=foreign-holding", []string{}, "foreign-holding", "", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -478,12 +608,30 @@ func TestReviewHTTPFilterCombinationAndCursorBindingMatrix(t *testing.T) {
 			if tc.query != "" {
 				path += "?" + tc.query
 			}
-			page, _ := reviewPageIDs(t, reviewMachineRequest(handler, http.MethodGet, path, reviewBoundarySecret))
-			if len(page.Items) < tc.wantMin {
-				t.Fatalf("filter %s returned %d want at least %d", tc.query, len(page.Items), tc.wantMin)
+			page, ids := reviewPageIDs(t, reviewMachineRequest(handler, http.MethodGet, path, reviewBoundarySecret))
+			got := append([]string(nil), ids...)
+			want := append([]string(nil), tc.expected...)
+			sort.Strings(got)
+			sort.Strings(want)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("filter %s returned exact IDs=%v want=%v", tc.query, got, want)
 			}
-			if tc.name == "foreign-holding-empty" && len(page.Items) != 0 {
-				t.Fatalf("foreign holding leaked %d reviews", len(page.Items))
+			for _, item := range page.Items {
+				if tc.holding != "" && !containsString(item.Scope.HoldingIDs, tc.holding) {
+					t.Fatalf("filter %s returned item %s without holding %s", tc.query, item.ReviewID, tc.holding)
+				}
+				if tc.status != "" && item.Status != tc.status {
+					t.Fatalf("filter %s returned item %s status=%s want=%s", tc.query, item.ReviewID, item.Status, tc.status)
+				}
+				if tc.outdated != nil && item.Lifecycle.Outdated != *tc.outdated {
+					t.Fatalf("filter %s returned item %s outdated=%t want=%t", tc.query, item.ReviewID, item.Lifecycle.Outdated, *tc.outdated)
+				}
+				if item.Lifecycle.CurrentSnapshotID == nil || *item.Lifecycle.CurrentSnapshotID != currentSnapshot.SnapshotID {
+					t.Fatalf("filter %s returned item %s current snapshot=%v want=%s", tc.query, item.ReviewID, item.Lifecycle.CurrentSnapshotID, currentSnapshot.SnapshotID)
+				}
+				if item.Lifecycle.Outdated != (item.SnapshotID != currentSnapshot.SnapshotID) {
+					t.Fatalf("filter %s returned item %s lifecycle outdated=%t snapshot=%s current=%s", tc.query, item.ReviewID, item.Lifecycle.Outdated, item.SnapshotID, currentSnapshot.SnapshotID)
+				}
 			}
 		})
 	}
@@ -518,15 +666,54 @@ func TestReviewHTTPForeignPortfolioFilterDoesNotDisclose(t *testing.T) {
 }
 
 func TestReviewHTTPPathAndMethodErrorMatrixRemainsNested(t *testing.T) {
-	handler, database, _, _ := reviewBoundaryFixture(t)
+	handler, database, submission, _ := reviewBoundaryFixture(t)
 	defer database.Close()
+	foreignNow := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-api-other", "Other", "MYR", foreignNow, foreignNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-api-other", "FIX-OTHER", "Foreign fixture instrument", "USD", foreignNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,source_row,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "lot-api-other", "portfolio-api-other", "instrument-api-other", "0.125", "1.20", "0.15", "USD", 1, "foreign#row=1", "foreign-fixture-hash", foreignNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.AddQuote(context.Background(), store.QuoteInput{ID: "quote-api-other", InstrumentID: "instrument-api-other", Price: "123.4500", Currency: "USD", Source: "fixture", MarketAt: foreignNow, Basis: "close", Provenance: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.AddFXRate(context.Background(), store.FXInput{ID: "fx-api-other", BaseCurrency: "USD", QuoteCurrency: "MYR", Rate: "4.5", Source: "fixture", MarketAt: foreignNow, Basis: "close", Provenance: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	foreignSnapshotStatus, err := database.CreateSnapshot(context.Background(), store.SnapshotRequest{PortfolioID: "portfolio-api-other", ReportingCurrency: "MYR", CalculationVersion: "foreign.v1", AsOf: time.Now().UTC(), MaxAge: 2 * time.Hour})
+	if err != nil || !foreignSnapshotStatus.Complete {
+		t.Fatalf("foreign snapshot=%+v err=%v", foreignSnapshotStatus, err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO machine_principals(id,portfolio_id,permission_portfolio_read,permission_reviews_write,active,created_at) VALUES(?,?,?,?,?,?)`, "foreign-review-machine", "portfolio-api-other", 1, 1, 1, foreignNow); err != nil {
+		t.Fatal(err)
+	}
+	foreignSnapshot, err := database.ReviewSnapshot(context.Background(), "portfolio-api-other", foreignSnapshotStatus.SnapshotID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignSubmission := submission
+	foreignSubmission.SnapshotID = foreignSnapshot.SnapshotID
+	foreignSubmission.CalculationVersion = foreignSnapshot.CalculationVersion
+	foreignReview := submitReviewFixture(t, database, foreignSubmission, auth.MachinePrincipal{PrincipalID: "foreign-review-machine", PortfolioID: "portfolio-api-other", PortfolioRead: true, ReviewsWrite: true}, "foreign-review-owned-by-other-key")
+	if foreignReview.PortfolioID != "portfolio-api-other" {
+		t.Fatalf("foreign review owner=%s", foreignReview.PortfolioID)
+	}
+
+	foreignResponse := reviewMachineRequest(handler, http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews/"+foreignReview.ReviewID, reviewBoundarySecret)
+	assertReviewHTTPError(t, foreignResponse, http.StatusNotFound, "not_found")
+	if strings.Contains(foreignResponse.Body.String(), foreignReview.ReviewID) || strings.Contains(foreignResponse.Body.String(), "portfolio-api-other") {
+		t.Fatalf("foreign review disclosed in body=%s", foreignResponse.Body.String())
+	}
 	for _, tc := range []struct {
 		name, method, path string
 		status             int
 		code               string
 	}{
 		{"nonexistent-review", http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews/missing-review", http.StatusNotFound, "not_found"},
-		{"foreign-review", http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews/foreign-review", http.StatusNotFound, "not_found"},
 		{"wrong-method", http.MethodPut, "/api/v1/portfolios/portfolio-api/reviews", http.StatusMethodNotAllowed, "method_not_allowed"},
 		{"detail-wrong-method", http.MethodPost, "/api/v1/portfolios/portfolio-api/reviews/review-id", http.StatusMethodNotAllowed, "method_not_allowed"},
 	} {
