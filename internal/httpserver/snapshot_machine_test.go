@@ -167,3 +167,90 @@ func TestSnapshotMachineReadsCompleteIncompleteAndHistoricalBranches(t *testing.
 		t.Fatalf("latest snapshot=%v want=%s", latest["snapshot_id"], second.SnapshotID)
 	}
 }
+
+func TestSnapshotErrorsUsePhaseDEnvelope(t *testing.T) {
+	handler, cleanup := machineFixtureHandler(t)
+	defer cleanup()
+	secret := "machine-fixture-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ-abcdef"
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		authority string
+		status    int
+		code      string
+	}{
+		{name: "bad path", method: http.MethodGet, path: "/api/v1/portfolios/portfolio-api/snapshots/", status: http.StatusBadRequest, code: "invalid_request"},
+		{name: "unauthorized", method: http.MethodGet, path: "/api/v1/portfolios/portfolio-api/snapshots/latest", status: http.StatusUnauthorized, code: "unauthorized"},
+		{name: "not found", method: http.MethodGet, path: "/api/v1/portfolios/portfolio-api/snapshots/missing", authority: "Bearer " + secret, status: http.StatusNotFound, code: "not_found"},
+		{name: "method", method: http.MethodPost, path: "/api/v1/portfolios/portfolio-api/snapshots/latest", authority: "Bearer " + secret, status: http.StatusMethodNotAllowed, code: "method_not_allowed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.authority != "" {
+				request.Header.Set("Authorization", tc.authority)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != tc.status {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			var body struct {
+				Error struct {
+					Code      string `json:"code"`
+					Message   string `json:"message"`
+					RequestID string `json:"request_id"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Error.Code != tc.code || body.Error.Message == "" || len(body.Error.RequestID) == 0 || len(body.Error.RequestID) > 128 {
+				t.Fatalf("error envelope=%+v", body.Error)
+			}
+		})
+	}
+}
+
+func TestSnapshotMachineGrantIntersectsRuntimeAndDatabaseState(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "machine-restart-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ-abcdef"
+	base := auth.Config{Username: "fixture-user", PasswordHash: string(hash), SessionSecret: fixtureSessionSecret(), PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour}
+	base.Machine = auth.MachineConfig{PrincipalID: "machine-restart", PortfolioID: "portfolio-api", BearerSecret: secret, PortfolioRead: true}
+	if _, err := NewHandlerWithAuth(database, base); err != nil {
+		t.Fatal(err)
+	}
+	base.Machine.PortfolioRead = false
+	second, err := NewHandlerWithAuth(database, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/snapshots/latest", nil)
+	request.Header.Set("Authorization", "Bearer "+secret)
+	response := httptest.NewRecorder()
+	second.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("runtime-disabled grant status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, err := database.DB.Exec(`UPDATE machine_principals SET active=0 WHERE id=?`, "machine-restart"); err != nil {
+		t.Fatal(err)
+	}
+	base.Machine.PortfolioRead = true
+	third, err := NewHandlerWithAuth(database, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/snapshots/latest", nil)
+	request.Header.Set("Authorization", "Bearer "+secret)
+	response = httptest.NewRecorder()
+	third.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("database-revoked grant status=%d body=%s", response.Code, response.Body.String())
+	}
+}

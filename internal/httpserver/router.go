@@ -89,7 +89,7 @@ func privatePathGuard(next http.Handler) http.Handler {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Vary", "Cookie")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
 			return
 		}
 		next.ServeHTTP(w, r)

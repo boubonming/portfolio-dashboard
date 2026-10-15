@@ -43,7 +43,13 @@ func boolInt(value bool) int {
 	return 0
 }
 
-func (s *Store) MachinePrincipalAllowed(ctx context.Context, principalID, portfolioID string) (bool, error) {
+// MachinePrincipalAllowed applies the runtime permission as an additional
+// bound when supplied. A disabled runtime grant must not be able to use a
+// stale enabled database row, while a database revocation remains authoritative.
+func (s *Store) MachinePrincipalAllowed(ctx context.Context, principalID, portfolioID string, runtimePortfolioRead ...bool) (bool, error) {
+	if len(runtimePortfolioRead) > 0 && !runtimePortfolioRead[0] {
+		return false, nil
+	}
 	var active, permission int
 	err := s.DB.QueryRowContext(ctx, `SELECT active,permission_portfolio_read FROM machine_principals WHERE id=? AND portfolio_id=?`, principalID, portfolioID).Scan(&active, &permission)
 	if err == sql.ErrNoRows {

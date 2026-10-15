@@ -27,11 +27,11 @@ func snapshotRoutes(database *store.Store, authenticator *auth.Authenticator) ht
 func (h *snapshotEndpoint) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	portfolioID, snapshotID, latest, ok := snapshotTarget(r)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
 		return
 	}
 	if r.URL.RawQuery != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
 		return
 	}
 	if !h.authenticate(w, r, portfolioID) {
@@ -39,22 +39,22 @@ func (h *snapshotEndpoint) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		writePhaseDError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET is supported for this resource.")
 		return
 	}
 	if h.database == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+		writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
 		return
 	}
 	result, err := h.database.ReviewSnapshot(r.Context(), portfolioID, snapshotID, latest)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrPortfolioNotFound), errors.Is(err, store.ErrSnapshotNotFound):
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+			writePhaseDError(w, http.StatusNotFound, "not_found", "The requested snapshot was not found.")
 		case errors.Is(err, store.ErrSnapshotCorrupt):
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+			writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
 		default:
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+			writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
 		}
 		return
 	}
@@ -98,17 +98,17 @@ func (h *snapshotEndpoint) authenticate(w http.ResponseWriter, r *http.Request, 
 			return false
 		}
 		if h.database == nil {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			writePhaseDError(w, http.StatusForbidden, "forbidden", "The credential lacks the required permission.")
 			return false
 		}
 		principal := h.authenticator.MachinePrincipal()
-		allowed, err := h.database.MachinePrincipalAllowed(r.Context(), principal.PrincipalID, portfolioID)
+		allowed, err := h.database.MachinePrincipalAllowed(r.Context(), principal.PrincipalID, portfolioID, principal.PortfolioRead)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+			writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
 			return false
 		}
 		if !allowed {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			writePhaseDError(w, http.StatusForbidden, "forbidden", "The credential lacks the required permission.")
 			return false
 		}
 		return true
@@ -126,5 +126,5 @@ func (h *snapshotEndpoint) authenticate(w http.ResponseWriter, r *http.Request, 
 
 func writeBearerUnauthorized(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", auth.MachineBearerRealm)
-	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	writePhaseDError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 }

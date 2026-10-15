@@ -22,6 +22,13 @@ var (
 var canonicalDecimal = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$`)
 var canonicalID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~-]*$`)
 
+type persistedSnapshotHolding struct {
+	holdingID    string
+	instrumentID string
+	symbol       string
+	name         string
+}
+
 func (s *Store) ReviewSnapshot(ctx context.Context, portfolioID, snapshotID string, latest bool) (domain.ReviewSnapshot, error) {
 	if strings.TrimSpace(portfolioID) == "" || strings.TrimSpace(snapshotID) != snapshotID || strings.ContainsAny(portfolioID+snapshotID, "/\\%\x00\r\n") {
 		return domain.ReviewSnapshot{}, ErrSnapshotNotFound
@@ -66,11 +73,56 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	if payload.PortfolioID != portfolioID || payload.SnapshotID != storedID || payload.CalculationVersion != storedVersion || !validID(payload.PortfolioID, 128) || !validID(payload.SnapshotID, 128) || !validCalculationVersion(payload.CalculationVersion) || !validCanonicalTime(payload.CreatedAt) || !validCanonicalTime(payload.AsOf) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
+	var reviewVersion string
+	if err := db.QueryRowContext(ctx, "SELECT calculation_version FROM review_snapshots WHERE portfolio_id=? AND snapshot_id=?", portfolioID, storedID).Scan(&reviewVersion); err != nil || reviewVersion != storedVersion {
+		if err == sql.ErrNoRows {
+			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+		}
+		if err != nil {
+			return domain.ReviewSnapshot{}, err
+		}
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
 	if len(payload.Valuation.Lots) != len(payload.Input.Lots) || len(payload.Valuation.MissingDependencies) > 100 || len(payload.Valuation.StaleDependencies) > 100 || len(payload.Valuation.InvalidDependencies) > 100 {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
+	seenDependencies := make(map[string]struct{})
 	for _, dependency := range append(append(append([]string{}, payload.Valuation.MissingDependencies...), payload.Valuation.StaleDependencies...), payload.Valuation.InvalidDependencies...) {
 		if !validIdentifier(dependency, 128) {
+			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+		}
+		if _, duplicate := seenDependencies[dependency]; duplicate {
+			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+		}
+		seenDependencies[dependency] = struct{}{}
+	}
+	if !validCurrency(payload.Valuation.ReportingCurrency) || (payload.Valuation.Complete && !validDecimal(payload.Valuation.ReportingTotal)) {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
+	for _, subtotal := range payload.Valuation.Subtotals {
+		if !validCurrency(subtotal.Currency) || !validDecimal(subtotal.MarketValue) || !validDecimalOptional(subtotal.CostBasis) || !validDecimalOptional(subtotal.UnrealisedPnL) {
+			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+		}
+	}
+	if payload.Valuation.Complete && (len(seenDependencies) != 0 || payload.Valuation.ReportingTotal == "") {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
+
+	persisted, err := loadPersistedSnapshotHoldings(ctx, db, portfolioID, storedID, len(payload.Input.Lots))
+	if err != nil {
+		return domain.ReviewSnapshot{}, err
+	}
+	if len(persisted) != len(payload.Input.Lots) {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
+	seenPayloadHoldings := make(map[string]struct{}, len(payload.Input.Lots))
+	for _, lot := range payload.Input.Lots {
+		if _, duplicate := seenPayloadHoldings[lot.ID]; duplicate {
+			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+		}
+		seenPayloadHoldings[lot.ID] = struct{}{}
+		row, ok := persisted[lot.ID]
+		if !ok || row.instrumentID != lot.InstrumentID {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 		}
 	}
@@ -94,26 +146,27 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	}
 	for index, inputLot := range payload.Input.Lots {
 		valuedLot := payload.Valuation.Lots[index]
-		if !validID(inputLot.ID, 128) || valuedLot.LotID != inputLot.ID || valuedLot.Symbol != inputLot.Symbol || valuedLot.InstrumentID != inputLot.InstrumentID || valuedLot.Currency != inputLot.Currency || valuedLot.Quantity != inputLot.Quantity || !validDecimal(inputLot.Quantity) || !validID(inputLot.InstrumentID, 128) || !validSymbol(inputLot.Symbol) || !validCurrency(inputLot.Currency) || !validDecimalPointer(inputLot.UnitCost) {
+		if !validID(inputLot.ID, 128) || valuedLot.LotID != inputLot.ID || valuedLot.Symbol != inputLot.Symbol || valuedLot.InstrumentID != inputLot.InstrumentID || valuedLot.Currency != inputLot.Currency || valuedLot.Quantity != inputLot.Quantity || !validDecimal(inputLot.Quantity) || !validID(inputLot.InstrumentID, 128) || !validSymbol(inputLot.Symbol) || !validCurrency(inputLot.Currency) || !validDecimalPointer(inputLot.UnitCost) || !validDecimalPointer(inputLot.CostBasis) {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 		}
-		var name, instrumentSymbol string
-		if err := db.QueryRowContext(ctx, "SELECT COALESCE(description,''),symbol FROM instruments WHERE id=?", inputLot.InstrumentID).Scan(&name, &instrumentSymbol); err != nil {
-			if err == sql.ErrNoRows {
-				return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
-			}
-			return domain.ReviewSnapshot{}, err
-		}
-		if instrumentSymbol != inputLot.Symbol {
+		row := persisted[inputLot.ID]
+		if row.symbol != inputLot.Symbol {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 		}
+		name := row.name
 		if strings.TrimSpace(name) == "" {
 			name = inputLot.Symbol
 		}
-		if !validIdentifier(name, 256) || !validDecimal(valuedLot.Quantity) || !validDecimalOptional(valuedLot.Price) || !validDecimalOptional(valuedLot.MarketValue) || !validDecimalPointer(valuedLot.ReportingValue) || !validDecimalPointer(valuedLot.CostBasis) {
+		if !validIdentifier(name, 256) || !validDecimal(valuedLot.Quantity) || !validDecimalOptional(valuedLot.Price) || !validDecimalOptional(valuedLot.MarketValue) || !validDecimalPointer(valuedLot.ReportingValue) || !validDecimalPointer(valuedLot.CostBasis) || !validDecimalPointer(valuedLot.UnrealisedPnL) {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 		}
-		if result.Complete && valuedLot.ReportingValue == nil {
+		if result.Complete && (valuedLot.ReportingValue == nil || valuedLot.Freshness.Status != domain.Fresh) {
+			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+		}
+		if result.Complete && (valuedLot.Price == "" || valuedLot.MarketValue == "" || valuedLot.QuoteID == "") {
+			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+		}
+		if valuedLot.Freshness.Status != domain.Fresh && (valuedLot.Price != "" || valuedLot.MarketValue != "" || valuedLot.ReportingValue != nil) {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 		}
 		item := domain.ReviewHoldingContext{PortfolioID: portfolioID, SnapshotID: storedID, HoldingID: inputLot.ID, InstrumentID: inputLot.InstrumentID, Symbol: inputLot.Symbol, Name: name, Quantity: inputLot.Quantity, Currency: inputLot.Currency, UnitCost: inputLot.UnitCost, CostBasis: valuedLot.CostBasis, LatestPrice: stringPtrIfNonempty(valuedLot.Price), LatestValue: stringPtrIfNonempty(valuedLot.MarketValue), ReportingValue: valuedLot.ReportingValue, FreshnessState: valuedLot.Freshness.Status}
@@ -132,10 +185,50 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 		} else if valuedLot.Freshness.Status == domain.Fresh {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 		}
-		if age := freshnessAgeSeconds(valuedLot.Freshness.Age); age != "" {
+		age, validAge := freshnessAgeSeconds(valuedLot.Freshness.Age)
+		if !validAge {
+			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+		}
+		if age != "" {
 			item.FreshnessAgeSeconds = &age
 		}
 		result.Holdings = append(result.Holdings, item)
+	}
+	return result, nil
+}
+
+func loadPersistedSnapshotHoldings(ctx context.Context, db *sql.DB, portfolioID, snapshotID string, expected int) (map[string]persistedSnapshotHolding, error) {
+	var rawCount int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM snapshot_holdings WHERE portfolio_id=? AND snapshot_id=?", portfolioID, snapshotID).Scan(&rawCount); err != nil {
+		return nil, err
+	}
+	if rawCount != expected {
+		return nil, ErrSnapshotCorrupt
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT sh.holding_id,sh.instrument_id,i.symbol,COALESCE(i.description,'')
+		FROM snapshot_holdings sh
+		JOIN lots l ON l.id=sh.holding_id AND l.portfolio_id=sh.portfolio_id AND l.instrument_id=sh.instrument_id
+		JOIN instruments i ON i.id=sh.instrument_id
+		WHERE sh.portfolio_id=? AND sh.snapshot_id=?
+		ORDER BY sh.holding_id`, portfolioID, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]persistedSnapshotHolding)
+	for rows.Next() {
+		var row persistedSnapshotHolding
+		if err := rows.Scan(&row.holdingID, &row.instrumentID, &row.symbol, &row.name); err != nil {
+			return nil, err
+		}
+		if _, duplicate := result[row.holdingID]; duplicate {
+			return nil, ErrSnapshotCorrupt
+		}
+		result[row.holdingID] = row
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -183,20 +276,20 @@ func stringPtrIfNonempty(value string) *string {
 	return &value
 }
 
-func freshnessAgeSeconds(value string) string {
+func freshnessAgeSeconds(value string) (string, bool) {
 	if value == "" {
-		return ""
+		return "", true
 	}
 	duration, err := time.ParseDuration(value)
-	if err != nil || duration < 0 {
-		return ""
+	if err != nil || duration < 0 || duration.String() != value {
+		return "", false
 	}
 	seconds := fmt.Sprintf("%d.%09d", duration/time.Second, duration%time.Second)
 	seconds = strings.TrimRight(strings.TrimRight(seconds, "0"), ".")
 	if seconds == "" {
-		return "0"
+		return "0", true
 	}
-	return seconds
+	return seconds, true
 }
 
 // Keep this helper available for callers that compare dependency output while
