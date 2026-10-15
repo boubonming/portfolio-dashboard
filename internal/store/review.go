@@ -36,6 +36,11 @@ var reviewIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~-]*$`)
 var reviewDecimalPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$`)
 var evidenceSuffixPattern = regexp.MustCompile(`^[A-Za-z0-9._~:/?$&'()*+,;=%!-]*$`)
 
+// These hooks are intentionally unexported test seams for deterministic
+// cancellation/contention tests. Production callers cannot alter retry state.
+var reviewAttemptHook func(int)
+var reviewBackoffHook func(int)
+
 const reviewBodyLimit = 256 << 10
 
 // ReviewBodyLimit is the maximum encoded JSON request accepted by the HTTP
@@ -48,12 +53,28 @@ type reviewQueryer interface {
 }
 
 func ReviewFingerprint(submission domain.ReviewSubmission) (string, error) {
+	submission = canonicalReviewSubmission(submission)
 	encoded, err := json.Marshal(submission)
 	if err != nil {
 		return "", err
 	}
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func canonicalReviewSubmission(submission domain.ReviewSubmission) domain.ReviewSubmission {
+	if submission.Scope.HoldingIDs == nil { submission.Scope.HoldingIDs = []string{} }
+	if submission.Scope.InstrumentIDs == nil { submission.Scope.InstrumentIDs = []string{} }
+	if submission.Risks == nil { submission.Risks = []string{} }
+	if submission.Counterarguments == nil { submission.Counterarguments = []string{} }
+	if submission.Conditions == nil { submission.Conditions = []string{} }
+	if submission.Metrics == nil { submission.Metrics = []domain.ReviewMetric{} }
+	if submission.SourcedFacts == nil { submission.SourcedFacts = []domain.SourcedFact{} }
+	if submission.Evidence == nil { submission.Evidence = []domain.ReviewEvidence{} }
+	for index := range submission.SourcedFacts {
+		if submission.SourcedFacts[index].EvidenceIDs == nil { submission.SourcedFacts[index].EvidenceIDs = []string{} }
+	}
+	return submission
 }
 
 func ValidateReviewSubmission(submission domain.ReviewSubmission, snapshot domain.ReviewSnapshot) error {
@@ -337,6 +358,9 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 	const maxRetryElapsed = 250 * time.Millisecond
 	started := time.Now()
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if reviewAttemptHook != nil {
+			reviewAttemptHook(attempt)
+		}
 		if err := ctx.Err(); err != nil {
 			return domain.AdvisoryReview{}, false, err
 		}
@@ -353,6 +377,9 @@ func (s *Store) SubmitAdvisoryReview(ctx context.Context, principal auth.Machine
 		backoff := time.Duration(attempt+1) * 10 * time.Millisecond
 		if elapsed := time.Since(started); elapsed+backoff > maxRetryElapsed {
 			return domain.AdvisoryReview{}, false, err
+		}
+		if reviewBackoffHook != nil {
+			reviewBackoffHook(attempt)
 		}
 		timer := time.NewTimer(backoff)
 		select {
@@ -409,7 +436,7 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 		if !sameSecretText(existingFingerprint, fingerprint) {
 			return domain.AdvisoryReview{}, false, ErrReviewIdempotencyConflict
 		}
-		result, readErr := reconstructAdvisoryReview(ctx, tx, portfolioID, existingReviewID, principal.PrincipalID)
+		result, readErr := reconstructAdvisoryReview(ctx, tx, portfolioID, existingReviewID, principal.PrincipalID, fingerprint)
 		if readErr != nil {
 			return domain.AdvisoryReview{}, false, readErr
 		}
@@ -417,6 +444,18 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 			return domain.AdvisoryReview{}, false, err
 		}
 		return result, true, nil
+	}
+	if err != sql.ErrNoRows {
+		return domain.AdvisoryReview{}, false, err
+	}
+	// A reservation whose key was rebound to another owner is corruption, not
+	// a new submission. The join is deliberately scoped to this review's
+	// immutable attribution so an unrelated principal may legitimately reuse
+	// the same textual key in its own namespace.
+	var reboundReviewID string
+	err = tx.QueryRowContext(ctx, `SELECT i.review_id FROM review_idempotency i JOIN advisory_reviews r ON r.id=i.review_id WHERE i.idempotency_key=? AND r.portfolio_id=? AND r.submitted_by_id=? LIMIT 1`, idempotencyKey, portfolioID, principal.PrincipalID).Scan(&reboundReviewID)
+	if err == nil {
+		return domain.AdvisoryReview{}, false, ErrReviewCorrupt
 	}
 	if err != sql.ErrNoRows {
 		return domain.AdvisoryReview{}, false, err
@@ -452,7 +491,7 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 		if !sameSecretText(existingFingerprint, fingerprint) {
 			return domain.AdvisoryReview{}, false, ErrReviewIdempotencyConflict
 		}
-		result, readErr := reconstructAdvisoryReview(ctx, tx, portfolioID, existingReviewID, principal.PrincipalID)
+		result, readErr := reconstructAdvisoryReview(ctx, tx, portfolioID, existingReviewID, principal.PrincipalID, fingerprint)
 		if readErr != nil {
 			return domain.AdvisoryReview{}, false, readErr
 		}
@@ -573,7 +612,7 @@ func (s *Store) submitAdvisoryReviewOnce(ctx context.Context, principal auth.Mac
 	if err := recordActivity(ctx, tx, portfolioID, "hermes", "review_submitted", "review", "advisory_review", reviewID, "Advisory review submitted", "An immutable advisory review was submitted.", submittedAt, auditID); err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
-	result, err := reconstructAdvisoryReview(ctx, tx, portfolioID, reviewID, principal.PrincipalID)
+	result, err := reconstructAdvisoryReview(ctx, tx, portfolioID, reviewID, principal.PrincipalID, fingerprint)
 	if err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
@@ -606,7 +645,7 @@ func (s *Store) replayReviewIdempotency(ctx context.Context, principalID, portfo
 	if !sameSecretText(storedFingerprint, fingerprint) {
 		return domain.AdvisoryReview{}, false, ErrReviewIdempotencyConflict
 	}
-	result, err := reconstructAdvisoryReview(ctx, tx, portfolioID, reviewID, principalID)
+	result, err := reconstructAdvisoryReview(ctx, tx, portfolioID, reviewID, principalID, fingerprint)
 	if err != nil {
 		return domain.AdvisoryReview{}, false, err
 	}
@@ -639,11 +678,15 @@ func randomReviewID() (string, error) {
 	return "rev-" + base64.RawURLEncoding.EncodeToString(bytes[:]), nil
 }
 
-func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID, reviewID, expectedPrincipalID string) (domain.AdvisoryReview, error) {
+func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID, reviewID, expectedPrincipalID, expectedFingerprint string) (domain.AdvisoryReview, error) {
 	var result domain.AdvisoryReview
 	var scopeType, status, generatedAt, submittedAt, submittedByID, submittedByKind, primaryPermission string
 	var primaryEvidenceID, primaryEvidenceAvailability, primaryEvidenceFreshness, primaryFactOrdinal, primaryTargetHoldingID sql.NullString
 	if err := q.QueryRowContext(ctx, `SELECT id,portfolio_id,snapshot_id,calculation_version,scope_type,historical_status,recommendation,rationale,model_opinion,model_provider,model_name,model_version,model_runtime,generated_at,submitted_at,submitted_by_id,submitted_by_kind,submitted_by_primary_permission,primary_evidence_id,primary_evidence_availability,primary_evidence_freshness,primary_fact_ordinal,primary_target_holding_id FROM advisory_reviews WHERE id=? AND portfolio_id=?`, reviewID, portfolioID).Scan(&result.ReviewID, &result.PortfolioID, &result.SnapshotID, &result.CalculationVersion, &scopeType, &status, &result.Recommendation, &result.Rationale, &result.ModelOpinion, &result.Model.Provider, &result.Model.Model, &result.Model.Version, &result.Model.Runtime, &generatedAt, &submittedAt, &submittedByID, &submittedByKind, &primaryPermission, &primaryEvidenceID, &primaryEvidenceAvailability, &primaryEvidenceFreshness, &primaryFactOrdinal, &primaryTargetHoldingID); err != nil {
+		return domain.AdvisoryReview{}, ErrReviewCorrupt
+	}
+	var reservationCount int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM review_idempotency WHERE review_id=? AND portfolio_id=? AND principal_id=?`, reviewID, portfolioID, expectedPrincipalID).Scan(&reservationCount); err != nil || reservationCount != 1 {
 		return domain.AdvisoryReview{}, ErrReviewCorrupt
 	}
 	advisoryCalculationVersion := result.CalculationVersion
@@ -757,6 +800,18 @@ func reconstructAdvisoryReview(ctx context.Context, q reviewQueryer, portfolioID
 	// mutable snapshot payloads here would make idempotent replay non-deterministic.
 	current := result.SnapshotID
 	result.Lifecycle = domain.ReviewLifecycle{HistoricalStatus: status, CurrentSnapshotID: &current, Outdated: false}
+	if expectedFingerprint != "" {
+		reconstructedFingerprint, err := ReviewFingerprint(domain.ReviewSubmission{
+			SnapshotID: result.SnapshotID, CalculationVersion: result.CalculationVersion, Scope: result.Scope,
+			Status: result.Status, Recommendation: result.Recommendation, Rationale: result.Rationale,
+			Risks: result.Risks, Counterarguments: result.Counterarguments, Conditions: result.Conditions,
+			Metrics: result.Metrics, SourcedFacts: result.SourcedFacts, ModelOpinion: result.ModelOpinion,
+			Evidence: result.Evidence, Model: result.Model, GeneratedAt: result.GeneratedAt,
+		})
+		if err != nil || !sameSecretText(reconstructedFingerprint, expectedFingerprint) {
+			return domain.AdvisoryReview{}, ErrReviewCorrupt
+		}
+	}
 	return result, nil
 }
 

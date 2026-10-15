@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"regexp"
 	"strings"
@@ -176,19 +177,18 @@ func parseReviewContentType(values []string) (string, map[string]string, error) 
 }
 
 func mimeParseMediaType(value string) (string, map[string]string, error) {
-	// Keep parameters permitted while rejecting duplicate Content-Type headers.
-	parts := strings.Split(value, ";")
-	mediaType := strings.ToLower(strings.TrimSpace(parts[0]))
-	if mediaType == "" {
-		return "", nil, errors.New("empty content type")
+	mediaType, params, err := mime.ParseMediaType(value)
+	if err != nil {
+		return "", nil, err
 	}
-	params := map[string]string{}
-	for _, part := range parts[1:] {
-		item := strings.SplitN(part, "=", 2)
-		if len(item) != 2 || strings.TrimSpace(item[0]) == "" {
-			return "", nil, errors.New("invalid parameter")
+	mediaType = strings.ToLower(mediaType)
+	// JSON requests may explicitly declare UTF-8. Other charsets would make
+	// the byte-level UTF-8 validation ambiguous, and unknown parameters are not
+	// part of this endpoint's media-type contract.
+	for name, parameter := range params {
+		if name != "charset" || !strings.EqualFold(parameter, "utf-8") {
+			return "", nil, errors.New("unsupported content type parameter")
 		}
-		params[strings.ToLower(strings.TrimSpace(item[0]))] = strings.Trim(strings.TrimSpace(item[1]), "\"")
 	}
 	return mediaType, params, nil
 }
