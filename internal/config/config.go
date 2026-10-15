@@ -50,6 +50,7 @@ func FromEnv() Config {
 				PortfolioID:   os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_ID"),
 				BearerSecret:  os.Getenv("PORTFOLIO_MACHINE_BEARER_SECRET"),
 				PortfolioRead: machinePortfolioRead(),
+				ReviewsWrite:  machineReviewsWrite(),
 			},
 		},
 	}
@@ -57,6 +58,15 @@ func FromEnv() Config {
 
 func machinePortfolioRead() bool {
 	value := os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_READ")
+	if value == "" {
+		return false
+	}
+	parsed, err := strconv.ParseBool(value)
+	return err == nil && parsed
+}
+
+func machineReviewsWrite() bool {
+	value := os.Getenv("PORTFOLIO_MACHINE_REVIEWS_WRITE")
 	if value == "" {
 		return false
 	}
@@ -81,6 +91,11 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("machine authentication configuration: invalid PORTFOLIO_MACHINE_PORTFOLIO_READ")
 		}
 	}
+	if value := os.Getenv("PORTFOLIO_MACHINE_REVIEWS_WRITE"); value != "" {
+		if _, err := strconv.ParseBool(value); err != nil {
+			return Config{}, fmt.Errorf("machine authentication configuration: invalid PORTFOLIO_MACHINE_REVIEWS_WRITE")
+		}
+	}
 	if !cfg.Auth.CookieSecure && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "development") && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "test") {
 		return Config{}, fmt.Errorf("authentication configuration: insecure cookies require PORTFOLIO_ENV=development or test")
 	}
@@ -89,6 +104,9 @@ func Load() (Config, error) {
 	}
 	if err := publicOriginEnvironment(cfg.Auth.PublicOrigin); err != nil {
 		return Config{}, err
+	}
+	if cfg.Auth.Machine.Enabled() && !cfg.Auth.Machine.PortfolioRead {
+		return Config{}, fmt.Errorf("machine authentication configuration: portfolio read is required when machine credentials are configured")
 	}
 	if err := cfg.Auth.Validate(); err != nil {
 		return Config{}, err
