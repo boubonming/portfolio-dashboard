@@ -246,6 +246,8 @@ func safeActorCategory(actor string) string {
 		return "system"
 	case actor == "hermes" || strings.HasPrefix(actor, "hermes-"):
 		return "hermes"
+	case actor == "browser" || strings.HasPrefix(actor, "browser-"):
+		return "browser"
 	default:
 		return "unknown"
 	}

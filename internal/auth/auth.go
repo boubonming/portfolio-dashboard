@@ -254,10 +254,14 @@ func (a *Authenticator) RequireCSRF(next http.Handler) http.Handler {
 func (a *Authenticator) sameOrigin(r *http.Request) bool {
 	seen := false
 	for _, header := range []string{"Origin", "Referer"} {
-		value := r.Header.Get(header)
-		if value == "" {
+		values := r.Header.Values(header)
+		if len(values) == 0 {
 			continue
 		}
+		if len(values) != 1 || values[0] == "" {
+			return false
+		}
+		value := values[0]
 		seen = true
 		if header == "Origin" && !a.canonicalOriginMatches(value) {
 			return false
