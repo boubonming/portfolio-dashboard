@@ -13,6 +13,15 @@ const completeOverview: PortfolioOverview = {
   ],
 }
 
+const appReview = {
+  review_id: 'review-app', portfolio_id: 'portfolio-default', snapshot_id: 'snap-1', calculation_version: 'test.v1',
+  scope: { type: 'holding' as const, holding_ids: ['lot-c'], instrument_ids: ['instrument-c'] }, status: 'complete' as const, recommendation: 'hold' as const,
+  rationale: 'App integration review', risks: [], counterarguments: [], conditions: [], metrics: [], sourced_facts: [{ statement: 'Fact', evidence_ids: ['evidence-app'] }], model_opinion: 'Opinion',
+  evidence: [{ evidence_id: 'evidence-app', url: 'https://example.test/app', title: 'App source', published_at: null, accessed_at: '2026-01-02T12:00:00.000000000Z', availability: 'available' as const, freshness: 'current' as const, excerpt: 'Excerpt' }],
+  model: { provider: 'local-ai', model: 'review-model', version: '1', runtime: 'hermes-environment' as const }, generated_at: '2026-01-02T12:00:00.000000000Z', submitted_at: '2026-01-02T12:00:00.000000000Z',
+  submitted_by: { principal_id: 'machine-1', principal_type: 'machine' as const, permissions: ['reviews:write' as const] }, lifecycle: { historical_status: 'complete' as const, current_snapshot_id: 'snap-1', outdated: false },
+}
+
 const decimalSortOverview: PortfolioOverview = {
   ...completeOverview,
   holdings: [
@@ -118,6 +127,7 @@ describe('Portfolio Dashboard', () => {
 	})
 
 	it('uses the rendered overview portfolio id and advertises CSV', async () => {
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
 	  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
 	    const url = String(input)
 	    if (url.includes('/export.csv')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ 'Content-Type': 'text/csv' }), blob: async () => new Blob(['ok']) } as unknown as Response)
@@ -163,6 +173,7 @@ describe('Portfolio Dashboard', () => {
 	  })
 
 	  it('keeps CSV download keyboard-accessible and announces preparation', async () => {
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
 	  let resolveExport: ((response: Response) => void) | undefined
 	  const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/export.csv')
 	    ? new Promise<Response>((resolve) => { resolveExport = resolve })
@@ -311,6 +322,37 @@ describe('Portfolio Dashboard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open thesis for SAME lot lot-c' })))
     expect(document.activeElement).not.toBe(screen.getByRole('button', { name: 'Open thesis for SAME lot lot-a' }))
+  })
+
+  it('loads top-level reviews unfiltered, sends the exact same-symbol lot, and restores Back focus', async () => {
+    const sameSymbolOverview = {
+      ...completeOverview,
+      holdings: [
+        { ...completeOverview.holdings[0], lot_id: 'lot-a', symbol: 'SAME' },
+        { ...completeOverview.holdings[0], lot_id: 'lot-c', symbol: 'SAME' },
+      ],
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/reviews')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [appReview], has_more: false }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => sameSymbolOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    const globalReviewsCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/reviews'))
+    expect(String(globalReviewsCall?.[0])).not.toContain('holding_id=')
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
+    const lotC = screen.getByRole('button', { name: 'View reviews for SAME lot lot-c' })
+    fireEvent.click(lotC)
+    await waitFor(() => expect(screen.getByText('Filtered to exact lot lot-c')).toBeTruthy())
+    const filteredCall = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)
+    expect(String(filteredCall?.[0])).toContain('holding_id=lot-c')
+    fireEvent.click(screen.getByRole('button', { name: 'Back to overview' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View reviews for SAME lot lot-c' }))
   })
 
   it('shows a loading state while the typed API request is pending', () => {

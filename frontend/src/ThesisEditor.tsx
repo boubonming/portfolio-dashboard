@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent, RefObject } from 'react'
 import { apiFetch, APIError } from './api'
 import type { Holding } from './App'
@@ -366,8 +366,10 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
     mountedRef.current = true
     headingRef.current?.focus()
     loadCurrent(false)
-    return () => { mountedRef.current = false; abortRequest() }
+    return () => { mountedRef.current = false }
   }, [abortRequest, loadCurrent])
+
+  useLayoutEffect(() => () => { mountedRef.current = false; abortRequest() }, [abortRequest])
 
   useEffect(() => () => { returnFocusRef?.current?.focus() }, [returnFocusRef])
 
