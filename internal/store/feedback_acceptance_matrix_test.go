@@ -225,6 +225,10 @@ func TestFeedbackStoreReplayCorruptionMatrixReturnsNoPartialData(t *testing.T) {
 			dropFeedbackTrigger(t, f, "activity_events_append_only_delete", "activity_events")
 			execFeedbackMutation(t, f, `DELETE FROM activity_events WHERE entity_id=?`, feedback.FeedbackID)
 		}},
+		{"mismatched-activity-id", nil, func(t *testing.T, f *reviewRegressionFixture, feedback domain.ReviewFeedback) {
+			dropFeedbackTrigger(t, f, "activity_events_append_only_update", "activity_events")
+			execFeedbackMutation(t, f, `UPDATE activity_events SET id='activity-corrupt-id' WHERE entity_id=?`, feedback.FeedbackID)
+		}},
 		{"mismatched-fingerprint", nil, func(t *testing.T, f *reviewRegressionFixture, feedback domain.ReviewFeedback) {
 			dropFeedbackTrigger(t, f, "phase_d_feedback_idempotency_update", "feedback_idempotency")
 			execFeedbackMutation(t, f, `UPDATE feedback_idempotency SET request_fingerprint=? WHERE feedback_id=?`, "bad", feedback.FeedbackID)
@@ -279,6 +283,21 @@ func TestFeedbackStoreReplayCorruptionMatrixReturnsNoPartialData(t *testing.T) {
 				t.Fatalf("corrupt replay wrote rows: before=%v after=%v want=%v", before, after, want)
 			}
 		})
+	}
+}
+
+func TestFeedbackStoreRejectsCorruptedActivityID(t *testing.T) {
+	fixture, review, key, submission, fingerprint := createFeedbackFixture(t)
+	defer fixture.close()
+	feedback, replay, err := fixture.store.SubmitReviewFeedback(context.Background(), "local-owner", fixture.portfolio, review.ReviewID, key, fingerprint, submission)
+	if err != nil || replay {
+		t.Fatalf("setup feedback=%+v replay=%v err=%v", feedback, replay, err)
+	}
+	dropFeedbackTrigger(t, fixture, "activity_events_append_only_update", "activity_events")
+	execFeedbackMutation(t, fixture, `UPDATE activity_events SET id='activity-corrupt-id' WHERE entity_id=?`, feedback.FeedbackID)
+	_, replay, err = fixture.store.SubmitReviewFeedback(context.Background(), "local-owner", fixture.portfolio, review.ReviewID, key, fingerprint, submission)
+	if !errors.Is(err, ErrFeedbackCorrupt) || replay {
+		t.Fatalf("replay=%v err=%v want corruption", replay, err)
 	}
 }
 

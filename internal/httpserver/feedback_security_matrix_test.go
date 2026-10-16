@@ -79,6 +79,28 @@ func TestFeedbackHTTPRevokedAndExpiredCookiesAreUniformUnauthorized(t *testing.T
 	})
 }
 
+func TestFeedbackHTTPCorruptedActivityIDFailsClosed(t *testing.T) {
+	fixture := newFeedbackHTTPFixture(t)
+	defer fixture.close()
+	key := "feedback-http-corrupt-activity-0001"
+	created := fixture.request(http.MethodPost, fixture.validPath(), `{"decision":"agree"}`, fixture.validHeaders(key))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var feedback domain.ReviewFeedback
+	if err := json.Unmarshal(created.Body.Bytes(), &feedback); err != nil || feedback.FeedbackID == "" {
+		t.Fatalf("created feedback=%s err=%v", created.Body.String(), err)
+	}
+	if _, err := fixture.database.DB.Exec(`DROP TRIGGER activity_events_append_only_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.database.DB.Exec(`UPDATE activity_events SET id='activity-corrupt-id' WHERE entity_id=?`, feedback.FeedbackID); err != nil {
+		t.Fatal(err)
+	}
+	replayed := fixture.request(http.MethodPost, fixture.validPath(), `{"decision":"agree"}`, fixture.validHeaders(key))
+	assertFeedbackHTTPError(t, replayed, http.StatusInternalServerError, "internal_error")
+}
+
 func TestFeedbackHTTPRealForeignReviewIsNotVisibleThroughOwnedPortfolio(t *testing.T) {
 	fixture := newFeedbackHTTPFixture(t)
 	defer fixture.close()

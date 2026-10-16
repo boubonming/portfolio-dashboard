@@ -82,6 +82,44 @@ func assertFeedbackHTTPError(t *testing.T, response *httptest.ResponseRecorder, 
 	}
 }
 
+func TestFeedbackHTTPRejectsAmbiguousBrowserCredentials(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*http.Request, *feedbackHTTPFixture)
+	}{
+		{"duplicate-same-cookie", func(request *http.Request, f *feedbackHTTPFixture) {
+			request.AddCookie(f.cookie)
+			request.AddCookie(f.cookie)
+		}},
+		{"duplicate-different-cookie", func(request *http.Request, f *feedbackHTTPFixture) {
+			request.AddCookie(f.cookie)
+			other := *f.cookie
+			other.Value += "tampered"
+			request.AddCookie(&other)
+		}},
+		{"cookie-plus-authorization", func(request *http.Request, f *feedbackHTTPFixture) {
+			request.AddCookie(f.cookie)
+			request.Header.Set("Authorization", "Bearer a-valid-looking-token-that-must-not-be-used-0001")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFeedbackHTTPFixture(t)
+			defer f.close()
+			request := httptest.NewRequest(http.MethodPost, "https://example.test"+f.validPath(), strings.NewReader(`{"decision":"agree"}`))
+			tc.setup(request, f)
+			for name, values := range f.validHeaders("feedback-ambiguous-" + tc.name + "-0001") {
+				for _, value := range values {
+					request.Header.Add(name, value)
+				}
+			}
+			response := httptest.NewRecorder()
+			f.handler.ServeHTTP(response, request)
+			assertFeedbackHTTPError(t, response, http.StatusUnauthorized, "unauthorized")
+		})
+	}
+}
+
 func TestFeedbackHTTPCanonicalSuccessDecisionNoteMatrix(t *testing.T) {
 	f := newFeedbackHTTPFixture(t)
 	defer f.close()

@@ -100,9 +100,14 @@ func feedbackRoute(database *store.Store, authenticator *auth.Authenticator, w h
 }
 
 func feedbackAuthenticate(database *store.Store, authenticator *auth.Authenticator, w http.ResponseWriter, r *http.Request, portfolioID string) (feedbackSession, bool) {
-	_, cookieErr := r.Cookie(auth.SessionCookieName)
+	sessionCookies := 0
+	for _, cookie := range r.Cookies() {
+		if cookie.Name == auth.SessionCookieName {
+			sessionCookies++
+		}
+	}
 	_, bearerPresent, _ := auth.BearerToken(r)
-	if cookieErr != nil || bearerPresent || authenticator == nil {
+	if sessionCookies != 1 || bearerPresent || authenticator == nil {
 		writeCookieUnauthorized(w)
 		return feedbackSession{}, false
 	}

@@ -161,6 +161,45 @@ func TestSameOriginRequiresAtLeastOneHeader(t *testing.T) {
 	}
 }
 
+func TestSameOriginRejectsAmbiguousOrEmptyHeaders(t *testing.T) {
+	authenticator := fixtureAuthenticator(t)
+	cases := []struct {
+		name   string
+		setup  func(*http.Request)
+		wantOK bool
+	}{
+		{"single-origin", func(r *http.Request) { r.Header.Set("Origin", "https://example.test") }, true},
+		{"single-referer", func(r *http.Request) { r.Header.Set("Referer", "https://example.test/portfolio") }, true},
+		{"origin-same-then-attacker", func(r *http.Request) {
+			r.Header.Add("Origin", "https://example.test")
+			r.Header.Add("Origin", "https://attacker.test")
+		}, false},
+		{"origin-attacker-then-same", func(r *http.Request) {
+			r.Header.Add("Origin", "https://attacker.test")
+			r.Header.Add("Origin", "https://example.test")
+		}, false},
+		{"referer-same-then-attacker", func(r *http.Request) {
+			r.Header.Add("Referer", "https://example.test/portfolio")
+			r.Header.Add("Referer", "https://attacker.test/portfolio")
+		}, false},
+		{"empty-origin", func(r *http.Request) { r.Header.Add("Origin", "") }, false},
+		{"empty-referer", func(r *http.Request) { r.Header.Add("Referer", "") }, false},
+		{"empty-origin-with-valid-referer", func(r *http.Request) {
+			r.Header.Add("Origin", "")
+			r.Header.Add("Referer", "https://example.test/portfolio")
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "https://example.test/private", nil)
+			tc.setup(request)
+			if got := authenticator.SameOrigin(request); got != tc.wantOK {
+				t.Fatalf("SameOrigin() = %v, want %v; headers=%v", got, tc.wantOK, request.Header)
+			}
+		})
+	}
+}
+
 func TestSessionExpiryRetainsSubSecondPrecision(t *testing.T) {
 	clock := time.Date(2026, time.January, 2, 12, 0, 0, int(500*time.Millisecond), time.UTC)
 	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
