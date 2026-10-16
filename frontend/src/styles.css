@@ -114,6 +114,34 @@ tbody th { font-weight: 500; }
 .thesis-content li, .thesis-content p, .thesis-content dd { overflow-wrap: anywhere; }
 .thesis-content a { color: #8be6d7; overflow-wrap: anywhere; }
 .thesis-open-button { display: block; font-size: .8rem; margin-top: .65rem; padding: .45rem .6rem; white-space: nowrap; }
+.reviews-card, .review-detail { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; margin-top: 1.5rem; min-width: 0; padding: 1.25rem; }
+.review-actions { align-items: center; display: flex; flex-wrap: wrap; gap: .65rem; }
+.filter-chip, .snapshot-badge { border: 1px solid #41615d; border-radius: 999px; color: #cfe5e1; display: inline-block; font-size: .8rem; padding: .35rem .65rem; }
+.snapshot-badge.current { background: #164d43; border-color: #52c7b8; color: #a8f0df; }
+.snapshot-badge.outdated { background: #5b421e; border-color: #92723c; color: #ffdc9a; }
+.snapshot-badge.missing { background: #3d3e46; color: #d9d9e4; }
+.review-list { display: grid; gap: 1rem; margin: 1rem 0 1.25rem; }
+.review-card { border: 1px solid #41615d; border-radius: 10px; min-width: 0; padding: 1rem; }
+.review-card-heading { align-items: flex-start; display: flex; gap: 1rem; justify-content: space-between; }
+.review-card h3, .review-detail h3 { margin: .25rem 0; text-transform: capitalize; }
+.review-card p { overflow-wrap: anywhere; }
+.review-card-meta { align-items: center; color: #a9c1bd; display: flex; flex-wrap: wrap; gap: .5rem 1rem; margin: .8rem 0; }
+.review-detail { border-color: #52c7b8; margin-top: 1rem; outline: none; }
+.review-meta, .review-metrics { display: grid; gap: .75rem 1rem; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 1rem 0; }
+.review-meta dt, .review-metrics dt { color: #a9c1bd; font-size: .8rem; }
+.review-meta dd, .review-metrics dd { margin: .2rem 0 0; overflow-wrap: anywhere; }
+.review-section { border-top: 1px solid #2d4441; margin-top: 1.25rem; padding-top: 1rem; }
+.review-section h4 { margin: 0 0 .6rem; }
+.review-section p, .review-section li { line-height: 1.5; overflow-wrap: anywhere; }
+.review-section ul { margin: .5rem 0; padding-left: 1.3rem; }
+.evidence-list { display: grid; gap: .8rem; }
+.evidence-list a { color: #8be6d7; overflow-wrap: anywhere; }
+.evidence-list p { margin: .45rem 0 0; }
+.feedback-panel { border-top: 1px solid #41615d; margin-top: 1.5rem; padding-top: 1.25rem; }
+.feedback-panel fieldset { border: 1px solid #41615d; border-radius: 8px; display: grid; gap: .7rem; margin: 1rem 0; padding: 1rem; }
+.feedback-options { display: flex; flex-wrap: wrap; gap: .7rem 1.2rem; }
+.feedback-panel textarea { display: block; min-height: 6rem; resize: vertical; width: min(100%, 54rem); }
+.notice.success { border-color: #52c7b8; }
 @media (max-width: 780px) {
   .overview { grid-template-columns: 1fr; }
   .snapshot-meta { border-left: 0; border-top: 1px solid #41615d; padding-left: 0; padding-top: 1rem; }
@@ -125,4 +153,5 @@ tbody th { font-weight: 500; }
   .thesis-header { flex-direction: column; }
   .thesis-header > button { width: 100%; }
   .thesis-content-grid { grid-template-columns: 1fr; }
+  .review-meta, .review-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, RefObject } from 'react'
 import { apiFetch, APIError, jsonResponse } from './api'
 import ThesisEditor from './ThesisEditor'
+import Reviews from './Reviews'
 
 export type Freshness = {
   status: 'fresh' | 'stale' | 'missing' | 'future' | 'invalid' | string
@@ -357,7 +358,8 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
 
 export default function App() {
   const [currency, setCurrency] = useState('MYR')
-  const [view, setView] = useState<'overview' | 'activity'>('overview')
+  const [view, setView] = useState<'overview' | 'activity' | 'reviews'>('overview')
+  const [reviewsHoldingId, setReviewsHoldingId] = useState<string | undefined>(undefined)
   const [data, setData] = useState<PortfolioOverview | null>(null)
   const [thesisHolding, setThesisHolding] = useState<Holding | null>(null)
   const [activity, setActivity] = useState<ActivityPage | null>(null)
@@ -385,6 +387,8 @@ export default function App() {
   const activityStatusRef = useRef<HTMLParagraphElement>(null)
   const thesisReturnRef = useRef<HTMLButtonElement>(null)
   const thesisReturnLotIdRef = useRef<string | null>(null)
+  const reviewsReturnRef = useRef<HTMLButtonElement>(null)
+  const reviewsReturnLotIdRef = useRef<string | null>(null)
   const filterRef = useRef<HTMLInputElement>(null)
   const activityLoadingMoreRef = useRef(false)
   const activityItemsRef = useRef<ActivityItem[]>([])
@@ -411,7 +415,7 @@ export default function App() {
     csrfToken.current = undefined
     activityLoadingMoreRef.current = false
     activityItemsRef.current = []
-    setData(null); setThesisHolding(null); setActivity(null); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
+    setData(null); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -696,6 +700,16 @@ export default function App() {
     }, 0)
   }, [])
 
+  const closeReviews = useCallback(() => {
+    setReviewsHoldingId(undefined)
+    setView('overview')
+    window.setTimeout(() => {
+      const lotId = reviewsReturnLotIdRef.current
+      const target = lotId ? Array.from(document.querySelectorAll<HTMLButtonElement>('[data-reviews-lot-id]')).find((button) => button.dataset.reviewsLotId === lotId) : null
+      ;(target || reviewsReturnRef.current)?.focus()
+    }, 0)
+  }, [])
+
   const visibleHoldings = useMemo(() => {
     if (!data) return []
     const needle = filter.trim().toLowerCase()
@@ -744,6 +758,7 @@ export default function App() {
       <nav className="view-nav" aria-label="Portfolio views">
         <button type="button" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Overview</button>
         <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
+        <button type="button" aria-current={view === 'reviews' ? 'page' : undefined} onClick={() => { setReviewsHoldingId(undefined); setView('reviews') }}>Reviews</button>
       </nav>
 
       {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} /> : <>
@@ -818,7 +833,7 @@ export default function App() {
                     <td className="numeric">{holding.latest_price || '—'}<span className="subline">{holding.latest_value || 'value unavailable'}</span></td>
                     <td className="numeric">{data.snapshot.complete ? (holding.reporting_value || '—') : 'Withheld'}</td>
                     <td><span className={`flag ${qualityClass(holding)}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
-                    <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button></td>
+                    <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button><button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`}>View reviews</button></td>
                   </tr>)}
                 </tbody>
               </table>
@@ -829,6 +844,7 @@ export default function App() {
       )}
       </>}
       {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={(keyboardActivated) => loadActivity(activity?.next_cursor, true, keyboardActivated)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
+      {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} onUnauthorized={handleThesisUnauthorized} onBackToOverview={closeReviews} />}
       </>}
     </main>
   )
