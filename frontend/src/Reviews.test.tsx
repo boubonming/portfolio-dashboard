@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import Reviews, { validateReview, validateReviewPage, type Review } from './Reviews'
+import Reviews, { validateReview, validateReviewPage, type FeedbackAttemptStore, type Review } from './Reviews'
 import type { Holding } from './App'
 
 const timestamp = '2026-01-02T12:00:00.000000000Z'
@@ -241,6 +241,54 @@ describe('Phase D review contract validation', () => {
     await waitFor(() => screen.getByText(/Feedback recorded at/))
     const secondKey = new Headers(fetchMock.mock.calls[3]?.[1]?.headers as HeadersInit).get('Idempotency-Key')
     expect(secondKey).toBe(firstKey)
+  })
+
+  it('reports secure-randomness failure accessibly without sending feedback', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/review-1') ? emptyResponse(review) : emptyResponse({ items: [review], has_more: false }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('crypto', {})
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} csrfToken="csrf-token" onUnauthorized={vi.fn()} />)
+    await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => screen.getByRole('heading', { name: 'Record human feedback' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/secure randomness is unavailable/i))
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/feedback'))).toBe(false)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Retry feedback' }))
+  })
+
+  it('isolates retained feedback attempts by portfolio and review identity', async () => {
+    const attempts: FeedbackAttemptStore = new Map()
+    let feedbackCalls = 0
+    const firstReview = { ...review, portfolio_id: 'portfolio-a' }
+    const feedback = { feedback_id: 'feedback-isolated', portfolio_id: 'portfolio-b', review_id: 'review-1', decision: 'agree', note: null, occurred_at: timestamp, submitted_by: { principal_id: 'local-owner', principal_type: 'browser_user', permissions: ['portfolio:read'] } }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/feedback')) {
+        feedbackCalls += 1
+        return feedbackCalls === 1 ? Promise.reject(new Error('connection reset')) : emptyResponse(feedback, 201)
+      }
+      if (url.endsWith('/review-1')) return emptyResponse(url.includes('/portfolios/portfolio-b/') ? { ...review, portfolio_id: 'portfolio-b' } : firstReview)
+      return emptyResponse({ items: [url.includes('/portfolios/portfolio-b/') ? { ...review, portfolio_id: 'portfolio-b' } : firstReview], has_more: false })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const rendered = render(<Reviews portfolioId="portfolio-a" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} csrfToken="csrf-token" feedbackAttempts={attempts} onUnauthorized={vi.fn()} />)
+    await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => screen.getByRole('heading', { name: 'Record human feedback' }))
+    fireEvent.change(screen.getByLabelText('Optional note'), { target: { value: 'portfolio A draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => screen.getByRole('button', { name: 'Retry feedback' }))
+    const firstKey = new Headers(fetchMock.mock.calls.find(([input]) => String(input).includes('/feedback'))?.[1]?.headers as HeadersInit).get('Idempotency-Key')
+    rendered.rerender(<Reviews portfolioId="portfolio-b" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} csrfToken="csrf-token" feedbackAttempts={attempts} onUnauthorized={vi.fn()} />)
+    await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect((screen.getByLabelText('Optional note') as HTMLTextAreaElement).value).toBe(''))
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => screen.getByText(/Feedback recorded at/))
+    const secondKey = new Headers(fetchMock.mock.calls.filter(([input]) => String(input).includes('/feedback'))[1]?.[1]?.headers as HeadersInit).get('Idempotency-Key')
+    expect(secondKey).not.toBe(firstKey)
+    expect(JSON.parse(String(fetchMock.mock.calls.filter(([input]) => String(input).includes('/feedback'))[1]?.[1]?.body))).toEqual({ decision: 'agree', note: null })
   })
 
   it('fails closed when the detail changes immutable list content', async () => {

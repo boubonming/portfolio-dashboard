@@ -37,6 +37,10 @@ type ReviewProps = {
 export type FeedbackAttempt = { key: string; body: string }
 export type FeedbackAttemptStore = Map<string, FeedbackAttempt>
 
+function feedbackAttemptIdentity(portfolioId: string, reviewId: string) {
+  return `${portfolioId}\u0000${reviewId}`
+}
+
 const ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/
 const VERSION = ID
 const DECIMAL = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
@@ -215,7 +219,8 @@ function newIdempotencyKey() {
 }
 
 function ReviewDetail({ review, portfolioId, snapshot, csrfToken, onUnauthorized, detailRef, feedbackAttempts }: { review: Review; portfolioId: string; snapshot: OverviewSnapshot; csrfToken?: string; onUnauthorized: () => void; detailRef: RefObject<HTMLElement | null>; feedbackAttempts: FeedbackAttemptStore }) {
-  const storedAttempt = feedbackAttempts.get(review.review_id)
+  const attemptIdentity = feedbackAttemptIdentity(portfolioId, review.review_id)
+  const storedAttempt = feedbackAttempts.get(attemptIdentity)
   const storedDraft = (() => {
     if (!storedAttempt) return null
     try {
@@ -231,43 +236,47 @@ function ReviewDetail({ review, portfolioId, snapshot, csrfToken, onUnauthorized
   const attemptRef = useRef<FeedbackAttempt | null>(storedAttempt || null)
   const feedbackGeneration = useRef(0)
   const confirmationRef = useRef<HTMLParagraphElement>(null)
+  const retryRef = useRef<HTMLButtonElement>(null)
   const feedbackControllerRef = useRef<AbortController | null>(null)
   const discardAttempt = () => {
     attemptRef.current = null
-    if (feedbackAttempts.get(review.review_id)) feedbackAttempts.delete(review.review_id)
+    feedbackAttempts.delete(attemptIdentity)
     setReceipt(null)
   }
   const noteChanged = (value: string) => { setNote(value); discardAttempt(); if (feedbackState !== 'submitting') setFeedbackState('idle'); setFeedbackError('') }
   const changeDecision = (value: FeedbackDecision) => { setDecision(value); discardAttempt(); if (feedbackState !== 'submitting') setFeedbackState('idle'); setFeedbackError('') }
-  useEffect(() => { feedbackGeneration.current += 1; return () => { feedbackGeneration.current += 1; feedbackControllerRef.current?.abort(); feedbackControllerRef.current = null } }, [review.review_id])
+  useEffect(() => { feedbackGeneration.current += 1; return () => { feedbackGeneration.current += 1; feedbackControllerRef.current?.abort(); feedbackControllerRef.current = null } }, [attemptIdentity])
   useEffect(() => { detailRef.current?.focus() }, [detailRef, review.review_id])
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (feedbackState === 'submitting') return
     const bodyObject: { decision: FeedbackDecision; note: string | null } = { decision, note: note.trim() ? note.trim() : null }
     const body = JSON.stringify(bodyObject)
-    const attempt = attemptRef.current?.body === body ? attemptRef.current : { key: newIdempotencyKey(), body }
-    attemptRef.current = attempt
-    feedbackAttempts.set(review.review_id, attempt)
-    const generation = ++feedbackGeneration.current
-    feedbackControllerRef.current?.abort()
-    const controller = new AbortController()
-    feedbackControllerRef.current = controller
     setFeedbackState('submitting'); setFeedbackError('')
+    let controller: AbortController | null = null
+    let generation = 0
     try {
+      const attempt = attemptRef.current?.body === body ? attemptRef.current : { key: newIdempotencyKey(), body }
+      attemptRef.current = attempt
+      feedbackAttempts.set(attemptIdentity, attempt)
+      generation = ++feedbackGeneration.current
+      feedbackControllerRef.current?.abort()
+      controller = new AbortController()
+      feedbackControllerRef.current = controller
       const response = await apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioId)}/reviews/${encodeURIComponent(review.review_id)}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': attempt.key }, body: attempt.body, csrfToken, signal: controller.signal })
       const parsed = await jsonResponse<unknown>(response)
       const validated = validateFeedback(parsed, portfolioId, review.review_id, bodyObject)
       if (generation !== feedbackGeneration.current) return
       setReceipt(validated); setFeedbackState('success'); attemptRef.current = null
-      if (feedbackAttempts.get(review.review_id)?.key === attempt.key) feedbackAttempts.delete(review.review_id)
+      if (feedbackAttempts.get(attemptIdentity)?.key === attempt.key) feedbackAttempts.delete(attemptIdentity)
       window.setTimeout(() => confirmationRef.current?.focus(), 0)
     } catch (reason) {
-      if (generation !== feedbackGeneration.current) return
+      if (controller && generation !== feedbackGeneration.current) return
       if (reason instanceof APIError && reason.status === 401) { onUnauthorized(); return }
       setFeedbackState('error'); setFeedbackError(reason instanceof Error && !(reason instanceof APIError) ? reason.message : errorMessage(reason, 'record feedback'))
+      window.setTimeout(() => retryRef.current?.focus(), 0)
     } finally {
-      if (feedbackControllerRef.current === controller) feedbackControllerRef.current = null
+      if (controller && feedbackControllerRef.current === controller) feedbackControllerRef.current = null
     }
   }
   return <article className="review-detail" ref={detailRef as RefObject<HTMLElement>} tabIndex={-1} aria-labelledby={`review-detail-${review.review_id}`}>
@@ -288,7 +297,7 @@ function ReviewDetail({ review, portfolioId, snapshot, csrfToken, onUnauthorized
     <section className="feedback-panel" aria-labelledby={`feedback-title-${review.review_id}`}><h4 id={`feedback-title-${review.review_id}`}>Record human feedback</h4><p className="muted">Feedback is an append-only event and does not edit this review. “Request another review” records feedback only; it does not schedule a review.</p><form onSubmit={submit}>
       <fieldset disabled={feedbackState === 'submitting'}><legend>Decision</legend><div className="feedback-options">{feedbackDecisions.map((value) => <label key={value}><input type="radio" name={`feedback-${review.review_id}`} value={value} checked={decision === value} onChange={() => changeDecision(value)} /> {value.replaceAll('_', ' ')}</label>)}</div>
       <label htmlFor={`feedback-note-${review.review_id}`}>Optional note</label><textarea id={`feedback-note-${review.review_id}`} value={note} maxLength={2000} onChange={(event) => noteChanged(event.target.value)} /></fieldset>
-      {feedbackError && <p className="notice error" role="alert">{feedbackError} <button type="submit" formNoValidate>Retry feedback</button></p>}
+      {feedbackError && <p className="notice error" role="alert">{feedbackError} <button ref={retryRef} type="submit" formNoValidate>Retry feedback</button></p>}
       <button type="submit" disabled={feedbackState === 'submitting'} aria-busy={feedbackState === 'submitting'}>{feedbackState === 'submitting' ? 'Recording feedback…' : 'Record feedback'}</button>
       {receipt && <p ref={confirmationRef} className="notice success" role="status" tabIndex={-1}>Feedback recorded at <time dateTime={receipt.occurred_at}>{displayDate(receipt.occurred_at)}</time>. Receipt {receipt.feedback_id}.</p>}
     </form></section>
@@ -394,6 +403,6 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
     {page?.has_more && !appendError && <button type="button" onClick={() => load(page.next_cursor, true)} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more reviews…' : 'Load more reviews'}</button>}
     {selectedId && detailState === 'loading' && <p role="status" aria-live="polite">Loading review detail…</p>}
     {selectedId && detailState === 'error' && <p className="notice error" role="alert">Unable to load review detail: {detailError} <button type="button" onClick={() => selectReview(selectedId)}>Retry review detail</button></p>}
-    {detail && <><button type="button" onClick={closeDetail}>Close review detail</button><ReviewDetail key={detail.review_id} review={detail} portfolioId={portfolioId} snapshot={snapshot} csrfToken={csrfToken} onUnauthorized={onUnauthorized} detailRef={detailRef} feedbackAttempts={feedbackAttemptStore} /></>}
+    {detail && <><button type="button" onClick={closeDetail}>Close review detail</button><ReviewDetail key={`${portfolioId}:${detail.review_id}`} review={detail} portfolioId={portfolioId} snapshot={snapshot} csrfToken={csrfToken} onUnauthorized={onUnauthorized} detailRef={detailRef} feedbackAttempts={feedbackAttemptStore} /></>}
   </section>
 }
