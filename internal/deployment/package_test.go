@@ -3,6 +3,7 @@ package deployment_test
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -170,6 +171,36 @@ func TestDockerfileProductionInvariants(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(dockerfile), "curl") || strings.Contains(strings.ToLower(dockerfile), "wget") {
 		t.Error("runtime package must not add curl or wget for healthchecks")
+	}
+}
+
+func TestFrontendArtifactPathMatchesDockerfile(t *testing.T) {
+	viteConfig := repoFile(t, "frontend/vite.config.ts")
+	outDir := regexp.MustCompile(`(?m)\boutDir:\s*['"]([^'"]+)['"]`).FindStringSubmatch(viteConfig)
+	if len(outDir) != 2 {
+		t.Fatalf("frontend Vite config does not declare one build.outDir")
+	}
+
+	dockerfile := repoFile(t, "Dockerfile")
+	frontendStage := regexp.MustCompile(`(?ms)^FROM [^\n]+ AS frontend-build\n(.*?)^FROM `).FindStringSubmatch(dockerfile)
+	if len(frontendStage) != 2 {
+		t.Fatalf("Dockerfile does not declare a frontend-build stage")
+	}
+	workdir := regexp.MustCompile(`(?m)^WORKDIR\s+(\S+)\s*$`).FindStringSubmatch(frontendStage[1])
+	if len(workdir) != 2 {
+		t.Fatalf("frontend-build stage does not declare a WORKDIR")
+	}
+
+	copy := regexp.MustCompile(`(?m)^COPY --from=frontend-build\s+(\S+)\s+(\S+)\s*$`).FindStringSubmatch(dockerfile)
+	if len(copy) != 3 {
+		t.Fatalf("Dockerfile does not copy one frontend-build artifact")
+	}
+	wantSource := path.Join(workdir[1], outDir[1])
+	if copy[1] != wantSource {
+		t.Fatalf("frontend artifact source = %q, want resolved Vite output %q", copy[1], wantSource)
+	}
+	if copy[2] != "./internal/web/dist" {
+		t.Fatalf("frontend artifact destination = %q, want Go embed path ./internal/web/dist", copy[2])
 	}
 }
 

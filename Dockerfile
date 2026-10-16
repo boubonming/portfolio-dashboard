@@ -22,7 +22,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
-COPY --from=frontend-build /src/frontend/dist ./internal/web/dist
+COPY --from=frontend-build /src/internal/web/dist ./internal/web/dist
 RUN go build -trimpath -buildvcs=false -ldflags='-s -w' -o /out/portfolio-dashboard ./cmd/portfolio-dashboard
 
 FROM ${RUNTIME_IMAGE} AS runtime
