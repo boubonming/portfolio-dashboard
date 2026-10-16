@@ -35,6 +35,9 @@ func NewHandlerWithAuth(database *store.Store, config auth.Config) (http.Handler
 		if err := database.SetActivityCursorSecret(authenticator.ActivityCursorSecret()); err != nil {
 			return nil, err
 		}
+		if err := database.SetReviewCursorSecret(authenticator.ReviewCursorSecret()); err != nil {
+			return nil, err
+		}
 		if err := database.RegisterMachinePrincipalIdentity(context.Background(), authenticator.MachinePrincipal()); err != nil {
 			return nil, err
 		}

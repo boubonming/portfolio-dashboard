@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
@@ -352,6 +353,23 @@ func TestReviewHTTPNormalizedCorruptionMatrix(t *testing.T) {
 			prepareReviewCorruption(t, database, result.ReviewID)
 			tc.mutate(t, database, result.ReviewID)
 			before := reviewHTTPCounts(t, database)
+			readShouldRemainAvailable := strings.HasPrefix(tc.name, "idempotency-")
+			for _, path := range []string{"/api/v1/portfolios/portfolio-api/reviews", "/api/v1/portfolios/portfolio-api/reviews/" + result.ReviewID} {
+				read := reviewBoundaryRequest(handler, http.MethodGet, path, reviewBoundarySecret, "", "", nil)
+				if readShouldRemainAvailable {
+					if read.Code != http.StatusOK {
+						t.Fatalf("read status=%d body=%s", read.Code, read.Body.String())
+					}
+				} else {
+					assertPhaseDError(t, read, http.StatusInternalServerError, "internal_error")
+					if bytes.Contains(read.Body.Bytes(), []byte(result.ReviewID)) || bytes.Contains(read.Body.Bytes(), []byte("rationale")) {
+						t.Fatalf("read corruption leaked content: %s", read.Body.String())
+					}
+				}
+			}
+			if after := reviewHTTPCounts(t, database); !reflect.DeepEqual(after, before) {
+				t.Fatalf("read changed counts before=%v after=%v", before, after)
+			}
 			replay := reviewBoundaryRequest(handler, http.MethodPost, "/api/v1/portfolios/portfolio-api/reviews", reviewBoundarySecret, "corrupt-"+tc.name+"-key", "application/json", body)
 			assertPhaseDError(t, replay, http.StatusInternalServerError, "internal_error")
 			if bytes.Contains(replay.Body.Bytes(), []byte(result.ReviewID)) || bytes.Contains(replay.Body.Bytes(), []byte("rationale")) {

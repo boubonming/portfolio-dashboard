@@ -134,6 +134,15 @@ func (a *Authenticator) ActivityCursorSecret() []byte {
 	return mac.Sum(nil)
 }
 
+// ReviewCursorSecret derives a separate key for immutable review cursors. The
+// session secret remains the only configured high-entropy secret, while domain
+// separation prevents cursor tokens from being valid in another namespace.
+func (a *Authenticator) ReviewCursorSecret() []byte {
+	mac := hmac.New(sha256.New, a.secret)
+	_, _ = mac.Write([]byte("portfolio-dashboard/review-cursor/v1"))
+	return mac.Sum(nil)
+}
+
 func (a *Authenticator) MachinePrincipal() MachinePrincipal {
 	return a.config.Machine.Principal()
 }

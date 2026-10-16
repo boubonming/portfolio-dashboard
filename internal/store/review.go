@@ -63,16 +63,34 @@ func ReviewFingerprint(submission domain.ReviewSubmission) (string, error) {
 }
 
 func canonicalReviewSubmission(submission domain.ReviewSubmission) domain.ReviewSubmission {
-	if submission.Scope.HoldingIDs == nil { submission.Scope.HoldingIDs = []string{} }
-	if submission.Scope.InstrumentIDs == nil { submission.Scope.InstrumentIDs = []string{} }
-	if submission.Risks == nil { submission.Risks = []string{} }
-	if submission.Counterarguments == nil { submission.Counterarguments = []string{} }
-	if submission.Conditions == nil { submission.Conditions = []string{} }
-	if submission.Metrics == nil { submission.Metrics = []domain.ReviewMetric{} }
-	if submission.SourcedFacts == nil { submission.SourcedFacts = []domain.SourcedFact{} }
-	if submission.Evidence == nil { submission.Evidence = []domain.ReviewEvidence{} }
+	if submission.Scope.HoldingIDs == nil {
+		submission.Scope.HoldingIDs = []string{}
+	}
+	if submission.Scope.InstrumentIDs == nil {
+		submission.Scope.InstrumentIDs = []string{}
+	}
+	if submission.Risks == nil {
+		submission.Risks = []string{}
+	}
+	if submission.Counterarguments == nil {
+		submission.Counterarguments = []string{}
+	}
+	if submission.Conditions == nil {
+		submission.Conditions = []string{}
+	}
+	if submission.Metrics == nil {
+		submission.Metrics = []domain.ReviewMetric{}
+	}
+	if submission.SourcedFacts == nil {
+		submission.SourcedFacts = []domain.SourcedFact{}
+	}
+	if submission.Evidence == nil {
+		submission.Evidence = []domain.ReviewEvidence{}
+	}
 	for index := range submission.SourcedFacts {
-		if submission.SourcedFacts[index].EvidenceIDs == nil { submission.SourcedFacts[index].EvidenceIDs = []string{} }
+		if submission.SourcedFacts[index].EvidenceIDs == nil {
+			submission.SourcedFacts[index].EvidenceIDs = []string{}
+		}
 	}
 	return submission
 }
@@ -893,32 +911,42 @@ func loadReviewTargets(ctx context.Context, q reviewQueryer, portfolioID, review
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	type reviewTargetRow struct {
+		ordinal                                     int
+		portfolioID, snapshotID, calculationVersion string
+		holdingID, instrumentID                     string
+	}
+	targetRows := make([]reviewTargetRow, 0)
 	want := 0
-	seenHoldings, seenInstruments := map[string]bool{}, map[string]bool{}
 	for rows.Next() {
-		var ordinal int
-		var rowPortfolioID, rowSnapshotID, rowCalculationVersion, holdingID, instrumentID string
-		if err := rows.Scan(&ordinal, &rowPortfolioID, &rowSnapshotID, &rowCalculationVersion, &holdingID, &instrumentID); err != nil {
+		var row reviewTargetRow
+		if err := rows.Scan(&row.ordinal, &row.portfolioID, &row.snapshotID, &row.calculationVersion, &row.holdingID, &row.instrumentID); err != nil {
 			return ErrReviewCorrupt
 		}
-		if rowPortfolioID != portfolioID || rowSnapshotID != snapshotID || rowCalculationVersion != calculationVersion || ordinal != want || !validReviewID(holdingID, 128) || !validReviewID(instrumentID, 128) || seenHoldings[holdingID] || seenInstruments[instrumentID] || want >= 100 {
+		targetRows = append(targetRows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	seenHoldings, seenInstruments := map[string]bool{}, map[string]bool{}
+	for _, row := range targetRows {
+		if row.portfolioID != portfolioID || row.snapshotID != snapshotID || row.calculationVersion != calculationVersion || row.ordinal != want || !validReviewID(row.holdingID, 128) || !validReviewID(row.instrumentID, 128) || seenHoldings[row.holdingID] || seenInstruments[row.instrumentID] || want >= 100 {
 			return ErrReviewCorrupt
 		}
 		var members int
-		if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM snapshot_holdings WHERE portfolio_id=? AND snapshot_id=? AND holding_id=? AND instrument_id=?`, portfolioID, snapshotID, holdingID, instrumentID).Scan(&members); err != nil {
+		if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM snapshot_holdings WHERE portfolio_id=? AND snapshot_id=? AND holding_id=? AND instrument_id=?`, portfolioID, snapshotID, row.holdingID, row.instrumentID).Scan(&members); err != nil {
 			return err
 		}
 		if members != 1 {
 			return ErrReviewCorrupt
 		}
-		seenHoldings[holdingID], seenInstruments[instrumentID] = true, true
-		scope.HoldingIDs = append(scope.HoldingIDs, holdingID)
-		scope.InstrumentIDs = append(scope.InstrumentIDs, instrumentID)
+		seenHoldings[row.holdingID], seenInstruments[row.instrumentID] = true, true
+		scope.HoldingIDs = append(scope.HoldingIDs, row.holdingID)
+		scope.InstrumentIDs = append(scope.InstrumentIDs, row.instrumentID)
 		want++
-	}
-	if err := rows.Err(); err != nil {
-		return err
 	}
 	if scope.Type == "portfolio" && want != 0 {
 		return ErrReviewCorrupt
