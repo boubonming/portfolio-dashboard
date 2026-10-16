@@ -19,6 +19,8 @@ import (
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 )
 
+const reviewFixtureTimestampFormat = "2006-01-02T15:04:05.000000000Z"
+
 // These tests intentionally use the shipped review and activity HTTP handlers.
 // Store calls only create valid fixture rows; no cursor or authorization helper
 // is tested in isolation here.
@@ -71,6 +73,10 @@ func submitReviewFixture(t *testing.T, database *store.Store, submission domain.
 }
 
 func boolPointer(value bool) *bool { return &value }
+
+func canonicalReviewFixtureTimestamp(value time.Time) string {
+	return value.UTC().Format(reviewFixtureTimestampFormat)
+}
 
 func containsString(values []string, want string) bool {
 	for _, value := range values {
@@ -322,7 +328,8 @@ func TestReviewHTTPReviewCursorPersistenceIsolationAndNamespaceMatrix(t *testing
 	}
 	different := reviewMachineRequest(differentSecretHandler, http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews?limit=1&cursor="+cursor, reviewBoundarySecret)
 	assertReviewHTTPError(t, different, http.StatusBadRequest, "invalid_request")
-	if _, err := reopened.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-cursor-foreign", "Cursor Foreign", "MYR", time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	foreignNow := canonicalReviewFixtureTimestamp(time.Now().UTC())
+	if _, err := reopened.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-cursor-foreign", "Cursor Foreign", "MYR", foreignNow, foreignNow); err != nil {
 		t.Fatal(err)
 	}
 	foreignHandler, err := NewHandlerWithAuth(reopened, auth.Config{Username: "fixture-user", PasswordHash: sessionPasswordHash(t), SessionSecret: fixtureSessionSecret(), PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour, Machine: auth.MachineConfig{PrincipalID: "cursor-foreign-machine", PortfolioID: "portfolio-cursor-foreign", BearerSecret: reviewBoundarySecret, PortfolioRead: true, ReviewsWrite: true}})
@@ -560,10 +567,11 @@ func TestReviewHTTPFilterCombinationAndCursorBindingMatrix(t *testing.T) {
 	// Add a newer immutable snapshot through the production/store setup. The
 	// changed quote and calculation version ensure this is a distinct snapshot;
 	// all three reviews above remain historical and the review below is current.
-	if _, err := database.AddQuote(context.Background(), store.QuoteInput{ID: "filter-current-quote", InstrumentID: "instrument-api", Price: "124.4500", Currency: "USD", Source: "fixture", MarketAt: time.Now().UTC().Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {
+	currentNow := time.Now().UTC()
+	if _, err := database.AddQuote(context.Background(), store.QuoteInput{ID: "filter-current-quote", InstrumentID: "instrument-api", Price: "124.4500", Currency: "USD", Source: "fixture", MarketAt: canonicalReviewFixtureTimestamp(currentNow), Basis: "close", Provenance: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	currentStatus, err := database.CreateSnapshot(context.Background(), store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "MYR", CalculationVersion: "review.v2", AsOf: time.Now().UTC(), MaxAge: 2 * time.Hour})
+	currentStatus, err := database.CreateSnapshot(context.Background(), store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "MYR", CalculationVersion: "review.v2", AsOf: currentNow, MaxAge: 2 * time.Hour})
 	if err != nil || !currentStatus.Complete {
 		t.Fatalf("current snapshot=%+v err=%v", currentStatus, err)
 	}
@@ -654,7 +662,8 @@ func TestReviewHTTPFilterCombinationAndCursorBindingMatrix(t *testing.T) {
 func TestReviewHTTPForeignPortfolioFilterDoesNotDisclose(t *testing.T) {
 	handler, database, _, _ := reviewBoundaryFixture(t)
 	defer database.Close()
-	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-api-other", "Other", "MYR", time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	foreignNow := canonicalReviewFixtureTimestamp(time.Now().UTC())
+	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-api-other", "Other", "MYR", foreignNow, foreignNow); err != nil {
 		t.Fatal(err)
 	}
 	response := reviewMachineRequest(handler, http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews?holding_id=foreign-holding", reviewBoundarySecret)
@@ -668,7 +677,7 @@ func TestReviewHTTPForeignPortfolioFilterDoesNotDisclose(t *testing.T) {
 func TestReviewHTTPPathAndMethodErrorMatrixRemainsNested(t *testing.T) {
 	handler, database, submission, _ := reviewBoundaryFixture(t)
 	defer database.Close()
-	foreignNow := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	foreignNow := canonicalReviewFixtureTimestamp(time.Now().UTC().Add(-time.Hour))
 	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-api-other", "Other", "MYR", foreignNow, foreignNow); err != nil {
 		t.Fatal(err)
 	}
