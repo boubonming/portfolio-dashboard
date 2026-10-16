@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, RefObject } from 'react'
 import { apiFetch, APIError, jsonResponse } from './api'
 import ThesisEditor from './ThesisEditor'
-import Reviews from './Reviews'
+import Reviews, { type FeedbackAttemptStore } from './Reviews'
 
 export type Freshness = {
   status: 'fresh' | 'stale' | 'missing' | 'future' | 'invalid' | string
@@ -396,6 +396,7 @@ export default function App() {
   const loadGeneration = useRef(0)
   const activityGeneration = useRef(0)
   const exportGeneration = useRef(0)
+  const feedbackAttemptsRef = useRef<FeedbackAttemptStore>(new Map())
   const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const clearPrivateState = useCallback(() => {
@@ -413,6 +414,7 @@ export default function App() {
     exportControllerRef.current = null
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
+    feedbackAttemptsRef.current.clear()
     activityLoadingMoreRef.current = false
     activityItemsRef.current = []
     setData(null); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
@@ -844,7 +846,7 @@ export default function App() {
       )}
       </>}
       {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={(keyboardActivated) => loadActivity(activity?.next_cursor, true, keyboardActivated)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
-      {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} onUnauthorized={handleThesisUnauthorized} onBackToOverview={closeReviews} />}
+      {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} feedbackAttempts={feedbackAttemptsRef.current} onUnauthorized={handleThesisUnauthorized} onBackToOverview={closeReviews} />}
       </>}
     </main>
   )

@@ -23,6 +23,11 @@ const emptyResponse = (body: unknown, status = 200) => Promise.resolve({ ok: sta
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('Phase D review contract validation', () => {
+  it('rejects portfolio-wide and wrong-lot items when an exact holding filter is active', () => {
+    expect(() => validateReviewPage({ items: [{ ...review, scope: { type: 'portfolio', holding_ids: [], instrument_ids: [] } }], has_more: false }, 'portfolio-default', 'lot-b')).toThrow(/holding filter/i)
+    expect(() => validateReviewPage({ items: [{ ...review, scope: { type: 'holding', holding_ids: ['lot-a'], instrument_ids: ['instrument-a'] } }], has_more: false }, 'portfolio-default', 'lot-b')).toThrow(/holding filter/i)
+  })
+
   it('fails closed for contradictory lifecycle and unsafe evidence URLs', () => {
     expect(() => validateReview({ ...review, lifecycle: { ...review.lifecycle, current_snapshot_id: 'snap-2', outdated: false } })).toThrow(/lifecycle/i)
     expect(() => validateReview({ ...review, evidence: [{ ...review.evidence[0], url: 'http://example.test' }] })).toThrow(/URL/i)
@@ -80,6 +85,61 @@ describe('Phase D review contract validation', () => {
     await waitFor(() => screen.getByText(/Feedback recorded at/))
     const secondKey = new Headers(fetchMock.mock.calls[3]?.[1]?.headers as HeadersInit).get('Idempotency-Key')
     expect(secondKey).toBe(firstKey)
+  })
+
+  it('fails closed when the detail changes immutable list content', async () => {
+    const changed = { ...review, rationale: 'Changed after list response' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/review-1') ? emptyResponse(changed) : emptyResponse({ items: [review], has_more: false }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/does not match the selected list review/i))
+    expect(screen.queryByRole('heading', { name: 'Record human feedback' })).toBeNull()
+  })
+
+  it('does not report success for a receipt with a different decision or note', async () => {
+    const mismatched = { feedback_id: 'feedback-1', portfolio_id: 'portfolio-default', review_id: 'review-1', decision: 'disagree', note: 'other', occurred_at: timestamp, submitted_by: { principal_id: 'local-owner', principal_type: 'browser_user', permissions: ['portfolio:read'] } }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/feedback') ? emptyResponse(mismatched, 201) : String(input).endsWith('/review-1') ? emptyResponse(review) : emptyResponse({ items: [review], has_more: false }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => screen.getByRole('heading', { name: 'Record human feedback' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/does not match the submitted attempt/i))
+    expect(screen.queryByText(/Feedback recorded at/)).toBeNull()
+  })
+
+  it('keeps an uncertain attempt key and canonical draft across detail close and reopen', async () => {
+    let feedbackAttempts = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/feedback')) {
+        feedbackAttempts += 1
+        if (feedbackAttempts === 1) return Promise.reject(new Error('connection reset'))
+        return emptyResponse({ feedback_id: 'feedback-2', portfolio_id: 'portfolio-default', review_id: 'review-1', decision: 'agree', note: 'keep this', occurred_at: timestamp, submitted_by: { principal_id: 'local-owner', principal_type: 'browser_user', permissions: ['portfolio:read'] } }, 201)
+      }
+      return String(input).endsWith('/review-1') ? emptyResponse(review) : emptyResponse({ items: [review], has_more: false })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => screen.getByRole('heading', { name: 'Record human feedback' }))
+    fireEvent.change(screen.getByLabelText('Optional note'), { target: { value: '  keep this  ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => screen.getByRole('button', { name: 'Retry feedback' }))
+    const firstFeedbackCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/feedback'))
+    const firstKey = new Headers(firstFeedbackCall?.[1]?.headers as HeadersInit).get('Idempotency-Key')
+    fireEvent.click(screen.getByRole('button', { name: 'Close review detail' }))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect((screen.getByLabelText('Optional note') as HTMLTextAreaElement).value).toBe('keep this'))
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => screen.getByText(/Feedback recorded at/))
+    const feedbackCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes('/feedback'))
+    const secondKey = new Headers(feedbackCalls[1]?.[1]?.headers as HeadersInit).get('Idempotency-Key')
+    expect(secondKey).toBe(firstKey)
+    expect(JSON.parse(String(feedbackCalls[1]?.[1]?.body))).toEqual({ decision: 'agree', note: 'keep this' })
   })
 
   it('renders outdated and no-current lifecycle states without claiming current identity', async () => {
