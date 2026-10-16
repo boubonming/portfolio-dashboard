@@ -106,7 +106,7 @@ function validateAttribution(value: unknown): Review['submitted_by'] {
   exactKeys(candidate, ['principal_id', 'principal_type', 'permissions'])
   if (!identifier(candidate.principal_id) || !['browser_user', 'machine'].includes(String(candidate.principal_type))) throw new Error('Invalid review attribution')
   const permissions = uniqueStrings(candidate.permissions, (item) => item === 'portfolio:read' || item === 'reviews:write', 1, 2) as Review['submitted_by']['permissions']
-  if ((candidate.principal_type === 'machine' && permissions[0] !== 'reviews:write') || (candidate.principal_type === 'browser_user' && (candidate.principal_id !== 'local-owner' || permissions.length !== 1 || permissions[0] !== 'portfolio:read'))) throw new Error('Invalid review attribution')
+  if ((candidate.principal_type === 'machine' && !permissions.includes('reviews:write')) || (candidate.principal_type === 'browser_user' && (candidate.principal_id !== 'local-owner' || permissions.length !== 1 || permissions[0] !== 'portfolio:read'))) throw new Error('Invalid review attribution')
   return { principal_id: candidate.principal_id, principal_type: candidate.principal_type as Review['submitted_by']['principal_type'], permissions }
 }
 function validateLifecycle(value: unknown, snapshotId: string, status: Review['status']): Review['lifecycle'] {
@@ -114,7 +114,7 @@ function validateLifecycle(value: unknown, snapshotId: string, status: Review['s
   exactKeys(candidate, ['historical_status', 'current_snapshot_id', 'outdated'])
   if (candidate.historical_status !== status || (candidate.current_snapshot_id !== null && !identifier(candidate.current_snapshot_id)) || typeof candidate.outdated !== 'boolean') throw new Error('Contradictory review lifecycle')
   const current = candidate.current_snapshot_id as string | null
-  if ((current === null || current === snapshotId) !== (candidate.outdated === false)) throw new Error('Contradictory review lifecycle')
+  if (current === null ? candidate.outdated !== false : current === snapshotId ? candidate.outdated !== false : candidate.outdated !== true) throw new Error('Contradictory review lifecycle')
   return { historical_status: status, current_snapshot_id: current, outdated: candidate.outdated as boolean }
 }
 export function validateReview(value: unknown): Review {
@@ -146,7 +146,7 @@ export function validateReview(value: unknown): Review {
   if (!bounded(model.provider, 1, 128) || !/^[A-Za-z0-9][A-Za-z0-9._~-]*$/.test(model.provider) || !bounded(model.model, 1, 256) || !/^[A-Za-z0-9][A-Za-z0-9._~:/-]*$/.test(model.model) || !bounded(model.version, 1, 128) || model.runtime !== 'hermes-environment') throw new Error('Invalid model provenance')
   if (status === 'complete' && (evidence.length < 1 || evidence.some((item) => item.availability !== 'available' || item.freshness !== 'current') || sourcedFacts.length < 1)) throw new Error('Invalid complete review')
   const submittedBy = validateAttribution(candidate.submitted_by)
-  if (submittedBy.principal_type !== 'machine' || submittedBy.permissions[0] !== 'reviews:write') throw new Error('Invalid review attribution')
+  if (submittedBy.principal_type !== 'machine' || !submittedBy.permissions.includes('reviews:write')) throw new Error('Invalid review attribution')
   const lifecycle = validateLifecycle(candidate.lifecycle, candidate.snapshot_id, status)
   return { review_id: candidate.review_id, portfolio_id: candidate.portfolio_id, snapshot_id: candidate.snapshot_id, calculation_version: candidate.calculation_version, scope, status, recommendation: candidate.recommendation as Review['recommendation'], rationale: candidate.rationale, risks, counterarguments, conditions, metrics, sourced_facts: sourcedFacts, model_opinion: candidate.model_opinion, evidence, model: model as Review['model'], generated_at: candidate.generated_at, submitted_at: candidate.submitted_at, submitted_by: submittedBy, lifecycle }
 }
@@ -159,11 +159,15 @@ function canonicalValue(value: unknown): string {
 }
 
 function sameReview(left: Review, right: Review) {
-  return canonicalValue(left) === canonicalValue(right)
+  const immutable = (review: Review) => {
+    const { lifecycle: _lifecycle, ...content } = review
+    return content
+  }
+  return canonicalValue(immutable(left)) === canonicalValue(immutable(right))
 }
 
 function matchesHoldingFilter(review: Review, holdingId: string) {
-  return review.scope.type === 'holding' && review.scope.holding_ids.length === 1 && review.scope.holding_ids[0] === holdingId && review.scope.instrument_ids.length === 1
+  return review.scope.type === 'holding' && review.scope.holding_ids.length === review.scope.instrument_ids.length && review.scope.holding_ids.includes(holdingId)
 }
 
 export function validateReviewPage(value: unknown, portfolioId: string, holdingId?: string): ReviewPage {
@@ -309,6 +313,7 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
   const [detail, setDetail] = useState<Review | null>(null)
   const [detailState, setDetailState] = useState<ReviewState>('ready')
   const [detailError, setDetailError] = useState('')
+  const [listAnnouncement, setListAnnouncement] = useState('')
   const listGeneration = useRef(0)
   const detailGeneration = useRef(0)
   const listController = useRef<AbortController | null>(null)
@@ -332,7 +337,7 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
     const generation = ++listGeneration.current
     listController.current?.abort()
     const controller = new AbortController(); listController.current = controller
-    if (append) { loadingMoreRef.current = true; setLoadingMore(true); setAppendError('') } else { loadingMoreRef.current = false; setState('loading'); setPage(null); itemsRef.current = []; setError(''); setAppendError(''); setSelectedId(null); setDetail(null) }
+    if (append) { loadingMoreRef.current = true; setLoadingMore(true); setAppendError('') } else { loadingMoreRef.current = false; setState('loading'); setPage(null); itemsRef.current = []; setError(''); setAppendError(''); setListAnnouncement(''); setSelectedId(null); setDetail(null) }
     if (!append) paginationCursorsRef.current.clear()
     if (cursor) paginationCursorsRef.current.add(cursor)
     const params = new URLSearchParams({ limit: '20' }); if (cursor) params.set('cursor', cursor); if (holdingId) params.set('holding_id', holdingId)
@@ -351,7 +356,7 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
         if (append && nextPage.has_more && appended === 0) throw new Error('Review pagination made no progress')
         if (nextPage.has_more && (!nextPage.next_cursor || paginationCursorsRef.current.has(nextPage.next_cursor))) throw new Error('Review pagination returned a repeated cursor')
         itemsRef.current = items; setPage({ ...nextPage, items }); setState('ready'); loadingMoreRef.current = false; setLoadingMore(false); setAppendError('')
-        if (append) { listStatusRef.current?.focus(); listStatusRef.current && (listStatusRef.current.textContent = `Loaded ${appended} more review${appended === 1 ? '' : 's'}.`) }
+        if (append) { setListAnnouncement(`Loaded ${appended} more review${appended === 1 ? '' : 's'}.`); listStatusRef.current?.focus() }
       }).catch((reason: unknown) => {
         if (controller.signal.aborted || generation !== listGeneration.current) return
         if (reason instanceof APIError && reason.status === 401) { onUnauthorized(); return }
@@ -380,7 +385,7 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
   const renderedItems = page?.items || []
   return <section className="reviews-card" aria-labelledby="reviews-title">
     <div className="section-heading"><div><span className="eyebrow">Immutable advisory analysis</span><h2 id="reviews-title">Reviews</h2></div><div className="review-actions">{holdingId && <span className="filter-chip">Filtered to exact lot {holdingId}</span>}{onBackToOverview && <button type="button" onClick={onBackToOverview}>Back to overview</button>}</div></div>
-    <p ref={listStatusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}> </p>
+    <p ref={listStatusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}>{listAnnouncement}</p>
     {state === 'loading' && <p role="status" aria-live="polite">Loading reviews…</p>}
     {state === 'error' && <p className="notice error" role="alert">Unable to load reviews: {error} <button type="button" onClick={() => load(undefined, false)}>Try again</button></p>}
     {state === 'ready' && renderedItems.length === 0 && <p className="empty">No reviews match this portfolio or holding filter.</p>}
