@@ -19,7 +19,7 @@ No local multi-platform image build is claimed by this repository. The pull-requ
 ## Operator setup
 
 1. After the merged-main job succeeds, copy `deploy/compose.private.example.yml` to `deploy/compose.private.yml` and replace the image line with the exact published reference, retaining both the full commit tag and the `@sha256:` digest from the workflow summary.
-2. Copy `deploy/private.env.example` to `deploy/private.env`, set mode `0600`, and replace every `REPLACE_WITH_*` value. The Compose command must receive this file with `--env-file` because the required interpolation values are intentionally not committed:
+2. Copy `deploy/private.env.example` to `deploy/private.env`, set mode `0600`, and replace the required `REPLACE_WITH_*` values. Leave optional machine/provider entries blank unless enabling those features. Set `PORTFOLIO_DATA_DIR` to an operator-owned directory; the example already supplies safe defaults for container UID/GID (`65532`), host port (`8080`), and reporting currency (`MYR`). The Compose command must receive this file with `--env-file` because the interpolation values are intentionally not committed:
 
    ```sh
    cp deploy/private.env.example deploy/private.env
@@ -28,7 +28,7 @@ No local multi-platform image build is claimed by this repository. The pull-requ
    docker compose --env-file deploy/private.env -f deploy/compose.private.yml config
    ```
 
-   The exact `https://host[:port]` public origin, login username, bcrypt password hash, and independent random session secret are required. Leave machine credentials and provider keys blank unless their feature is explicitly enabled. Provider keys and the optional machine bearer secret are injected from the private environment file only; they are not in the image, SQLite database, URLs, or logs.
+   The exact `https://host[:port]` public origin, login username, bcrypt password hash, and independent random session secret are required. Leave machine credentials and provider keys blank unless their feature is explicitly enabled. Provider keys and the optional machine bearer secret are injected from the private environment file only; they are not in the image, SQLite database, URLs, or logs. Both machine grant flags must remain `false` while machine credentials are blank.
 3. Choose the host data directory and numeric container identity. The default container identity is UID/GID `65532`; if the deployment user has different IDs, set `PORTFOLIO_CONTAINER_UID` and `PORTFOLIO_CONTAINER_GID` in the private environment file before creating the directory. Make the bind mount owned by those same IDs so SQLite is created and migrated by the application user, not root:
 
    ```sh
@@ -44,7 +44,7 @@ No local multi-platform image build is claimed by this repository. The pull-requ
    docker compose --env-file deploy/private.env -f deploy/compose.private.yml ps
    ```
 
-The runtime image runs as non-root with a read-only root filesystem, a bounded non-executable `/tmp`, no Linux capabilities, and `no-new-privileges`. Only `/data` is writable. The image healthcheck invokes the application binary's restricted `healthcheck` command, which can call only an HTTP(S) `/healthz` URL, has a bounded timeout, reads at most 4 KiB, and accepts only HTTP 200.
+The runtime image runs as non-root with a read-only root filesystem, a bounded non-executable `/tmp`, no Linux capabilities, and `no-new-privileges`. Only `/data` is writable. The image healthcheck invokes the application binary's restricted `healthcheck` command, which can call only an HTTP(S) `/healthz` URL on literal loopback with an explicit port, never follows redirects or environment proxies, has a bounded timeout, reads at most 4 KiB, and accepts only HTTP 200.
 
 ## After publication: verify the immutable result
 

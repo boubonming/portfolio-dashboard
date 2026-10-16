@@ -12,6 +12,8 @@ on:
       - "cmd/**"
       - "internal/**"
       - "frontend/**"
+      - "deploy/**"
+      - "docs/private-deployment.md"
   push:
     branches: [main]
     paths:
@@ -23,6 +25,8 @@ on:
       - "cmd/**"
       - "internal/**"
       - "frontend/**"
+      - "deploy/**"
+      - "docs/private-deployment.md"
 
 jobs:
   build-pr:

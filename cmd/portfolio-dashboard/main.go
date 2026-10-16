@@ -7,9 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,33 +97,55 @@ func runCommand(command string, args []string) error {
 // the distroless runtime can have a useful Docker HEALTHCHECK without adding a
 // shell, curl, wget, or any access to private API routes.
 func runHealthcheck(args []string) error {
+	const maxHealthcheckTimeout = 30 * time.Second
+	const maxHealthcheckBody = 4 << 10
 	flags := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
 	target := flags.String("url", "http://127.0.0.1:8080/healthz", "health endpoint URL")
 	timeout := flags.Duration("timeout", 2*time.Second, "maximum request duration")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *timeout <= 0 {
-		return errors.New("-timeout must be positive")
+	if *timeout <= 0 || *timeout > maxHealthcheckTimeout {
+		return fmt.Errorf("-timeout must be positive and no greater than %s", maxHealthcheckTimeout)
 	}
 	parsed, err := url.Parse(*target)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Path != "/healthz" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("-url must be an HTTP(S) /healthz URL without query parameters")
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Path != "/healthz" || parsed.EscapedPath() != "/healthz" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
+		return errors.New("-url must be a literal loopback HTTP(S) /healthz URL without query parameters")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return errors.New("-url must use HTTP or HTTPS")
+	}
+	host, port, err := net.SplitHostPort(parsed.Host)
+	portNumber, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil || portNumber < 1 || portNumber > 65535 || (host != "127.0.0.1" && host != "::1") {
+		return errors.New("-url must use an explicit port on literal 127.0.0.1 or ::1")
 	}
 	request, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return fmt.Errorf("create healthcheck request: %w", err)
 	}
-	client := &http.Client{Timeout: *timeout}
+	client := &http.Client{
+		Timeout:   *timeout,
+		Transport: &http.Transport{Proxy: nil},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return errors.New("healthcheck redirects are not allowed")
+		},
+	}
 	response, err := client.Do(request)
 	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
 		return fmt.Errorf("healthcheck request failed: %w", err)
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	read, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, maxHealthcheckBody+1))
+	if readErr != nil {
+		return errors.New("healthcheck response could not be read")
+	}
+	if read > maxHealthcheckBody {
+		return errors.New("healthcheck response exceeded the maximum size")
+	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("healthcheck endpoint returned HTTP %d", response.StatusCode)
 	}
