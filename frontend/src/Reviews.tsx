@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, RefObject } from 'react'
 import { apiFetch, APIError, jsonResponse } from './api'
 import type { Holding } from './App'
@@ -146,6 +146,7 @@ export function validateReview(value: unknown): Review {
     if (ids.some((id) => !evidenceIds.has(id))) throw new Error('Broken evidence reference')
     return { statement: fact.statement, evidence_ids: ids }
   })
+  if (new Set(sourcedFacts.map((fact) => JSON.stringify([fact.statement, fact.evidence_ids]))).size !== sourcedFacts.length) throw new Error('Duplicate sourced fact')
   const model = object(candidate.model); exactKeys(model, ['provider', 'model', 'version', 'runtime'])
   if (!bounded(model.provider, 1, 128) || !/^[A-Za-z0-9][A-Za-z0-9._~-]*$/.test(model.provider) || !bounded(model.model, 1, 256) || !/^[A-Za-z0-9][A-Za-z0-9._~:/-]*$/.test(model.model) || !bounded(model.version, 1, 128) || model.runtime !== 'hermes-environment') throw new Error('Invalid model provenance')
   if (status === 'complete' && (evidence.length < 1 || evidence.some((item) => item.availability !== 'available' || item.freshness !== 'current') || sourcedFacts.length < 1)) throw new Error('Invalid complete review')
@@ -245,7 +246,7 @@ function ReviewDetail({ review, portfolioId, snapshot, csrfToken, onUnauthorized
   }
   const noteChanged = (value: string) => { setNote(value); discardAttempt(); if (feedbackState !== 'submitting') setFeedbackState('idle'); setFeedbackError('') }
   const changeDecision = (value: FeedbackDecision) => { setDecision(value); discardAttempt(); if (feedbackState !== 'submitting') setFeedbackState('idle'); setFeedbackError('') }
-  useEffect(() => { feedbackGeneration.current += 1; return () => { feedbackGeneration.current += 1; feedbackControllerRef.current?.abort(); feedbackControllerRef.current = null } }, [attemptIdentity])
+  useLayoutEffect(() => { feedbackGeneration.current += 1; return () => { feedbackGeneration.current += 1; feedbackControllerRef.current?.abort(); feedbackControllerRef.current = null } }, [attemptIdentity])
   useEffect(() => { detailRef.current?.focus() }, [detailRef, review.review_id])
   const submit = async (event: FormEvent) => {
     event.preventDefault()

@@ -82,6 +82,18 @@ describe('Phase D review contract validation', () => {
     expect(() => validateReview({ ...review, sourced_facts: [{ statement: 'duplicate reference', evidence_ids: ['evidence-1', 'evidence-1'] }] })).toThrow(/review response|evidence/i)
   })
 
+  it('rejects duplicate sourced facts while preserving statement and ordered evidence identity', () => {
+    const secondEvidence = { ...review.evidence[0], evidence_id: 'evidence-2', title: 'Second source' }
+    const duplicate = { ...review, evidence: [review.evidence[0], secondEvidence], sourced_facts: [{ statement: 'same fact', evidence_ids: ['evidence-1'] }, { statement: 'same fact', evidence_ids: ['evidence-1'] }] }
+    expect(() => validateReview(duplicate)).toThrow(/duplicate sourced fact/i)
+
+    const distinctStatement = { ...duplicate, sourced_facts: [{ statement: 'same fact', evidence_ids: ['evidence-1'] }, { statement: 'different fact', evidence_ids: ['evidence-1'] }] }
+    expect(validateReview(distinctStatement).sourced_facts).toHaveLength(2)
+
+    const distinctOrderedEvidence = { ...duplicate, sourced_facts: [{ statement: 'same fact', evidence_ids: ['evidence-1', 'evidence-2'] }, { statement: 'same fact', evidence_ids: ['evidence-2', 'evidence-1'] }] }
+    expect(validateReview(distinctOrderedEvidence).sourced_facts.map((fact) => fact.evidence_ids)).toEqual([['evidence-1', 'evidence-2'], ['evidence-2', 'evidence-1']])
+  })
+
   it('fails closed for nested schema, timestamp, decimal, URL, provenance, attribution, and cross-review violations', () => {
     expect(() => validateReview({ ...review, metrics: [{ ...review.metrics[0], value: '1e3' }] })).toThrow(/metric/i)
     expect(() => validateReview({ ...review, generated_at: '2026-02-29T12:00:00.000000000Z' })).toThrow(/review response/i)
