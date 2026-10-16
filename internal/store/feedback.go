@@ -53,10 +53,17 @@ func (s *Store) SubmitReviewFeedback(ctx context.Context, browserPrincipalID, po
 	if err := ValidateFeedbackSubmission(submission); err != nil {
 		return domain.ReviewFeedback{}, false, err
 	}
+	canonicalFingerprint, err := FeedbackFingerprint(submission)
+	if err != nil || !sameSecretText(canonicalFingerprint, fingerprint) {
+		return domain.ReviewFeedback{}, false, ErrFeedbackInvalid
+	}
 	const maxAttempts = 4
 	const maxRetryElapsed = 250 * time.Millisecond
 	started := time.Now()
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if reviewAttemptHook != nil {
+			reviewAttemptHook(attempt)
+		}
 		if err := ctx.Err(); err != nil {
 			return domain.ReviewFeedback{}, false, err
 		}
@@ -83,6 +90,9 @@ func (s *Store) SubmitReviewFeedback(ctx context.Context, browserPrincipalID, po
 		backoff := time.Duration(attempt+1) * 10 * time.Millisecond
 		if time.Since(started)+backoff+100*time.Millisecond > maxRetryElapsed {
 			return domain.ReviewFeedback{}, false, err
+		}
+		if reviewBackoffHook != nil {
+			reviewBackoffHook(attempt)
 		}
 		timer := time.NewTimer(backoff)
 		select {
@@ -137,6 +147,19 @@ func (s *Store) submitReviewFeedbackOnce(ctx context.Context, principalID, portf
 	err = tx.QueryRowContext(ctx, `SELECT request_fingerprint,feedback_id FROM feedback_idempotency WHERE browser_principal_id=? AND portfolio_id=? AND review_id=? AND idempotency_key=?`, principalID, portfolioID, reviewID, key).Scan(&storedFingerprint, &feedbackID)
 	if err == nil {
 		if !sameSecretText(storedFingerprint, fingerprint) {
+			var storedDecision string
+			var storedNote sql.NullString
+			if fingerprintErr := tx.QueryRowContext(ctx, `SELECT decision,note FROM review_feedback WHERE id=?`, feedbackID).Scan(&storedDecision, &storedNote); fingerprintErr != nil {
+				return domain.ReviewFeedback{}, false, ErrFeedbackCorrupt
+			}
+			storedSubmission := domain.FeedbackSubmission{Decision: storedDecision}
+			if storedNote.Valid {
+				storedSubmission.Note = &storedNote.String
+			}
+			canonicalStoredFingerprint, fingerprintErr := FeedbackFingerprint(storedSubmission)
+			if fingerprintErr != nil || !sameSecretText(canonicalStoredFingerprint, storedFingerprint) {
+				return domain.ReviewFeedback{}, false, ErrFeedbackCorrupt
+			}
 			return domain.ReviewFeedback{}, false, ErrFeedbackIdempotencyConflict
 		}
 		result, readErr := reconstructReviewFeedback(ctx, tx, principalID, portfolioID, reviewID, key, fingerprint)
@@ -150,6 +173,16 @@ func (s *Store) submitReviewFeedbackOnce(ctx context.Context, principalID, portf
 	}
 	if err != sql.ErrNoRows {
 		return domain.ReviewFeedback{}, false, err
+	}
+	var feedbackCount, reservationCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM review_feedback WHERE browser_principal_id=? AND portfolio_id=? AND review_id=?`, principalID, portfolioID, reviewID).Scan(&feedbackCount); err != nil {
+		return domain.ReviewFeedback{}, false, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM feedback_idempotency WHERE browser_principal_id=? AND portfolio_id=? AND review_id=?`, principalID, portfolioID, reviewID).Scan(&reservationCount); err != nil {
+		return domain.ReviewFeedback{}, false, err
+	}
+	if feedbackCount != reservationCount {
+		return domain.ReviewFeedback{}, false, ErrFeedbackCorrupt
 	}
 
 	now := canonicalSnapshotTime(s.now())
@@ -220,9 +253,8 @@ func randomFeedbackID() (string, error) {
 
 func reconstructReviewFeedback(ctx context.Context, q reviewQueryer, principalID, portfolioID, reviewID, key, expectedFingerprint string) (domain.ReviewFeedback, error) {
 	var result domain.ReviewFeedback
-	var feedbackID string
-	var storedRequestFingerprint string
-	if err := q.QueryRowContext(ctx, `SELECT request_fingerprint,feedback_id FROM feedback_idempotency WHERE browser_principal_id=? AND portfolio_id=? AND review_id=? AND idempotency_key=?`, principalID, portfolioID, reviewID, key).Scan(&storedRequestFingerprint, &feedbackID); err != nil || !sameSecretText(storedRequestFingerprint, expectedFingerprint) {
+	var feedbackID, storedRequestFingerprint, reservationCreatedAt, reservationRetainUntil string
+	if err := q.QueryRowContext(ctx, `SELECT request_fingerprint,feedback_id,created_at,retain_until FROM feedback_idempotency WHERE browser_principal_id=? AND portfolio_id=? AND review_id=? AND idempotency_key=?`, principalID, portfolioID, reviewID, key).Scan(&storedRequestFingerprint, &feedbackID, &reservationCreatedAt, &reservationRetainUntil); err != nil || !sameSecretText(storedRequestFingerprint, expectedFingerprint) {
 		return domain.ReviewFeedback{}, ErrFeedbackCorrupt
 	}
 	var principal, storedPortfolio, storedReview, decision, occurredAt, retainUntil, submittedByID, submittedByKind, primaryPermission string
@@ -238,12 +270,20 @@ func reconstructReviewFeedback(ctx context.Context, q reviewQueryer, principalID
 	if parsedRetain.Before(parsedOccurred.AddDate(7, 0, 0)) {
 		return domain.ReviewFeedback{}, ErrFeedbackCorrupt
 	}
+	if !validCanonicalReviewTime(reservationCreatedAt) || !validCanonicalReviewTime(reservationRetainUntil) || reservationCreatedAt != occurredAt || reservationRetainUntil != retainUntil {
+		return domain.ReviewFeedback{}, ErrFeedbackCorrupt
+	}
 	if note.Valid {
 		value := note.String
 		if !validReviewText(value, 2000) {
 			return domain.ReviewFeedback{}, ErrFeedbackCorrupt
 		}
 		result.Note = &value
+	}
+	canonicalSubmission := domain.FeedbackSubmission{Decision: decision, Note: result.Note}
+	canonicalFingerprint, err := FeedbackFingerprint(canonicalSubmission)
+	if err != nil || !sameSecretText(canonicalFingerprint, storedRequestFingerprint) {
+		return domain.ReviewFeedback{}, ErrFeedbackCorrupt
 	}
 	var reservationCount int
 	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM feedback_idempotency WHERE browser_principal_id=? AND portfolio_id=? AND review_id=? AND idempotency_key=? AND feedback_id=?`, principalID, portfolioID, reviewID, key, feedbackID).Scan(&reservationCount); err != nil || reservationCount != 1 {
@@ -275,8 +315,8 @@ func reconstructReviewFeedback(ctx context.Context, q reviewQueryer, principalID
 		return domain.ReviewFeedback{}, ErrFeedbackCorrupt
 	}
 	var auditCount int
-	var auditID, auditActor, auditEntityType, auditEntityID, auditCreatedAt, auditRetain, payload string
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(id),''),COALESCE(MAX(actor),''),COALESCE(MAX(entity_type),''),COALESCE(MAX(entity_id),''),COALESCE(MAX(created_at),''),COALESCE(MAX(retain_until),''),COALESCE(MAX(payload),'') FROM audit_events WHERE entity_id=?`, feedbackID).Scan(&auditCount, &auditID, &auditActor, &auditEntityType, &auditEntityID, &auditCreatedAt, &auditRetain, &payload); err != nil || auditCount != 1 || auditActor != "browser" || auditEntityType != "review_feedback" || auditEntityID != feedbackID || auditCreatedAt != occurredAt || auditRetain != retainUntil || !validFeedbackAuditPayload(payload, auditID, principalID, portfolioID, reviewID, occurredAt) {
+	var auditID, auditActor, auditAction, auditEntityType, auditEntityID, auditCreatedAt, auditRetain, payload string
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(id),''),COALESCE(MAX(actor),''),COALESCE(MAX(action),''),COALESCE(MAX(entity_type),''),COALESCE(MAX(entity_id),''),COALESCE(MAX(created_at),''),COALESCE(MAX(retain_until),''),COALESCE(MAX(payload),'') FROM audit_events WHERE entity_id=?`, feedbackID).Scan(&auditCount, &auditID, &auditActor, &auditAction, &auditEntityType, &auditEntityID, &auditCreatedAt, &auditRetain, &payload); err != nil || auditCount != 1 || auditActor != "browser" || auditAction != "feedback_submitted" || auditEntityType != "review_feedback" || auditEntityID != feedbackID || auditCreatedAt != occurredAt || auditRetain != retainUntil || !validFeedbackAuditPayload(payload, auditID, principalID, portfolioID, reviewID, occurredAt) {
 		return domain.ReviewFeedback{}, ErrFeedbackCorrupt
 	}
 	var auditScopeCount int
@@ -287,8 +327,8 @@ func reconstructReviewFeedback(ctx context.Context, q reviewQueryer, principalID
 		return domain.ReviewFeedback{}, ErrFeedbackCorrupt
 	}
 	var activityCount int
-	var activityOccurred, activityRetain, activitySource, activityCategory, activityAction, activityEntityType, activityEntityID string
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(occurred_at),''),COALESCE(MAX(retain_until),''),COALESCE(MAX(source_audit_event_id),''),COALESCE(MAX(category),''),COALESCE(MAX(action),''),COALESCE(MAX(entity_type),''),COALESCE(MAX(entity_id),'') FROM activity_events WHERE portfolio_id=? AND entity_id=?`, portfolioID, feedbackID).Scan(&activityCount, &activityOccurred, &activityRetain, &activitySource, &activityCategory, &activityAction, &activityEntityType, &activityEntityID); err != nil || activityCount != 1 || activityOccurred != occurredAt || activityRetain != retainUntil || activitySource != auditID || activityCategory != "feedback" || activityAction != "feedback_submitted" || activityEntityType != "review_feedback" || activityEntityID != feedbackID {
+	var activityActor, activityOccurred, activitySortTime, activityRetain, activitySource, activityCategory, activityAction, activityEntityType, activityEntityID, activitySummary, activityDetails string
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(actor_category),''),COALESCE(MAX(occurred_at),''),COALESCE(MAX(sort_time),''),COALESCE(MAX(retain_until),''),COALESCE(MAX(source_audit_event_id),''),COALESCE(MAX(category),''),COALESCE(MAX(action),''),COALESCE(MAX(entity_type),''),COALESCE(MAX(entity_id),''),COALESCE(MAX(summary),''),COALESCE(MAX(details),'') FROM activity_events WHERE portfolio_id=? AND entity_id=?`, portfolioID, feedbackID).Scan(&activityCount, &activityActor, &activityOccurred, &activitySortTime, &activityRetain, &activitySource, &activityCategory, &activityAction, &activityEntityType, &activityEntityID, &activitySummary, &activityDetails); err != nil || activityCount != 1 || activityActor != "browser" || activityOccurred != occurredAt || activitySortTime != occurredAt || activityRetain != retainUntil || activitySource != auditID || activityCategory != "feedback" || activityAction != "feedback_submitted" || activityEntityType != "review_feedback" || activityEntityID != feedbackID || activitySummary != "Review feedback submitted" || activityDetails != "Attributable human feedback was submitted." {
 		return domain.ReviewFeedback{}, ErrFeedbackCorrupt
 	}
 	result.FeedbackID, result.PortfolioID, result.ReviewID, result.Decision, result.OccurredAt = feedbackID, portfolioID, reviewID, decision, occurredAt
