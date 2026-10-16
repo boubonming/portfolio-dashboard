@@ -1,0 +1,21 @@
+# Do not send private application state or local credentials to the Docker daemon.
+.git
+.git/**
+.env
+.env.*
+**/*.env
+**/*.env.*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+**/backup*
+**/*.bak
+Portfolio.md
+preview.json
+frontend/node_modules
+frontend/dist
+internal/web/dist
+node_modules
+coverage
+*.test

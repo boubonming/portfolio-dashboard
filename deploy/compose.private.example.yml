@@ -1,0 +1,40 @@
+services:
+  portfolio-dashboard:
+    # Replace both placeholders after the merged-main workflow publishes the image.
+    # Keep the full commit tag and digest together; do not use a mutable tag.
+    image: ghcr.io/REPLACE_WITH_GHCR_OWNER/portfolio-dashboard:REPLACE_WITH_FULL_COMMIT_SHA@sha256:REPLACE_WITH_PUBLISHED_IMAGE_DIGEST
+    user: "${PORTFOLIO_CONTAINER_UID:-65532}:${PORTFOLIO_CONTAINER_GID:-65532}"
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    ports:
+      - "127.0.0.1:${PORTFOLIO_HOST_PORT:-8080}:8080"
+    volumes:
+      - "${PORTFOLIO_DATA_DIR:?set PORTFOLIO_DATA_DIR to an operator-owned directory}:/data"
+    env_file:
+      - "./private.env"
+    environment:
+      PORTFOLIO_BIND_ADDRESS: "0.0.0.0:8080"
+      PORTFOLIO_DATA_PATH: "/data/portfolio-dashboard.sqlite"
+      PORTFOLIO_ENV: "production"
+      PORTFOLIO_COOKIE_SECURE: "true"
+      PORTFOLIO_PUBLIC_ORIGIN: "${PORTFOLIO_PUBLIC_ORIGIN:?set the exact HTTPS public origin}"
+      PORTFOLIO_AUTH_USERNAME: "${PORTFOLIO_AUTH_USERNAME:?set the login username}"
+      PORTFOLIO_AUTH_PASSWORD_HASH: "${PORTFOLIO_AUTH_PASSWORD_HASH:?set a bcrypt password hash}"
+      PORTFOLIO_SESSION_SECRET: "${PORTFOLIO_SESSION_SECRET:?set an independent random session secret}"
+      PORTFOLIO_REPORTING_CURRENCY: "${PORTFOLIO_REPORTING_CURRENCY:-MYR}"
+      PORTFOLIO_MACHINE_PRINCIPAL_ID: "${PORTFOLIO_MACHINE_PRINCIPAL_ID:-}"
+      PORTFOLIO_MACHINE_PORTFOLIO_ID: "${PORTFOLIO_MACHINE_PORTFOLIO_ID:-}"
+      PORTFOLIO_MACHINE_PORTFOLIO_READ: "${PORTFOLIO_MACHINE_PORTFOLIO_READ:-false}"
+      PORTFOLIO_MACHINE_REVIEWS_WRITE: "${PORTFOLIO_MACHINE_REVIEWS_WRITE:-false}"
+    healthcheck:
+      test: ["CMD", "/app/portfolio-dashboard", "healthcheck", "-url", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3

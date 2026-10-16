@@ -27,6 +27,9 @@ go.work.sum
 
 # env file
 .env
+.env.*
+deploy/private.env
+deploy/compose.private.yml
 
 # Dependency directories
 frontend/node_modules/
@@ -34,6 +37,11 @@ frontend/node_modules/
 # Generated application/frontend artifacts
 internal/web/dist/
 *.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.backup
+backups/
 portfolio-dashboard
 !cmd/
 !cmd/portfolio-dashboard/

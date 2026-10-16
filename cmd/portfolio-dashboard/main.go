@@ -6,7 +6,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -82,9 +84,48 @@ func runCommand(command string, args []string) error {
 		return runMappingList(args)
 	case "market-refresh":
 		return runMarketRefresh(args)
+	case "healthcheck":
+		return runHealthcheck(args)
 	default:
-		return fmt.Errorf("unknown command %q (use import-preview, import-apply, import-status, mapping-add, mapping-list, market-refresh, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
+		return fmt.Errorf("unknown command %q (use healthcheck, import-preview, import-apply, import-status, mapping-add, mapping-list, market-refresh, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
 	}
+}
+
+// runHealthcheck is deliberately restricted to the public health endpoint so
+// the distroless runtime can have a useful Docker HEALTHCHECK without adding a
+// shell, curl, wget, or any access to private API routes.
+func runHealthcheck(args []string) error {
+	flags := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
+	target := flags.String("url", "http://127.0.0.1:8080/healthz", "health endpoint URL")
+	timeout := flags.Duration("timeout", 2*time.Second, "maximum request duration")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *timeout <= 0 {
+		return errors.New("-timeout must be positive")
+	}
+	parsed, err := url.Parse(*target)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Path != "/healthz" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("-url must be an HTTP(S) /healthz URL without query parameters")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("-url must use HTTP or HTTPS")
+	}
+	request, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return fmt.Errorf("create healthcheck request: %w", err)
+	}
+	client := &http.Client{Timeout: *timeout}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("healthcheck request failed: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("healthcheck endpoint returned HTTP %d", response.StatusCode)
+	}
+	return nil
 }
 
 func runPreview(args []string) error {
