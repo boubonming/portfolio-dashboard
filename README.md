@@ -229,3 +229,7 @@ missing mappings or classified provider failures rather than fabricating
 values. Repeating an identical provider observation is idempotent. A subsequent
 snapshot remains incomplete when a refresh gap leaves a required quote or FX
 rate missing/stale; it never presents a partial total as complete.
+
+## Private OCI deployment package
+
+The production packaging source is documented in [`docs/private-deployment.md`](docs/private-deployment.md). It includes a digest-pinned multi-stage `Dockerfile`, non-root/read-only runtime settings, the restricted `/healthz` healthcheck command, and `deploy/compose.private.example.yml` with an operator-supplied GHCR commit tag plus digest. The GitHub Actions workflow builds both Linux amd64 and arm64 on pull requests without publishing, and publishes only merged-main full-SHA images with provenance and SBOM attestations. Deployment remains an operator action; do not use a tag without the published digest.
