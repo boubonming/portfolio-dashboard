@@ -3,8 +3,10 @@ package deployment_test
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -15,16 +17,20 @@ import (
 
 func repoFile(t *testing.T, name string) string {
 	t.Helper()
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
-	data, err := os.ReadFile(filepath.Join(root, name))
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), name))
 	if err != nil {
 		t.Fatalf("read %s: %v", name, err)
 	}
 	return string(data)
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
 }
 
 func yamlMap(t *testing.T, value any, name string) map[string]any {
@@ -251,6 +257,32 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 	}
 }
 
+func TestRootComposeMatchesDeployTemplate(t *testing.T) {
+	composeNames := []string{"compose.yml", "deploy/compose.private.example.yml"}
+	documents := make([]map[string]any, len(composeNames))
+	for i, name := range composeNames {
+		document := parseYAML(t, name)
+		documents[i] = document
+		services := yamlMap(t, document["services"], name+".services")
+		service := yamlMap(t, services["portfolio-dashboard"], name+".portfolio-dashboard")
+		envFiles := stringList(t, service["env_file"], name+".env_file")
+		if !reflect.DeepEqual(envFiles, []string{"./private.env"}) {
+			t.Fatalf("%s env_file = %v, want exactly ./private.env", name, envFiles)
+		}
+		resolved := path.Clean(path.Join(path.Dir(name), envFiles[0]))
+		wantResolved := path.Join(path.Dir(name), "private.env")
+		if resolved != wantResolved {
+			t.Fatalf("%s env_file resolves to %q, want %q", name, resolved, wantResolved)
+		}
+		// Compare the files as the same Compose document after mapping each
+		// location-relative private.env to one logical file name.
+		service["env_file"] = []any{"private.env"}
+	}
+	if !reflect.DeepEqual(documents[0], documents[1]) {
+		t.Fatalf("root compose.yml diverges from deploy/compose.private.example.yml:\nroot: %#v\ndeploy: %#v", documents[0], documents[1])
+	}
+}
+
 func TestWorkflowTriggersAndPublicationAreStructured(t *testing.T) {
 	document := parseYAML(t, ".github/workflows/container.yml")
 	events := yamlMap(t, document["on"], "on")
@@ -259,7 +291,7 @@ func TestWorkflowTriggersAndPublicationAreStructured(t *testing.T) {
 		if got := stringList(t, event["paths"], "on."+eventName+".paths"); len(got) == 0 {
 			t.Fatalf("on.%s.paths is empty", eventName)
 		} else {
-			requireStrings(t, got, "deploy/**", "docs/private-deployment.md")
+			requireStrings(t, got, "deploy/**", "compose.yml", "docs/private-deployment.md")
 		}
 	}
 	jobs := yamlMap(t, document["jobs"], "jobs")
@@ -335,5 +367,13 @@ func TestPrivateEnvTemplateOptionalConfigurationIsDisabled(t *testing.T) {
 		if values[name] != "false" {
 			t.Errorf("optional %s = %q, want false", name, values[name])
 		}
+	}
+}
+
+func TestRootPrivateEnvIsGitIgnored(t *testing.T) {
+	command := exec.Command("git", "check-ignore", "--no-index", "--quiet", "private.env")
+	command.Dir = repoRoot(t)
+	if err := command.Run(); err != nil {
+		t.Fatalf("git does not ignore root private.env: %v", err)
 	}
 }
