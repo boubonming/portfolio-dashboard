@@ -18,14 +18,14 @@ No local multi-platform image build is claimed by this repository. The pull-requ
 
 ## Operator setup
 
-1. After the merged-main job succeeds, copy the root `compose.yml` sample to a private working copy and replace the image line with the exact published reference, retaining both the full commit tag and the `@sha256:` digest from the workflow summary. Keep `deploy/compose.private.example.yml` for backwards-compatible links and as the reference copy; the two files are covered by a regression test and must remain equivalent apart from their relative location.
+1. After the merged-main job succeeds, copy the root `compose.yaml` sample to a private working copy and replace the image line with the exact published reference, retaining both the full commit tag and the `@sha256:` digest from the workflow summary. Keep `deploy/compose.private.example.yml` for backwards-compatible links and as the reference copy; the two files are covered by a regression test and must remain equivalent apart from their relative location.
 2. Copy `deploy/private.env.example` to root `private.env`, set mode `0600`, and replace the required `REPLACE_WITH_*` values. Leave optional machine/provider entries blank unless enabling those features. Set `PORTFOLIO_DATA_DIR` to an operator-owned directory; the example already supplies safe defaults for container UID/GID (`65532`), host port (`8080`), and reporting currency (`MYR`). The Compose command must receive this file with `--env-file` because the interpolation values are intentionally not committed:
 
    ```sh
    cp deploy/private.env.example private.env
    chmod 600 private.env
    # Edit private.env using the operator's secret manager/editor.
-   docker compose --env-file private.env -f compose.yml config
+   docker compose --env-file private.env -f compose.yaml config
    ```
 
    The exact `https://host[:port]` public origin, login username, bcrypt password hash, and independent random session secret are required. Leave machine credentials and provider keys blank unless their feature is explicitly enabled. Provider keys and the optional machine bearer secret are injected from the private environment file only; they are not in the image, SQLite database, URLs, or logs. Both machine grant flags must remain `false` while machine credentials are blank.
@@ -40,8 +40,8 @@ No local multi-platform image build is claimed by this repository. The pull-requ
 4. Review the rendered Compose configuration, then start it. The default host binding is loopback-only (`127.0.0.1:8080`); TLS and any public reverse proxy are intentionally outside this package. The application listens on port 8080 and stores SQLite at `/data/portfolio-dashboard.sqlite`.
 
    ```sh
-   docker compose --env-file private.env -f compose.yml up -d
-   docker compose --env-file private.env -f compose.yml ps
+   docker compose --env-file private.env -f compose.yaml up -d
+   docker compose --env-file private.env -f compose.yaml ps
    ```
 
 The runtime image runs as non-root with a read-only root filesystem, a bounded non-executable `/tmp`, no Linux capabilities, and `no-new-privileges`. Only `/data` is writable. The image healthcheck invokes the application binary's restricted `healthcheck` command, which can call only an HTTP(S) `/healthz` URL on literal loopback with an explicit port, never follows redirects or environment proxies, has a bounded timeout, reads at most 4 KiB, and accepts only HTTP 200.

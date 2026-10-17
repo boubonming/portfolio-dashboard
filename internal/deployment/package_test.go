@@ -258,7 +258,7 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 }
 
 func TestRootComposeMatchesDeployTemplate(t *testing.T) {
-	composeNames := []string{"compose.yml", "deploy/compose.private.example.yml"}
+	composeNames := []string{"compose.yaml", "deploy/compose.private.example.yml"}
 	documents := make([]map[string]any, len(composeNames))
 	for i, name := range composeNames {
 		document := parseYAML(t, name)
@@ -279,7 +279,7 @@ func TestRootComposeMatchesDeployTemplate(t *testing.T) {
 		service["env_file"] = []any{"private.env"}
 	}
 	if !reflect.DeepEqual(documents[0], documents[1]) {
-		t.Fatalf("root compose.yml diverges from deploy/compose.private.example.yml:\nroot: %#v\ndeploy: %#v", documents[0], documents[1])
+		t.Fatalf("root compose.yaml diverges from deploy/compose.private.example.yml:\nroot: %#v\ndeploy: %#v", documents[0], documents[1])
 	}
 }
 
@@ -291,7 +291,7 @@ func TestWorkflowTriggersAndPublicationAreStructured(t *testing.T) {
 		if got := stringList(t, event["paths"], "on."+eventName+".paths"); len(got) == 0 {
 			t.Fatalf("on.%s.paths is empty", eventName)
 		} else {
-			requireStrings(t, got, "deploy/**", "compose.yml", "docs/private-deployment.md")
+			requireStrings(t, got, "deploy/**", "compose.yaml", "docs/private-deployment.md")
 		}
 	}
 	jobs := yamlMap(t, document["jobs"], "jobs")
