@@ -211,11 +211,17 @@ func TestFrontendArtifactPathMatchesDockerfile(t *testing.T) {
 }
 
 func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
-	document := parseYAML(t, "deploy/compose.private.example.yml")
+	document := parseYAML(t, "compose.yaml")
 	service := yamlMap(t, yamlMap(t, document["services"], "services")["portfolio-dashboard"], "portfolio-dashboard")
 	image := yamlString(t, service["image"], "service.image")
-	if !regexp.MustCompile(`^ghcr\.io/[^/\s]+/portfolio-dashboard:(?:[0-9a-f]{40}|REPLACE_WITH_FULL_COMMIT_SHA)@sha256:(?:[0-9a-f]{64}|REPLACE_WITH_PUBLISHED_IMAGE_DIGEST)$`).MatchString(image) {
-		t.Fatalf("image %q is not an immutable tag plus digest reference", image)
+	if image != "${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}" {
+		t.Fatalf("image = %q, want the runnable repository-owned default with an override", image)
+	}
+	if strings.Contains(image, "REPLACE_WITH_") {
+		t.Fatalf("image %q contains a placeholder", image)
+	}
+	if yamlString(t, service["pull_policy"], "service.pull_policy") != "always" {
+		t.Error("service.pull_policy is not always")
 	}
 	if yamlString(t, service["user"], "service.user") != "${PORTFOLIO_CONTAINER_UID:-65532}:${PORTFOLIO_CONTAINER_GID:-65532}" {
 		t.Error("service user does not use the documented numeric UID/GID interpolation")
@@ -254,6 +260,20 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 	health := yamlMap(t, service["healthcheck"], "service.healthcheck")
 	if got := stringList(t, health["test"], "healthcheck.test"); strings.Join(got, "\x00") != strings.Join([]string{"CMD", "/app/portfolio-dashboard", "healthcheck", "-url", "http://127.0.0.1:8080/healthz"}, "\x00") {
 		t.Fatalf("healthcheck.test = %v", got)
+	}
+}
+
+func TestTrackedComposeImagesHaveRunnableDefaults(t *testing.T) {
+	for _, name := range []string{"compose.yaml", "deploy/compose.private.example.yml"} {
+		document := parseYAML(t, name)
+		service := yamlMap(t, yamlMap(t, document["services"], name+".services")["portfolio-dashboard"], name+".portfolio-dashboard")
+		image := yamlString(t, service["image"], name+".image")
+		if strings.Contains(image, "REPLACE_WITH_") {
+			t.Errorf("%s contains an image placeholder: %q", name, image)
+		}
+		if image != "${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}" {
+			t.Errorf("%s image = %q, want the repository-owned default", name, image)
+		}
 	}
 }
 
@@ -353,10 +373,13 @@ func TestPrivateEnvTemplateOptionalConfigurationIsDisabled(t *testing.T) {
 		}
 		values[name] = value
 	}
-	for _, name := range []string{"PORTFOLIO_DATA_DIR", "PORTFOLIO_CONTAINER_UID", "PORTFOLIO_CONTAINER_GID", "PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
+	for _, name := range []string{"PORTFOLIO_DASHBOARD_IMAGE", "PORTFOLIO_DATA_DIR", "PORTFOLIO_CONTAINER_UID", "PORTFOLIO_CONTAINER_GID", "PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
 		if _, ok := values[name]; !ok {
 			t.Errorf("missing Compose interpolation setting %s", name)
 		}
+	}
+	if values["PORTFOLIO_DASHBOARD_IMAGE"] != "" {
+		t.Errorf("optional PORTFOLIO_DASHBOARD_IMAGE is not blank")
 	}
 	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET", "FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY", "OPEN_EXCHANGE_RATES_APP_ID"} {
 		if values[name] != "" {
