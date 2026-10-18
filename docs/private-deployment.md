@@ -18,30 +18,29 @@ No local multi-platform image build is claimed by this repository. The pull-requ
 
 ## Operator setup
 
-1. The tracked `compose.yaml` is directly usable and defaults to `ghcr.io/boubonming/portfolio-dashboard:main`. The `main` tag is mutable. For production, the recommended optional immutable pinning is to set `PORTFOLIO_DASHBOARD_IMAGE` in the private environment file to the exact published full-commit tag plus its `@sha256:` digest from the merged-main workflow summary. Keep `deploy/compose.private.example.yml` for backwards-compatible links; the two files are covered by a regression test and must remain equivalent apart from their relative location.
-2. Copy `deploy/private.env.example` to root `private.env`, set mode `0600`, and replace the required `REPLACE_WITH_*` values. Leave `PORTFOLIO_DASHBOARD_IMAGE` blank to use the default, or set it to the immutable reference described above. Leave optional machine/provider entries blank unless enabling those features. Set `PORTFOLIO_DATA_DIR` to an operator-owned directory; the example already supplies safe defaults for container UID/GID (`65532`), host port (`8080`), and reporting currency (`MYR`). The Compose command must receive this file with `--env-file` because the interpolation values are intentionally not committed:
+1. The tracked root `compose.yaml` and `.env.example` are the primary deployment files. Copy `.env.example` to `.env`, set mode `0600`, and replace the required `REPLACE_WITH_*` values. Leave `PORTFOLIO_DASHBOARD_IMAGE` blank to use the default, or set it to the exact published full-commit tag plus its `@sha256:` digest from the merged-main workflow summary for immutable pinning. Leave optional machine/provider entries blank unless enabling those features. Set `PORTFOLIO_DATA_DIR` to an operator-owned directory; the example supplies safe defaults for container UID/GID (`65532`), host port (`8080`), and reporting currency (`MYR`). Compose automatically reads the root `.env` file:
 
    ```sh
-   cp deploy/private.env.example private.env
-   chmod 600 private.env
-   # Edit private.env using the operator's secret manager/editor.
-   docker compose --env-file private.env -f compose.yaml config
+   cp .env.example .env
+   chmod 600 .env
+   # Edit .env using the operator's secret manager/editor.
+   docker compose -f compose.yaml config
    ```
 
-   The exact `https://host[:port]` public origin, login username, bcrypt password hash, and independent random session secret are required. Leave machine credentials and provider keys blank unless their feature is explicitly enabled. Provider keys and the optional machine bearer secret are injected from the private environment file only; they are not in the image, SQLite database, URLs, or logs. Both machine grant flags must remain `false` while machine credentials are blank.
-3. Choose the host data directory and numeric container identity. The default container identity is UID/GID `65532`; if the deployment user has different IDs, set `PORTFOLIO_CONTAINER_UID` and `PORTFOLIO_CONTAINER_GID` in the private environment file before creating the directory. Make the bind mount owned by those same IDs so SQLite is created and migrated by the application user, not root:
+   The exact `https://host[:port]` public origin, login username, bcrypt password hash, and independent random session secret are required. Leave machine credentials and provider keys blank unless their feature is explicitly enabled. Provider keys and the optional machine bearer secret are injected from `.env` only; they are not in the image, SQLite database, URLs, or logs. Both machine grant flags must remain `false` while machine credentials are blank.
+3. Choose the host data directory and numeric container identity. The default container identity is UID/GID `65532`; if the deployment user has different IDs, set `PORTFOLIO_CONTAINER_UID` and `PORTFOLIO_CONTAINER_GID` in `.env` before creating the directory. Make the bind mount owned by those same IDs so SQLite is created and migrated by the application user, not root:
 
    ```sh
    install -d -m 0700 /path/to/portfolio-dashboard-data
    sudo chown 65532:65532 /path/to/portfolio-dashboard-data
-   # Set PORTFOLIO_DATA_DIR=/path/to/portfolio-dashboard-data in private.env.
+   # Set PORTFOLIO_DATA_DIR=/path/to/portfolio-dashboard-data in .env.
    ```
 
 4. Review the rendered Compose configuration, then start it. The default host binding is loopback-only (`127.0.0.1:8080`); TLS and any public reverse proxy are intentionally outside this package. The application listens on port 8080 and stores SQLite at `/data/portfolio-dashboard.sqlite`.
 
    ```sh
-   docker compose --env-file private.env -f compose.yaml up -d
-   docker compose --env-file private.env -f compose.yaml ps
+   docker compose -f compose.yaml up -d
+   docker compose -f compose.yaml ps
    ```
 
 The runtime image runs as non-root with a read-only root filesystem, a bounded non-executable `/tmp`, no Linux capabilities, and `no-new-privileges`. Only `/data` is writable. The image healthcheck invokes the application binary's restricted `healthcheck` command, which can call only an HTTP(S) `/healthz` URL on literal loopback with an explicit port, never follows redirects or environment proxies, has a bounded timeout, reads at most 4 KiB, and accepts only HTTP 200.

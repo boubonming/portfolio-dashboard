@@ -235,7 +235,7 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 	requireStrings(t, stringList(t, service["tmpfs"], "service.tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=16m")
 	requireStrings(t, stringList(t, service["ports"], "service.ports"), "127.0.0.1:${PORTFOLIO_HOST_PORT:-8080}:8080")
 	requireStrings(t, stringList(t, service["volumes"], "service.volumes"), "${PORTFOLIO_DATA_DIR:?set PORTFOLIO_DATA_DIR to an operator-owned directory}:/data")
-	requireStrings(t, stringList(t, service["env_file"], "service.env_file"), "./private.env")
+	requireStrings(t, stringList(t, service["env_file"], "service.env_file"), ".env")
 	environment := yamlMap(t, service["environment"], "service.environment")
 	expectedEnvironment := map[string]string{
 		"PORTFOLIO_BIND_ADDRESS":           "0.0.0.0:8080",
@@ -286,20 +286,56 @@ func TestRootComposeMatchesDeployTemplate(t *testing.T) {
 		services := yamlMap(t, document["services"], name+".services")
 		service := yamlMap(t, services["portfolio-dashboard"], name+".portfolio-dashboard")
 		envFiles := stringList(t, service["env_file"], name+".env_file")
-		if !reflect.DeepEqual(envFiles, []string{"./private.env"}) {
-			t.Fatalf("%s env_file = %v, want exactly ./private.env", name, envFiles)
+		wantEnvFile := ".env"
+		if name != "compose.yaml" {
+			wantEnvFile = "../.env"
+		}
+		if !reflect.DeepEqual(envFiles, []string{wantEnvFile}) {
+			t.Fatalf("%s env_file = %v, want exactly %s", name, envFiles, wantEnvFile)
 		}
 		resolved := path.Clean(path.Join(path.Dir(name), envFiles[0]))
-		wantResolved := path.Join(path.Dir(name), "private.env")
+		wantResolved := ".env"
 		if resolved != wantResolved {
 			t.Fatalf("%s env_file resolves to %q, want %q", name, resolved, wantResolved)
 		}
 		// Compare the files as the same Compose document after mapping each
-		// location-relative private.env to one logical file name.
-		service["env_file"] = []any{"private.env"}
+		// location-relative .env to one logical file name.
+		service["env_file"] = []any{".env"}
 	}
 	if !reflect.DeepEqual(documents[0], documents[1]) {
 		t.Fatalf("root compose.yaml diverges from deploy/compose.private.example.yml:\nroot: %#v\ndeploy: %#v", documents[0], documents[1])
+	}
+}
+
+func TestRootEnvExampleIsTrackedAllowedAndMatchesCompatibilityTemplate(t *testing.T) {
+	root := repoFile(t, ".env.example")
+	compatibility := repoFile(t, "deploy/private.env.example")
+	if root != compatibility {
+		t.Fatal(".env.example diverges from deploy/private.env.example")
+	}
+
+	for _, name := range []string{"PORTFOLIO_PUBLIC_ORIGIN", "PORTFOLIO_AUTH_USERNAME", "PORTFOLIO_AUTH_PASSWORD_HASH", "PORTFOLIO_SESSION_SECRET", "PORTFOLIO_DATA_DIR"} {
+		if !strings.Contains(root, name+"=") {
+			t.Errorf(".env.example is missing %s", name)
+		}
+	}
+
+	rootDir := repoRoot(t)
+	tracked := exec.Command("git", "ls-files", "--error-unmatch", ".env.example")
+	tracked.Dir = rootDir
+	if output, err := tracked.CombinedOutput(); err != nil {
+		t.Fatalf(".env.example is not tracked: %v (%s)", err, output)
+	}
+
+	ignored := exec.Command("git", "check-ignore", "--no-index", "--quiet", ".env")
+	ignored.Dir = rootDir
+	if err := ignored.Run(); err != nil {
+		t.Fatalf("git does not ignore root .env: %v", err)
+	}
+	allowed := exec.Command("git", "check-ignore", "--no-index", "--quiet", ".env.example")
+	allowed.Dir = rootDir
+	if err := allowed.Run(); err == nil {
+		t.Fatal("git ignores tracked .env.example")
 	}
 }
 
@@ -311,7 +347,7 @@ func TestWorkflowTriggersAndPublicationAreStructured(t *testing.T) {
 		if got := stringList(t, event["paths"], "on."+eventName+".paths"); len(got) == 0 {
 			t.Fatalf("on.%s.paths is empty", eventName)
 		} else {
-			requireStrings(t, got, "deploy/**", "compose.yaml", "docs/private-deployment.md")
+			requireStrings(t, got, "deploy/**", "compose.yaml", ".env.example", "docs/private-deployment.md")
 		}
 	}
 	jobs := yamlMap(t, document["jobs"], "jobs")
@@ -393,10 +429,10 @@ func TestPrivateEnvTemplateOptionalConfigurationIsDisabled(t *testing.T) {
 	}
 }
 
-func TestRootPrivateEnvIsGitIgnored(t *testing.T) {
-	command := exec.Command("git", "check-ignore", "--no-index", "--quiet", "private.env")
+func TestRootEnvIsGitIgnored(t *testing.T) {
+	command := exec.Command("git", "check-ignore", "--no-index", "--quiet", ".env")
 	command.Dir = repoRoot(t)
 	if err := command.Run(); err != nil {
-		t.Fatalf("git does not ignore root private.env: %v", err)
+		t.Fatalf("git does not ignore root .env: %v", err)
 	}
 }

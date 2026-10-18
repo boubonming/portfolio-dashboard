@@ -18,7 +18,7 @@ services:
     volumes:
       - "${PORTFOLIO_DATA_DIR:?set PORTFOLIO_DATA_DIR to an operator-owned directory}:/data"
     env_file:
-      - "./private.env"
+      - ".env"
     environment:
       PORTFOLIO_BIND_ADDRESS: "0.0.0.0:8080"
       PORTFOLIO_DATA_PATH: "/data/portfolio-dashboard.sqlite"
