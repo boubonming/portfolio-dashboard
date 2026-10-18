@@ -4,7 +4,7 @@ This repository now contains the source package for an operator-managed private 
 
 ## Build and publication
 
-`.github/workflows/container.yml` builds `linux/amd64` and `linux/arm64` for pull requests without publishing. A push to merged `main` publishes only the full commit SHA tag to GHCR, with `packages:write` permission limited to that publication job. The publish job enables BuildKit max provenance and SBOM attestations and writes the resulting multi-platform digest to the workflow summary and job output.
+`.github/workflows/container.yml` builds `linux/amd64` and `linux/arm64` for pull requests without publishing. A push to merged `main` publishes both the mutable `main` tag and the full commit SHA tag to GHCR for the same multi-platform OCI index, with `packages:write` permission limited to that publication job. The publish job enables BuildKit max provenance and SBOM attestations and writes the resulting multi-platform digest to the workflow summary and job output.
 
 The Dockerfile uses these immutable upstream references:
 
@@ -47,9 +47,9 @@ No local multi-platform image build is claimed by this repository. The pull-requ
 
 The runtime image runs as non-root with a read-only root filesystem, a bounded non-executable `/tmp`, no Linux capabilities, and `no-new-privileges`. Only `/data` is writable. The image healthcheck invokes the application binary's restricted `healthcheck` command, which can call only an HTTP(S) `/healthz` URL on literal loopback with an explicit port, never follows redirects or environment proxies, has a bounded timeout, reads at most 4 KiB, and accepts only HTTP 200.
 
-## After publication: verify the immutable result
+## After publication: verify the published result
 
-On the trusted operator host, compare the workflow summary digest with the registry resolution before replacing the example image line. For example, after substituting the actual owner, full SHA tag, and digest:
+On the trusted operator host, compare the workflow summary digest with the registry resolution before replacing the example image line. The merged-main workflow updates the mutable `main` tag and also publishes the full-SHA tag to the same digest. For immutable production pinning, use the full SHA tag together with its published `@sha256:` digest through `PORTFOLIO_DASHBOARD_IMAGE`. For example, after substituting the actual owner, full SHA tag, and digest:
 
 ```sh
 docker buildx imagetools inspect ghcr.io/OWNER/portfolio-dashboard:FULL_COMMIT_SHA@sha256:PUBLISHED_DIGEST

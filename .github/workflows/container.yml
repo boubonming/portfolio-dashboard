@@ -15,6 +15,7 @@ on:
       - "deploy/**"
       - "compose.yaml"
       - ".env.example"
+      - ".gitignore"
       - "docs/private-deployment.md"
   push:
     branches: [main]
@@ -30,6 +31,7 @@ on:
       - "deploy/**"
       - "compose.yaml"
       - ".env.example"
+      - ".gitignore"
       - "docs/private-deployment.md"
 
 jobs:
@@ -76,7 +78,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Generate immutable image metadata
+      - name: Generate publication image metadata
         id: metadata
         uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
         with:
@@ -84,6 +86,7 @@ jobs:
           flavor: latest=false
           tags: |
             type=raw,value=${{ github.sha }}
+            type=raw,value=main
       - name: Build and publish both production platforms
         id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
@@ -96,14 +99,16 @@ jobs:
           labels: ${{ steps.metadata.outputs.labels }}
           provenance: mode=max
           sbom: true
-      - name: Summarize immutable publication
+      - name: Summarize publication
         env:
-          IMAGE: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          IMMUTABLE_IMAGE: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          MAIN_IMAGE: ghcr.io/${{ github.repository }}:main
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           {
             echo "### Published OCI image"
-            echo "- Image tag: \`${IMAGE}\`"
+            echo "- Immutable full-SHA image tag: \`${IMMUTABLE_IMAGE}\`"
+            echo "- Mutable main image tag: \`${MAIN_IMAGE}\`"
             echo "- Multi-platform digest: \`${DIGEST}\`"
             echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
             echo "- Provenance: BuildKit attestation enabled (mode=max)"

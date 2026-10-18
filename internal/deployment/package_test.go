@@ -379,7 +379,7 @@ func TestWorkflowTriggersAndPublicationAreStructured(t *testing.T) {
 		if got := stringList(t, event["paths"], "on."+eventName+".paths"); len(got) == 0 {
 			t.Fatalf("on.%s.paths is empty", eventName)
 		} else {
-			requireStrings(t, got, "deploy/**", "compose.yaml", ".env.example", "docs/private-deployment.md")
+			requireStrings(t, got, "deploy/**", "compose.yaml", ".env.example", ".gitignore", "docs/private-deployment.md")
 		}
 	}
 	jobs := yamlMap(t, document["jobs"], "jobs")
@@ -411,10 +411,36 @@ func TestWorkflowTriggersAndPublicationAreStructured(t *testing.T) {
 	if yamlString(t, with["platforms"], "publication platforms") != "linux/amd64,linux/arm64" || !yamlBool(t, with["push"], "publication push") || yamlString(t, with["provenance"], "publication provenance") != "mode=max" || !yamlBool(t, with["sbom"], "publication sbom") {
 		t.Fatal("publication build invariants changed")
 	}
-	metadata := workflowStep(t, steps, "Generate immutable image metadata")
+	metadata := workflowStep(t, steps, "Generate publication image metadata")
 	metadataWith := yamlMap(t, metadata["with"], "metadata with")
-	if !strings.Contains(yamlString(t, metadataWith["tags"], "metadata tags"), "type=raw,value=${{ github.sha }}") {
+	if yamlString(t, metadataWith["flavor"], "metadata flavor") != "latest=false" {
+		t.Error("metadata does not explicitly disable the latest tag")
+	}
+	metadataTags := yamlString(t, metadataWith["tags"], "metadata tags")
+	if !strings.Contains(metadataTags, "type=raw,value=${{ github.sha }}") {
 		t.Error("metadata does not publish the full commit SHA tag")
+	}
+	if !strings.Contains(metadataTags, "type=raw,value=main") {
+		t.Error("metadata does not publish the mutable main tag")
+	}
+	compose := parseYAML(t, "compose.yaml")
+	composeService := yamlMap(t, yamlMap(t, compose["services"], "compose services")["portfolio-dashboard"], "compose portfolio-dashboard")
+	composeImage := yamlString(t, composeService["image"], "compose image")
+	if composeImage != "${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}" || !strings.Contains(metadataTags, "type=raw,value=main") {
+		t.Error("Compose's default :main image has no matching merged-main workflow producer")
+	}
+	if strings.Contains(metadataTags, "latest") {
+		t.Error("metadata unexpectedly publishes a latest tag")
+	}
+	if _, ok := prWith["tags"]; ok {
+		t.Error("pull request build unexpectedly defines publication tags")
+	}
+	summary := workflowStep(t, steps, "Summarize publication")
+	summaryRun := yamlString(t, summary["run"], "publication summary run")
+	for _, want := range []string{"${IMMUTABLE_IMAGE}", "${MAIN_IMAGE}", "${DIGEST}", "linux/amd64", "linux/arm64"} {
+		if !strings.Contains(summaryRun, want) {
+			t.Errorf("publication summary does not report %q", want)
+		}
 	}
 	outputs := yamlMap(t, publish["outputs"], "jobs.publish-main.outputs")
 	if yamlString(t, outputs["image-digest"], "image digest output") != "${{ steps.build.outputs.digest }}" {
