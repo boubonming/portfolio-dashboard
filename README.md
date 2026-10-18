@@ -55,15 +55,22 @@ set `PORTFOLIO_ENV=development PORTFOLIO_COOKIE_SECURE=false`; there are no
 default credentials or secrets. CSRF tokens are returned by session bootstrap,
 kept in frontend memory, and required on unsafe same-origin API requests.
 
-The optional scoped machine reader is configured only through
-`PORTFOLIO_MACHINE_PRINCIPAL_ID`, `PORTFOLIO_MACHINE_PORTFOLIO_ID`,
-`PORTFOLIO_MACHINE_BEARER_SECRET`, and `PORTFOLIO_MACHINE_PORTFOLIO_READ=true`.
-Leave all four unset to disable machine authentication. A partial configuration,
+The optional least-privilege machine identity is an external Hermes bearer
+identity, not an embedded runtime. Configure all five settings together:
+`PORTFOLIO_MACHINE_PRINCIPAL_ID` (stable non-secret audit identity),
+`PORTFOLIO_MACHINE_PORTFOLIO_ID` (bound portfolio),
+`PORTFOLIO_MACHINE_BEARER_SECRET` (independent random printable secret),
+`PORTFOLIO_MACHINE_PORTFOLIO_READ` (scoped snapshot/context/read grant), and
+`PORTFOLIO_MACHINE_REVIEWS_WRITE` (immutable advisory review submission
+grant). The fail-closed disabled state has the three identity/secret values
+blank and both grants `false`; enabling normal Hermes review generation
+requires all three values plus both grants `true`. A partial configuration,
 invalid grant, or bearer secret shorter than 32 printable random bytes fails
 closed. The bearer secret is never written to SQLite, logs, URLs, frontend
 assets, or diagnostics; only the non-secret principal binding is registered in
-the database. The fixed principal retains `reviews:write` for the later review
-submission slice.
+the database. This identity can read the bound portfolio and submit immutable
+advisory reviews, but cannot edit holdings or trade. Market-provider settings
+are optional and independent of this machine identity.
 
 ## Non-mutating import preview
 

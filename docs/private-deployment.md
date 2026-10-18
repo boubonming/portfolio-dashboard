@@ -28,6 +28,8 @@ No local multi-platform image build is claimed by this repository. The pull-requ
    ```
 
    The exact `https://host[:port]` public origin, login username, bcrypt password hash, and independent random session secret are required. Leave machine credentials and provider keys blank unless their feature is explicitly enabled. Provider keys and the optional machine bearer secret are injected from `.env` only; they are not in the image, SQLite database, URLs, or logs. Both machine grant flags must remain `false` while machine credentials are blank.
+
+   The optional machine configuration is a least-privilege external Hermes bearer identity, not an embedded runtime. It consists of the three identity/secret values (`PORTFOLIO_MACHINE_PRINCIPAL_ID`, `PORTFOLIO_MACHINE_PORTFOLIO_ID`, and `PORTFOLIO_MACHINE_BEARER_SECRET`) plus both grants (`PORTFOLIO_MACHINE_PORTFOLIO_READ` and `PORTFOLIO_MACHINE_REVIEWS_WRITE`). It is disabled fail closed when the three values are blank and both grants are `false`; normal Hermes review generation requires all three values and both grants `true`. The identity is bound to one portfolio, can read snapshot/context data and submit immutable advisory reviews, but cannot edit holdings or trade. Market-provider credentials are optional and independent of these machine settings.
 3. Choose the host data directory and numeric container identity. The default container identity is UID/GID `65532`; if the deployment user has different IDs, set `PORTFOLIO_CONTAINER_UID` and `PORTFOLIO_CONTAINER_GID` in `.env` before creating the directory. Make the bind mount owned by those same IDs so SQLite is created and migrated by the application user, not root:
 
    ```sh

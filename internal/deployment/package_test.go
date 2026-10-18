@@ -319,6 +319,38 @@ func TestRootEnvExampleIsTrackedAllowedAndMatchesCompatibilityTemplate(t *testin
 			t.Errorf(".env.example is missing %s", name)
 		}
 	}
+	values := map[string]string{}
+	for _, line := range strings.Split(root, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("invalid root env template line %q", line)
+		}
+		values[name] = value
+	}
+	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET", "PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE"} {
+		if _, ok := values[name]; !ok {
+			t.Errorf(".env.example is missing machine setting %s", name)
+		}
+	}
+	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET"} {
+		if values[name] != "" {
+			t.Errorf("machine identity/secret %s is not blank by default", name)
+		}
+	}
+	for _, name := range []string{"PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE"} {
+		if values[name] != "false" {
+			t.Errorf("machine grant %s = %q, want false by default", name, values[name])
+		}
+	}
+	for _, stale := range []string{"all four", "scoped machine reader", "reader-only"} {
+		if strings.Contains(strings.ToLower(root), stale) {
+			t.Errorf(".env.example contains stale machine wording %q", stale)
+		}
+	}
 
 	rootDir := repoRoot(t)
 	tracked := exec.Command("git", "ls-files", "--error-unmatch", ".env.example")
