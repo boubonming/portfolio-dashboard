@@ -55,15 +55,22 @@ set `PORTFOLIO_ENV=development PORTFOLIO_COOKIE_SECURE=false`; there are no
 default credentials or secrets. CSRF tokens are returned by session bootstrap,
 kept in frontend memory, and required on unsafe same-origin API requests.
 
-The optional scoped machine reader is configured only through
-`PORTFOLIO_MACHINE_PRINCIPAL_ID`, `PORTFOLIO_MACHINE_PORTFOLIO_ID`,
-`PORTFOLIO_MACHINE_BEARER_SECRET`, and `PORTFOLIO_MACHINE_PORTFOLIO_READ=true`.
-Leave all four unset to disable machine authentication. A partial configuration,
+The optional least-privilege machine identity is an external Hermes bearer
+identity, not an embedded runtime. Configure all five settings together:
+`PORTFOLIO_MACHINE_PRINCIPAL_ID` (stable non-secret audit identity),
+`PORTFOLIO_MACHINE_PORTFOLIO_ID` (bound portfolio),
+`PORTFOLIO_MACHINE_BEARER_SECRET` (independent random printable secret),
+`PORTFOLIO_MACHINE_PORTFOLIO_READ` (scoped snapshot/context/read grant), and
+`PORTFOLIO_MACHINE_REVIEWS_WRITE` (immutable advisory review submission
+grant). The fail-closed disabled state has the three identity/secret values
+blank and both grants `false`; enabling normal Hermes review generation
+requires all three values plus both grants `true`. A partial configuration,
 invalid grant, or bearer secret shorter than 32 printable random bytes fails
 closed. The bearer secret is never written to SQLite, logs, URLs, frontend
 assets, or diagnostics; only the non-secret principal binding is registered in
-the database. The fixed principal retains `reviews:write` for the later review
-submission slice.
+the database. This identity can read the bound portfolio and submit immutable
+advisory reviews, but cannot edit holdings or trade. Market-provider settings
+are optional and independent of this machine identity.
 
 ## Non-mutating import preview
 
@@ -232,4 +239,4 @@ rate missing/stale; it never presents a partial total as complete.
 
 ## Private OCI deployment package
 
-The production packaging source is documented in [`docs/private-deployment.md`](docs/private-deployment.md). It includes a digest-pinned multi-stage `Dockerfile`, non-root/read-only runtime settings, the restricted `/healthz` healthcheck command, and the root [`compose.yaml`](compose.yaml) sample with an operator-supplied GHCR commit tag plus digest. The GitHub Actions workflow builds both Linux amd64 and arm64 on pull requests without publishing, and publishes only merged-main full-SHA images with provenance and SBOM attestations. Deployment remains an operator action; do not use a tag without the published digest. The deploy template [`deploy/compose.private.example.yml`](deploy/compose.private.example.yml) remains available as a backwards-compatible copy.
+The production packaging source is documented in [`docs/private-deployment.md`](docs/private-deployment.md). It includes a digest-pinned multi-stage `Dockerfile`, non-root/read-only runtime settings, the restricted `/healthz` healthcheck command, and the root [`compose.yaml`](compose.yaml) plus [`.env.example`](.env.example) deployment samples. Copy `.env.example` to `.env`, set mode `0600`, and run `docker compose -f compose.yaml ...`; Compose reads the root `.env` automatically. Compose uses `ghcr.io/boubonming/portfolio-dashboard:main` by default so the tracked file is directly runnable; set `PORTFOLIO_DASHBOARD_IMAGE` to the full commit tag plus its published digest when immutable pinning is required. The `main` tag is mutable. The GitHub Actions workflow builds both Linux amd64 and arm64 on pull requests without publishing, and merged-main publication updates `main` and also publishes the full-SHA tag for the same OCI index with provenance and SBOM attestations. The deploy template [`deploy/compose.private.example.yml`](deploy/compose.private.example.yml) and compatibility env template remain available for existing links.

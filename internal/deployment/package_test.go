@@ -211,11 +211,17 @@ func TestFrontendArtifactPathMatchesDockerfile(t *testing.T) {
 }
 
 func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
-	document := parseYAML(t, "deploy/compose.private.example.yml")
+	document := parseYAML(t, "compose.yaml")
 	service := yamlMap(t, yamlMap(t, document["services"], "services")["portfolio-dashboard"], "portfolio-dashboard")
 	image := yamlString(t, service["image"], "service.image")
-	if !regexp.MustCompile(`^ghcr\.io/[^/\s]+/portfolio-dashboard:(?:[0-9a-f]{40}|REPLACE_WITH_FULL_COMMIT_SHA)@sha256:(?:[0-9a-f]{64}|REPLACE_WITH_PUBLISHED_IMAGE_DIGEST)$`).MatchString(image) {
-		t.Fatalf("image %q is not an immutable tag plus digest reference", image)
+	if image != "${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}" {
+		t.Fatalf("image = %q, want the runnable repository-owned default with an override", image)
+	}
+	if strings.Contains(image, "REPLACE_WITH_") {
+		t.Fatalf("image %q contains a placeholder", image)
+	}
+	if yamlString(t, service["pull_policy"], "service.pull_policy") != "always" {
+		t.Error("service.pull_policy is not always")
 	}
 	if yamlString(t, service["user"], "service.user") != "${PORTFOLIO_CONTAINER_UID:-65532}:${PORTFOLIO_CONTAINER_GID:-65532}" {
 		t.Error("service user does not use the documented numeric UID/GID interpolation")
@@ -229,7 +235,7 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 	requireStrings(t, stringList(t, service["tmpfs"], "service.tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=16m")
 	requireStrings(t, stringList(t, service["ports"], "service.ports"), "127.0.0.1:${PORTFOLIO_HOST_PORT:-8080}:8080")
 	requireStrings(t, stringList(t, service["volumes"], "service.volumes"), "${PORTFOLIO_DATA_DIR:?set PORTFOLIO_DATA_DIR to an operator-owned directory}:/data")
-	requireStrings(t, stringList(t, service["env_file"], "service.env_file"), "./private.env")
+	requireStrings(t, stringList(t, service["env_file"], "service.env_file"), ".env")
 	environment := yamlMap(t, service["environment"], "service.environment")
 	expectedEnvironment := map[string]string{
 		"PORTFOLIO_BIND_ADDRESS":           "0.0.0.0:8080",
@@ -257,6 +263,20 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 	}
 }
 
+func TestTrackedComposeImagesHaveRunnableDefaults(t *testing.T) {
+	for _, name := range []string{"compose.yaml", "deploy/compose.private.example.yml"} {
+		document := parseYAML(t, name)
+		service := yamlMap(t, yamlMap(t, document["services"], name+".services")["portfolio-dashboard"], name+".portfolio-dashboard")
+		image := yamlString(t, service["image"], name+".image")
+		if strings.Contains(image, "REPLACE_WITH_") {
+			t.Errorf("%s contains an image placeholder: %q", name, image)
+		}
+		if image != "${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}" {
+			t.Errorf("%s image = %q, want the repository-owned default", name, image)
+		}
+	}
+}
+
 func TestRootComposeMatchesDeployTemplate(t *testing.T) {
 	composeNames := []string{"compose.yaml", "deploy/compose.private.example.yml"}
 	documents := make([]map[string]any, len(composeNames))
@@ -266,20 +286,88 @@ func TestRootComposeMatchesDeployTemplate(t *testing.T) {
 		services := yamlMap(t, document["services"], name+".services")
 		service := yamlMap(t, services["portfolio-dashboard"], name+".portfolio-dashboard")
 		envFiles := stringList(t, service["env_file"], name+".env_file")
-		if !reflect.DeepEqual(envFiles, []string{"./private.env"}) {
-			t.Fatalf("%s env_file = %v, want exactly ./private.env", name, envFiles)
+		wantEnvFile := ".env"
+		if name != "compose.yaml" {
+			wantEnvFile = "../.env"
+		}
+		if !reflect.DeepEqual(envFiles, []string{wantEnvFile}) {
+			t.Fatalf("%s env_file = %v, want exactly %s", name, envFiles, wantEnvFile)
 		}
 		resolved := path.Clean(path.Join(path.Dir(name), envFiles[0]))
-		wantResolved := path.Join(path.Dir(name), "private.env")
+		wantResolved := ".env"
 		if resolved != wantResolved {
 			t.Fatalf("%s env_file resolves to %q, want %q", name, resolved, wantResolved)
 		}
 		// Compare the files as the same Compose document after mapping each
-		// location-relative private.env to one logical file name.
-		service["env_file"] = []any{"private.env"}
+		// location-relative .env to one logical file name.
+		service["env_file"] = []any{".env"}
 	}
 	if !reflect.DeepEqual(documents[0], documents[1]) {
 		t.Fatalf("root compose.yaml diverges from deploy/compose.private.example.yml:\nroot: %#v\ndeploy: %#v", documents[0], documents[1])
+	}
+}
+
+func TestRootEnvExampleIsTrackedAllowedAndMatchesCompatibilityTemplate(t *testing.T) {
+	root := repoFile(t, ".env.example")
+	compatibility := repoFile(t, "deploy/private.env.example")
+	if root != compatibility {
+		t.Fatal(".env.example diverges from deploy/private.env.example")
+	}
+
+	for _, name := range []string{"PORTFOLIO_PUBLIC_ORIGIN", "PORTFOLIO_AUTH_USERNAME", "PORTFOLIO_AUTH_PASSWORD_HASH", "PORTFOLIO_SESSION_SECRET", "PORTFOLIO_DATA_DIR"} {
+		if !strings.Contains(root, name+"=") {
+			t.Errorf(".env.example is missing %s", name)
+		}
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(root, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("invalid root env template line %q", line)
+		}
+		values[name] = value
+	}
+	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET", "PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE"} {
+		if _, ok := values[name]; !ok {
+			t.Errorf(".env.example is missing machine setting %s", name)
+		}
+	}
+	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET"} {
+		if values[name] != "" {
+			t.Errorf("machine identity/secret %s is not blank by default", name)
+		}
+	}
+	for _, name := range []string{"PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE"} {
+		if values[name] != "false" {
+			t.Errorf("machine grant %s = %q, want false by default", name, values[name])
+		}
+	}
+	for _, stale := range []string{"all four", "scoped machine reader", "reader-only"} {
+		if strings.Contains(strings.ToLower(root), stale) {
+			t.Errorf(".env.example contains stale machine wording %q", stale)
+		}
+	}
+
+	rootDir := repoRoot(t)
+	tracked := exec.Command("git", "ls-files", "--error-unmatch", ".env.example")
+	tracked.Dir = rootDir
+	if output, err := tracked.CombinedOutput(); err != nil {
+		t.Fatalf(".env.example is not tracked: %v (%s)", err, output)
+	}
+
+	ignored := exec.Command("git", "check-ignore", "--no-index", "--quiet", ".env")
+	ignored.Dir = rootDir
+	if err := ignored.Run(); err != nil {
+		t.Fatalf("git does not ignore root .env: %v", err)
+	}
+	allowed := exec.Command("git", "check-ignore", "--no-index", "--quiet", ".env.example")
+	allowed.Dir = rootDir
+	if err := allowed.Run(); err == nil {
+		t.Fatal("git ignores tracked .env.example")
 	}
 }
 
@@ -291,7 +379,7 @@ func TestWorkflowTriggersAndPublicationAreStructured(t *testing.T) {
 		if got := stringList(t, event["paths"], "on."+eventName+".paths"); len(got) == 0 {
 			t.Fatalf("on.%s.paths is empty", eventName)
 		} else {
-			requireStrings(t, got, "deploy/**", "compose.yaml", "docs/private-deployment.md")
+			requireStrings(t, got, "deploy/**", "compose.yaml", ".env.example", ".gitignore", "docs/private-deployment.md")
 		}
 	}
 	jobs := yamlMap(t, document["jobs"], "jobs")
@@ -323,10 +411,36 @@ func TestWorkflowTriggersAndPublicationAreStructured(t *testing.T) {
 	if yamlString(t, with["platforms"], "publication platforms") != "linux/amd64,linux/arm64" || !yamlBool(t, with["push"], "publication push") || yamlString(t, with["provenance"], "publication provenance") != "mode=max" || !yamlBool(t, with["sbom"], "publication sbom") {
 		t.Fatal("publication build invariants changed")
 	}
-	metadata := workflowStep(t, steps, "Generate immutable image metadata")
+	metadata := workflowStep(t, steps, "Generate publication image metadata")
 	metadataWith := yamlMap(t, metadata["with"], "metadata with")
-	if !strings.Contains(yamlString(t, metadataWith["tags"], "metadata tags"), "type=raw,value=${{ github.sha }}") {
+	if yamlString(t, metadataWith["flavor"], "metadata flavor") != "latest=false" {
+		t.Error("metadata does not explicitly disable the latest tag")
+	}
+	metadataTags := yamlString(t, metadataWith["tags"], "metadata tags")
+	if !strings.Contains(metadataTags, "type=raw,value=${{ github.sha }}") {
 		t.Error("metadata does not publish the full commit SHA tag")
+	}
+	if !strings.Contains(metadataTags, "type=raw,value=main") {
+		t.Error("metadata does not publish the mutable main tag")
+	}
+	compose := parseYAML(t, "compose.yaml")
+	composeService := yamlMap(t, yamlMap(t, compose["services"], "compose services")["portfolio-dashboard"], "compose portfolio-dashboard")
+	composeImage := yamlString(t, composeService["image"], "compose image")
+	if composeImage != "${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}" || !strings.Contains(metadataTags, "type=raw,value=main") {
+		t.Error("Compose's default :main image has no matching merged-main workflow producer")
+	}
+	if strings.Contains(metadataTags, "latest") {
+		t.Error("metadata unexpectedly publishes a latest tag")
+	}
+	if _, ok := prWith["tags"]; ok {
+		t.Error("pull request build unexpectedly defines publication tags")
+	}
+	summary := workflowStep(t, steps, "Summarize publication")
+	summaryRun := yamlString(t, summary["run"], "publication summary run")
+	for _, want := range []string{"${IMMUTABLE_IMAGE}", "${MAIN_IMAGE}", "${DIGEST}", "linux/amd64", "linux/arm64"} {
+		if !strings.Contains(summaryRun, want) {
+			t.Errorf("publication summary does not report %q", want)
+		}
 	}
 	outputs := yamlMap(t, publish["outputs"], "jobs.publish-main.outputs")
 	if yamlString(t, outputs["image-digest"], "image digest output") != "${{ steps.build.outputs.digest }}" {
@@ -353,10 +467,13 @@ func TestPrivateEnvTemplateOptionalConfigurationIsDisabled(t *testing.T) {
 		}
 		values[name] = value
 	}
-	for _, name := range []string{"PORTFOLIO_DATA_DIR", "PORTFOLIO_CONTAINER_UID", "PORTFOLIO_CONTAINER_GID", "PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
+	for _, name := range []string{"PORTFOLIO_DASHBOARD_IMAGE", "PORTFOLIO_DATA_DIR", "PORTFOLIO_CONTAINER_UID", "PORTFOLIO_CONTAINER_GID", "PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
 		if _, ok := values[name]; !ok {
 			t.Errorf("missing Compose interpolation setting %s", name)
 		}
+	}
+	if values["PORTFOLIO_DASHBOARD_IMAGE"] != "" {
+		t.Errorf("optional PORTFOLIO_DASHBOARD_IMAGE is not blank")
 	}
 	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET", "FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY", "OPEN_EXCHANGE_RATES_APP_ID"} {
 		if values[name] != "" {
@@ -370,10 +487,10 @@ func TestPrivateEnvTemplateOptionalConfigurationIsDisabled(t *testing.T) {
 	}
 }
 
-func TestRootPrivateEnvIsGitIgnored(t *testing.T) {
-	command := exec.Command("git", "check-ignore", "--no-index", "--quiet", "private.env")
+func TestRootEnvIsGitIgnored(t *testing.T) {
+	command := exec.Command("git", "check-ignore", "--no-index", "--quiet", ".env")
 	command.Dir = repoRoot(t)
 	if err := command.Run(); err != nil {
-		t.Fatalf("git does not ignore root private.env: %v", err)
+		t.Fatalf("git does not ignore root .env: %v", err)
 	}
 }

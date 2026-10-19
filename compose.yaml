@@ -1,8 +1,9 @@
 services:
   portfolio-dashboard:
-    # Replace both placeholders after the merged-main workflow publishes the image.
-    # Keep the full commit tag and digest together; do not use a mutable tag.
-    image: ghcr.io/REPLACE_WITH_GHCR_OWNER/portfolio-dashboard:REPLACE_WITH_FULL_COMMIT_SHA@sha256:REPLACE_WITH_PUBLISHED_IMAGE_DIGEST
+    # The published main image is directly runnable. Override this with a full
+    # commit tag plus digest for immutable deployment pinning.
+    image: ${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}
+    pull_policy: always
     user: "${PORTFOLIO_CONTAINER_UID:-65532}:${PORTFOLIO_CONTAINER_GID:-65532}"
     restart: unless-stopped
     read_only: true
@@ -17,7 +18,7 @@ services:
     volumes:
       - "${PORTFOLIO_DATA_DIR:?set PORTFOLIO_DATA_DIR to an operator-owned directory}:/data"
     env_file:
-      - "./private.env"
+      - ".env"
     environment:
       PORTFOLIO_BIND_ADDRESS: "0.0.0.0:8080"
       PORTFOLIO_DATA_PATH: "/data/portfolio-dashboard.sqlite"
