@@ -214,14 +214,14 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 	document := parseYAML(t, "compose.yaml")
 	service := yamlMap(t, yamlMap(t, document["services"], "services")["portfolio-dashboard"], "portfolio-dashboard")
 	image := yamlString(t, service["image"], "service.image")
-	if image != "${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}" {
-		t.Fatalf("image = %q, want the runnable repository-owned default with an override", image)
+	if image != "ghcr.io/boubonming/portfolio-dashboard:main" {
+		t.Fatalf("image = %q, want the literal repository-owned :main image", image)
 	}
 	if strings.Contains(image, "REPLACE_WITH_") {
 		t.Fatalf("image %q contains a placeholder", image)
 	}
-	if yamlString(t, service["pull_policy"], "service.pull_policy") != "always" {
-		t.Error("service.pull_policy is not always")
+	if _, ok := service["pull_policy"]; ok {
+		t.Error("service.pull_policy must be absent so ordinary up can use a cached image")
 	}
 	if yamlString(t, service["user"], "service.user") != "${PORTFOLIO_CONTAINER_UID:-65532}:${PORTFOLIO_CONTAINER_GID:-65532}" {
 		t.Error("service user does not use the documented numeric UID/GID interpolation")
@@ -271,8 +271,11 @@ func TestTrackedComposeImagesHaveRunnableDefaults(t *testing.T) {
 		if strings.Contains(image, "REPLACE_WITH_") {
 			t.Errorf("%s contains an image placeholder: %q", name, image)
 		}
-		if image != "${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}" {
-			t.Errorf("%s image = %q, want the repository-owned default", name, image)
+		if image != "ghcr.io/boubonming/portfolio-dashboard:main" {
+			t.Errorf("%s image = %q, want the literal repository-owned :main image", name, image)
+		}
+		if _, ok := service["pull_policy"]; ok {
+			t.Errorf("%s defines pull_policy; ordinary up must not force a pull", name)
 		}
 	}
 }
@@ -304,6 +307,22 @@ func TestRootComposeMatchesDeployTemplate(t *testing.T) {
 	}
 	if !reflect.DeepEqual(documents[0], documents[1]) {
 		t.Fatalf("root compose.yaml diverges from deploy/compose.private.example.yml:\nroot: %#v\ndeploy: %#v", documents[0], documents[1])
+	}
+}
+
+func TestImageOverrideIsAbsentFromDeploymentSurface(t *testing.T) {
+	for _, name := range []string{
+		"compose.yaml",
+		"deploy/compose.private.example.yml",
+		".env.example",
+		"deploy/private.env.example",
+		"README.md",
+		"docs/private-deployment.md",
+	} {
+		content := repoFile(t, name)
+		if strings.Contains(content, "PORTFOLIO_DASHBOARD_IMAGE") {
+			t.Errorf("%s exposes the removed image override", name)
+		}
 	}
 }
 
@@ -426,7 +445,7 @@ func TestWorkflowTriggersAndPublicationAreStructured(t *testing.T) {
 	compose := parseYAML(t, "compose.yaml")
 	composeService := yamlMap(t, yamlMap(t, compose["services"], "compose services")["portfolio-dashboard"], "compose portfolio-dashboard")
 	composeImage := yamlString(t, composeService["image"], "compose image")
-	if composeImage != "${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}" || !strings.Contains(metadataTags, "type=raw,value=main") {
+	if composeImage != "ghcr.io/boubonming/portfolio-dashboard:main" || !strings.Contains(metadataTags, "type=raw,value=main") {
 		t.Error("Compose's default :main image has no matching merged-main workflow producer")
 	}
 	if strings.Contains(metadataTags, "latest") {
@@ -467,14 +486,12 @@ func TestPrivateEnvTemplateOptionalConfigurationIsDisabled(t *testing.T) {
 		}
 		values[name] = value
 	}
-	for _, name := range []string{"PORTFOLIO_DASHBOARD_IMAGE", "PORTFOLIO_DATA_DIR", "PORTFOLIO_CONTAINER_UID", "PORTFOLIO_CONTAINER_GID", "PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
+	for _, name := range []string{"PORTFOLIO_DATA_DIR", "PORTFOLIO_CONTAINER_UID", "PORTFOLIO_CONTAINER_GID", "PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
 		if _, ok := values[name]; !ok {
 			t.Errorf("missing Compose interpolation setting %s", name)
 		}
 	}
-	if values["PORTFOLIO_DASHBOARD_IMAGE"] != "" {
-		t.Errorf("optional PORTFOLIO_DASHBOARD_IMAGE is not blank")
-	}
+
 	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET", "FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY", "OPEN_EXCHANGE_RATES_APP_ID"} {
 		if values[name] != "" {
 			t.Errorf("optional %s is not blank", name)

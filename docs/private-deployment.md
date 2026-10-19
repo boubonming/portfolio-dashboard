@@ -18,7 +18,7 @@ No local multi-platform image build is claimed by this repository. The pull-requ
 
 ## Operator setup
 
-1. The tracked root `compose.yaml` and `.env.example` are the primary deployment files. Copy `.env.example` to `.env`, set mode `0600`, and replace the required `REPLACE_WITH_*` values. Leave `PORTFOLIO_DASHBOARD_IMAGE` blank to use the default, or set it to the exact published full-commit tag plus its `@sha256:` digest from the merged-main workflow summary for immutable pinning. Leave optional machine/provider entries blank unless enabling those features. Set `PORTFOLIO_DATA_DIR` to an operator-owned directory; the example supplies safe defaults for container UID/GID (`65532`), host port (`8080`), and reporting currency (`MYR`). Compose automatically reads the root `.env` file:
+1. The tracked root `compose.yaml` and `.env.example` are the primary deployment files. Copy `.env.example` to `.env`, set mode `0600`, and replace the required `REPLACE_WITH_*` values. Leave optional machine/provider entries blank unless enabling those features. Set `PORTFOLIO_DATA_DIR` to an operator-owned directory; the example supplies safe defaults for container UID/GID (`65532`), host port (`8080`), and reporting currency (`MYR`). Compose uses the literal repository-owned `ghcr.io/boubonming/portfolio-dashboard:main` image and automatically reads the root `.env` file:
 
    ```sh
    cp .env.example .env
@@ -38,18 +38,19 @@ No local multi-platform image build is claimed by this repository. The pull-requ
    # Set PORTFOLIO_DATA_DIR=/path/to/portfolio-dashboard-data in .env.
    ```
 
-4. Review the rendered Compose configuration, then start it. The default host binding is loopback-only (`127.0.0.1:8080`); TLS and any public reverse proxy are intentionally outside this package. The application listens on port 8080 and stores SQLite at `/data/portfolio-dashboard.sqlite`.
+4. Review the rendered Compose configuration, then start it. The default host binding is loopback-only (`127.0.0.1:8080`); TLS and any public reverse proxy are intentionally outside this package. The application listens on port 8080 and stores SQLite at `/data/portfolio-dashboard.sqlite`. Ordinary `docker compose up -d` uses the locally cached `:main` image when present. To deliberately update the image, pull it first and then start the service:
 
    ```sh
-   docker compose -f compose.yaml up -d
-   docker compose -f compose.yaml ps
+   docker compose pull
+   docker compose up -d
+   docker compose ps
    ```
 
 The runtime image runs as non-root with a read-only root filesystem, a bounded non-executable `/tmp`, no Linux capabilities, and `no-new-privileges`. Only `/data` is writable. The image healthcheck invokes the application binary's restricted `healthcheck` command, which can call only an HTTP(S) `/healthz` URL on literal loopback with an explicit port, never follows redirects or environment proxies, has a bounded timeout, reads at most 4 KiB, and accepts only HTTP 200.
 
 ## After publication: verify the published result
 
-On the trusted operator host, compare the workflow summary digest with the registry resolution before replacing the example image line. The merged-main workflow updates the mutable `main` tag and also publishes the full-SHA tag to the same digest. For immutable production pinning, use the full SHA tag together with its published `@sha256:` digest through `PORTFOLIO_DASHBOARD_IMAGE`. For example, after substituting the actual owner, full SHA tag, and digest:
+On the trusted operator host, compare the workflow summary digest with the registry resolution when recording build provenance or preparing a rollback reference. The merged-main workflow updates the mutable `main` tag and also publishes the full-SHA tag to the same digest. The full-SHA tag and published digest are not required deployment settings. For example, after substituting the actual owner, full SHA tag, and digest:
 
 ```sh
 docker buildx imagetools inspect ghcr.io/OWNER/portfolio-dashboard:FULL_COMMIT_SHA@sha256:PUBLISHED_DIGEST

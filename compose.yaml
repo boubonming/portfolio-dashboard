@@ -1,9 +1,6 @@
 services:
   portfolio-dashboard:
-    # The published main image is directly runnable. Override this with a full
-    # commit tag plus digest for immutable deployment pinning.
-    image: ${PORTFOLIO_DASHBOARD_IMAGE:-ghcr.io/boubonming/portfolio-dashboard:main}
-    pull_policy: always
+    image: ghcr.io/boubonming/portfolio-dashboard:main
     user: "${PORTFOLIO_CONTAINER_UID:-65532}:${PORTFOLIO_CONTAINER_GID:-65532}"
     restart: unless-stopped
     read_only: true

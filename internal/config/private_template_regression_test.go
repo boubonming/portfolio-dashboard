@@ -13,6 +13,16 @@ func TestPrivateTemplateDisabledOptionalConfigurationStaysDisabled(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	rootContent, err := os.ReadFile(filepath.Join("..", "..", ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rootContent) != string(content) {
+		t.Fatal("root and compatibility environment templates diverge")
+	}
+	if strings.Contains(string(content), "PORTFOLIO_DASHBOARD_IMAGE") {
+		t.Fatal("private environment template exposes the removed image override")
+	}
 	values := make(map[string]string)
 	for _, line := range strings.Split(string(content), "\n") {
 		line = strings.TrimSpace(line)
