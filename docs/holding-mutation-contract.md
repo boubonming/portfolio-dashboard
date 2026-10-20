@@ -34,6 +34,8 @@ The machine request has exactly one `Authorization: Bearer <opaque-token>` heade
 
 The configured grant and persisted grant are intersected at request time. A missing, malformed, duplicate, weak, invalid, disabled, revoked, wrong-portfolio, or insufficient bearer is 401 for missing/invalid credentials and 403 for an authenticated but unauthorized principal. Machine calls do not send or require Origin or CSRF. The API never reveals which grant or binding failed.
 
+All persisted actor IDs use the bounded grammar `^[A-Za-z0-9][A-Za-z0-9._~-]*$` and the existing 1-128 byte bound. This applies to machine principal insert/update/upsert, idempotency ownership, archive actor fields, holding audit ownership, and any future Activity actor-ID column. Empty, first-character-invalid, whitespace, slash, control, Unicode, and overlength IDs are rejected before any write. Existing malformed legacy machine principals are retained as historical rows but cannot satisfy the active principal or mutation-idempotency guards and therefore cannot acquire holding-mutation authority or produce an API receipt.
+
 ### Permission witness
 
 A successful receipt and append-only audit witness record only actor category, actor ID, and effective permission names. A browser witness is `browser_user/local-owner/portfolio:read`; a machine witness is `machine/<principal-id>/portfolio:read,holdings:write`. The witness is captured at commit time and is not recomputed when configuration later changes.
@@ -59,7 +61,9 @@ An account, when supplied, must exist and have the requested portfolio as owner.
 
 Removal is an archive state transition, never `DELETE FROM lots`. The lot remains addressable by its ID with `lifecycle=removed` and its original immutable quantity, unit cost, cost basis, currency, account, acquisition date, and instrument. `removed_at`, actor category, and actor ID are appended as removal metadata. A removed lot is excluded from default current holdings reads. Its old snapshots, review targets, reviews, theses and thesis revisions, Activity events, and audit records remain unchanged and addressable.
 
-A successful create returns 201; a successful removal returns 200. A replay returns the exact stored receipt and original status/headers for the same actor, portfolio, route, operation, idempotency key, and request fingerprint. A receipt contains the operation, `applied` or `replayed`, safe holding record, new integer `portfolio_revision`, `snapshot_state`, current snapshot ID if any, actor witness, audit event ID, Activity event ID, and idempotency key. It contains no credential or raw request material.
+Legacy `lots.created_at` is historical display/audit data and is preserved byte-for-byte. The contract artifact adds nullable `lots.created_at_order_key`, a separately persisted canonical UTC nanosecond comparison key. The trusted migration preflight parses RFC3339 values with no fraction, short fractions, nine-digit fractions, and offsets, normalizes them semantically to the 30-byte UTC form, and leaves the original value untouched. New rows require canonical `created_at` and populate the same key. An unparseable legacy value remains in place with a NULL key and archive is rejected with stable `invalid_holding_created_at` before any lot, revision, audit, Activity, or idempotency write. Archive ordering compares canonical `removed_at` against the key, so equal, earlier, and later instants are deterministic and never lexical comparisons against unconstrained historical text. Migration rollback restores both the original bytes and the key state.
+
+A successful create returns 201; a successful removal returns 200. A replay returns the exact stored receipt and original status/headers for the same actor category, actor ID, portfolio, operation, idempotency key, and request fingerprint. The physical namespace is exactly `(actor_category, actor_id, portfolio_id, operation, idempotency_key)`; there is no separate route dimension. `remove` is the archive operation, so the same key is independent in create and archive namespaces. Same-operation replay has no side effects; same-operation reuse with a different canonical fingerprint is `409 idempotency_conflict` with zero side effects. A receipt contains the operation, `applied` or `replayed`, safe holding record, new integer `portfolio_revision`, `snapshot_state`, current snapshot ID if any, actor witness, audit event ID, Activity event ID, and idempotency key. It contains no credential or raw request material.
 
 `GET overview` supplies the witness as an opaque strong ETag, for example `"portfolio-demo-7"`. A mutation must send that exact value in `If-Match`. The operation compares and increments the portfolio revision in the same SQLite transaction. Any mismatch is 409 `stale_revision` and has no side effects.
 
@@ -76,7 +80,7 @@ Old snapshots and reviews retain their original holdings and values. A review wh
 The future store operation owns one `BEGIN IMMEDIATE` transaction. The HTTP layer performs authentication, body limits, canonical parsing, and authorization before entering it. Inside the transaction, the store:
 
 1. verifies portfolio scope, active actor, and the exact revision witness;
-2. checks the actor/portfolio/route/operation/idempotency key;
+2. checks the `(actor_category, actor_id, portfolio_id, operation, idempotency_key)` namespace;
 3. replays the stored response for the same fingerprint, or returns 409 `idempotency_conflict` without exposing the stored request for a different fingerprint;
 4. resolves an existing portfolio instrument or inserts one bounded inline instrument and its association, never both;
 5. inserts one active lot, or updates exactly one active lot to `removed`;
@@ -86,7 +90,7 @@ The future store operation owns one `BEGIN IMMEDIATE` transaction. The HTTP laye
 9. inserts one idempotency record containing the safe receipt and actor/permission witness; and
 10. commits. Any error rolls back every preceding step, including an inline instrument, lot/archive state, revision, audit, Activity, and idempotency record.
 
-The idempotency primary key is `(actor_category, actor_id, portfolio_id, idempotency_key)`. The fingerprint covers the canonical method, canonical path, operation, portfolio/holding IDs, canonical body (or empty removal body), and revision witness. A key/body replay returns the same result. Reuse with any changed body, path, operation, holding, or witness conflicts. Idempotency rows and holding audit rows are append-only and cannot be edited or deleted. Two concurrent creates with distinct keys each commit one lot and one event after SQLite serializes their revision updates; the second caller must retry after receiving a stale witness if its witness was old. Two concurrent removes can archive a lot only once; the winner commits and the loser receives a stale revision or `holding_not_active`, never a second audit/Activity event.
+The idempotency primary key is `(actor_category, actor_id, portfolio_id, operation, idempotency_key)`. The fingerprint covers the canonical method, canonical path, operation, portfolio/holding IDs, canonical body (or empty removal body), and revision witness; the route is fingerprinted but is not a physical namespace column. A same-operation key/body replay returns the same result. Same-operation reuse with any changed body, path, holding, or witness conflicts with zero writes. The same key in create and remove namespaces is independent. Idempotency rows and holding audit rows are append-only and cannot be edited or deleted. Two concurrent creates with distinct keys each commit one lot and one event after SQLite serializes their revision updates; the second caller must retry after receiving a stale witness if its witness was old. Two concurrent removes can archive a lot only once; the winner commits and the loser receives a stale revision or `holding_not_active`, never a second audit/Activity event.
 
 ## 7. Behavioral matrix
 
@@ -101,7 +105,9 @@ The idempotency primary key is `(actor_category, actor_id, portfolio_id, idempot
 | Missing, invalid, mismatched, or replayed browser CSRF | 403; no store access or writes. |
 | Missing, multiple, null, or wrong Origin | 403; no store access or writes. |
 | JSON unknown/duplicate field, malformed JSON, missing required field | 400 `invalid_request`; no writes. |
-| Body over 256 KiB | 413; body is not persisted or logged. |
+| Request body over 256 KiB on an endpoint that defines a body | 413; body is not persisted or logged. |
+| Archive DELETE with no body | Valid request; DELETE has no application body and is exempt from the 256 KiB JSON mutation-body limit. |
+| Archive DELETE with a non-empty body | Deterministic 400 `invalid_request`; body is not interpreted as a valid payload and DELETE does not advertise 413. Transport/server defensive limits remain separate. |
 | Content-Type other than application/json | 415; no writes. |
 | Non-canonical decimal/date, JSON number, exponent, negative quantity/cost, quantity zero, or inconsistent product | 400; no writes. |
 | Existing valid instrument | Use only its portfolio association; cross-portfolio association is 404/invalid for this portfolio. |
@@ -159,17 +165,20 @@ The executable scratch harness must run real migrations 001-008 and this artifac
 4. Show unvalued additions, archived removals, stale/no-snapshot state, and a refresh-snapshot affordance; never present an old snapshot as current.
 5. Acceptance: browser tests cover duplicate-submit/reload, stale tabs, CSRF/origin failures, inline/existing instrument branches, archive visibility, and historical links; UI remains unable to edit, sell, use an import surface, or access brokerages.
 
-## 10. Implementation-removal ledger (historical inventory, not active contract)
+## 10. Implementation/removal ledger (named work items and proof obligations)
 
-The following shipped surfaces are recorded only so the backend removal slice can remove them; none is a supported bootstrap path or acceptance criterion:
+The following are explicit downstream implementation items. They are not runtime changes in this contract-only commit, and every item must retain the no-document-import invariant.
 
-- The historical `Portfolio.md`/Obsidian reader, Markdown parser/package, and any portfolio-document bootstrap importer.
-- The importer CLI commands `import-preview`, `import-apply`, and `import-status`, including their parser, preview/apply/status handlers, and import-only tests.
-- Import-only operator documentation, README instructions, deployment/operator commands, and tests that require a document import.
-- Production `import_runs` and `import_items` tables, import indexes, and the `source_row`, `source_ref`, and `source_sha256` columns or constraints where removal is safe; preserve historical decision records only as history.
-- Downstream valuation, snapshot, overview, export, tests, README, and deployment documentation that reads source fields, import hashes, reconciliation counts, or the approved fixed 33-lot/31-instrument inventory. Replace those dependencies with canonical database holding/instrument/account/revision state and append-only actor/audit/Activity attribution.
+1. `internal/store/readmodel.go`: select only `lots.lifecycle='active'`, remove `source_row` from the read-model query/scan/domain mapping, and add a populated/archived overview regression proving removed lots are absent without changing historical rows.
+2. `internal/httpserver/export.go`: export active lots only, remove the `source_row` column and renderer, and add CSV header/row regressions for duplicate instruments and archived lots.
+3. `frontend/src/App.tsx` plus frontend types/UI: remove the `source_row` contract and render only active holdings; add component/API fixture regressions for an archived lot and an empty authenticated overview.
+4. Valuation, snapshot, and domain identity: remove source/import hashes and source-row identity; derive valuation input identity only from canonical portfolio, holding, instrument, account, and holdings-revision state; add snapshot identity and stale-after-mutation tests.
+5. Config/auth/store persistence: add independent `holdings:write`, default false, persisted effective-grant intersection, redacted receipt/log handling, and machine-principal insert/update/upsert grammar checks; prove `reviews:write` never implies holding authority with config/auth/store tests.
+6. `compose.yaml`, root `.env.example`, `deploy/private.env.example`, and private Compose/deployment docs: wire the new grant explicitly, keep its default false, redact values, and assert template byte-identity wherever templates are intended to match; add deployment/config tests and a no-secret grep check.
+7. Importer CLI, `internal/importer`, import-only tests, import tables/columns/indexes, README/decision/deployment/operator instructions, and active source-note assumptions: remove the importer surface, `import_runs`/`import_items` dependencies, `source_row`/`source_ref`/`source_sha256` identity, and fixed imported-count assertions; add repository search and build/test regressions proving no active document-import path remains. Historical rows are preserved unless a separately approved destructive migration says otherwise.
+8. Fresh initialization and authenticated empty overview: initialize `portfolio-default` as `Portfolio`/`MYR`/revision 0 with no holdings, instruments, accounts, or snapshot, preserve an ordinary populated default without rename/data loss, and add real migration plus authenticated read tests for both states.
 
-This ledger is an implementation handoff, not an API, database-authority, operator, or initialization requirement. The active contract above has no document import route, CLI, table, source identity, or fixed imported-count assumption.
+Acceptance evidence for this ledger is named rather than implied: `go test ./...` for runtime/store/httpserver/domain/config tests, frontend unit tests for read/export/UI consumers, deployment-template tests for Compose/env/docs, importer package/CLI removal tests, strict OpenAPI/Redocly validation, the expanded scratch harness, and repository searches for prohibited document/source identity. The active contract above has no document import route, CLI, table, source identity, or fixed imported-count assumption.
 
 ## 11. Explicit non-goals and preserved behavior
 

@@ -23,6 +23,43 @@ ALTER TABLE lots ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active' CHECK (life
 ALTER TABLE lots ADD COLUMN removed_at TEXT NULL;
 ALTER TABLE lots ADD COLUMN removed_by_category TEXT NULL;
 ALTER TABLE lots ADD COLUMN removed_by_id TEXT NULL;
+-- Preserve historical created_at bytes and compare through a separately
+-- persisted canonical UTC key. Parseable legacy rows are backfilled below;
+-- malformed rows remain NULL and cannot be archived until remediated.
+ALTER TABLE lots ADD COLUMN created_at_order_key TEXT NULL;
+
+-- Normalize RFC3339 offsets with SQLite date functions, but copy the original
+-- fraction independently so nanosecond ordering is not reduced to millis.
+UPDATE lots
+SET created_at_order_key =
+    strftime('%Y-%m-%dT%H:%M:%S', created_at) || '.' ||
+    substr(
+        (CASE WHEN substr(created_at, 20, 1) = '.' THEN
+            substr(created_at, 21,
+                length(created_at) - 20 - CASE WHEN substr(created_at, -1) = 'Z' THEN 1 ELSE 6 END)
+          ELSE '' END) || '000000000', 1, 9
+    ) || 'Z'
+WHERE length(created_at) BETWEEN 20 AND 35
+  AND substr(created_at, 5, 1) = '-'
+  AND substr(created_at, 8, 1) = '-'
+  AND substr(created_at, 11, 1) = 'T'
+  AND substr(created_at, 14, 1) = ':'
+  AND substr(created_at, 17, 1) = ':'
+  AND substr(created_at, 12, 2) BETWEEN '00' AND '23'
+  AND substr(created_at, 15, 2) BETWEEN '00' AND '59'
+  AND substr(created_at, 18, 2) BETWEEN '00' AND '59'
+  AND strftime('%Y-%m-%d', substr(created_at, 1, 10)) = substr(created_at, 1, 10)
+  AND (substr(created_at, -1) = 'Z' OR substr(created_at, -6, 1) IN ('+', '-'))
+  AND (substr(created_at, -1) = 'Z' OR
+       (substr(created_at, -5, 2) BETWEEN '00' AND '23' AND
+        substr(created_at, -2, 2) BETWEEN '00' AND '59'))
+  AND (substr(created_at, 20, 1) <> '.' OR
+       (length(created_at) - 20 - CASE WHEN substr(created_at, -1) = 'Z' THEN 1 ELSE 6 END) BETWEEN 0 AND 9)
+  AND strftime('%Y-%m-%dT%H:%M:%S', created_at) IS NOT NULL
+  AND (substr(created_at, 20, 1) <> '.' OR
+       substr(created_at, 21,
+           length(created_at) - 20 - CASE WHEN substr(created_at, -1) = 'Z' THEN 1 ELSE 6 END)
+           NOT GLOB '*[^0-9]*');
 
 CREATE TABLE portfolio_instruments (
     portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
@@ -93,7 +130,9 @@ END;
 
 CREATE TABLE holding_mutation_idempotency (
     actor_category TEXT NOT NULL CHECK (actor_category IN ('browser_user', 'machine')),
-    actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 128),
+    actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 128
+        AND actor_id NOT GLOB '*[^A-Za-z0-9._~-]*'
+        AND substr(actor_id, 1, 1) GLOB '[A-Za-z0-9]'),
     portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
     operation TEXT NOT NULL CHECK (operation IN ('create', 'remove')),
     idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 16 AND 128),
@@ -106,7 +145,7 @@ CREATE TABLE holding_mutation_idempotency (
     response_payload TEXT NOT NULL CHECK (json_valid(response_payload) = 1 AND json_type(response_payload) = 'object'),
     created_at TEXT NOT NULL,
     retain_until TEXT NOT NULL,
-    PRIMARY KEY (actor_category, actor_id, portfolio_id, idempotency_key),
+    PRIMARY KEY (actor_category, actor_id, portfolio_id, operation, idempotency_key),
     UNIQUE (portfolio_id, holding_id, operation),
     FOREIGN KEY (portfolio_id, holding_id) REFERENCES lots(portfolio_id, id),
     CHECK (actor_category = 'machine' OR permission_holdings_write = 0),
@@ -135,6 +174,23 @@ BEGIN
             AND permission_holdings_write = NEW.permission_holdings_write
             AND permission_holdings_write = 1
       );
+END;
+
+CREATE TRIGGER holding_machine_principal_actor_guard
+BEFORE INSERT ON machine_principals
+BEGIN
+    SELECT RAISE(ABORT, 'invalid machine principal id')
+    WHERE length(NEW.id) NOT BETWEEN 1 AND 128
+       OR NEW.id GLOB '*[^A-Za-z0-9._~-]*'
+       OR substr(NEW.id, 1, 1) NOT GLOB '[A-Za-z0-9]';
+END;
+CREATE TRIGGER holding_machine_principal_actor_update_guard
+BEFORE UPDATE OF id ON machine_principals
+BEGIN
+    SELECT RAISE(ABORT, 'invalid machine principal id')
+    WHERE length(NEW.id) NOT BETWEEN 1 AND 128
+       OR NEW.id GLOB '*[^A-Za-z0-9._~-]*'
+       OR substr(NEW.id, 1, 1) NOT GLOB '[A-Za-z0-9]';
 END;
 
 CREATE TRIGGER holding_lifecycle_guard_insert
@@ -172,7 +228,11 @@ BEGIN
            OR substr(NEW.removed_at, 12, 2) NOT BETWEEN '00' AND '23'
            OR substr(NEW.removed_at, 15, 2) NOT BETWEEN '00' AND '59'
            OR substr(NEW.removed_at, 18, 2) NOT BETWEEN '00' AND '59'
-           OR NEW.removed_at < NEW.created_at);
+           OR (NEW.created_at_order_key IS NOT NULL AND
+               (length(NEW.created_at_order_key) <> 30 OR
+                NEW.created_at_order_key NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'))
+           OR NEW.created_at_order_key IS NULL
+           OR NEW.removed_at < NEW.created_at_order_key);
 END;
 CREATE TRIGGER holding_lifecycle_guard_update
 BEFORE UPDATE OF lifecycle, removed_at, removed_by_category, removed_by_id ON lots
@@ -187,6 +247,9 @@ BEGIN
     WHERE length(NEW.removed_by_id) NOT BETWEEN 1 AND 128
        OR NEW.removed_by_id GLOB '*[^A-Za-z0-9._~-]*'
        OR substr(NEW.removed_by_id, 1, 1) NOT GLOB '[A-Za-z0-9]';
+    SELECT RAISE(ABORT, 'invalid_holding_created_at')
+    WHERE NEW.created_at_order_key IS NULL
+      AND NEW.created_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z';
     SELECT RAISE(ABORT, 'invalid holding removal timestamp')
     WHERE length(NEW.removed_at) <> 30
        OR NEW.removed_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'
@@ -195,7 +258,10 @@ BEGIN
        OR substr(NEW.removed_at, 12, 2) NOT BETWEEN '00' AND '23'
        OR substr(NEW.removed_at, 15, 2) NOT BETWEEN '00' AND '59'
        OR substr(NEW.removed_at, 18, 2) NOT BETWEEN '00' AND '59'
-       OR NEW.removed_at < NEW.created_at;
+       OR (NEW.created_at_order_key IS NOT NULL AND
+           (length(NEW.created_at_order_key) <> 30 OR
+            NEW.created_at_order_key NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'))
+       OR NEW.removed_at < COALESCE(NEW.created_at_order_key, NEW.created_at);
 END;
 
 CREATE TRIGGER holding_archival_immutable_guard
@@ -214,18 +280,47 @@ WHEN OLD.lifecycle = 'removed'
       NEW.source_row IS NOT OLD.source_row OR
       NEW.source_ref IS NOT OLD.source_ref OR
       NEW.source_sha256 IS NOT OLD.source_sha256 OR
-      NEW.created_at IS NOT OLD.created_at
+      NEW.created_at IS NOT OLD.created_at OR
+      NEW.created_at_order_key IS NOT OLD.created_at_order_key
   ))
 BEGIN
     SELECT RAISE(ABORT, 'holding fields are immutable');
+END;
+CREATE TRIGGER holding_created_at_immutable_guard
+BEFORE UPDATE OF created_at, created_at_order_key ON lots
+WHEN NEW.created_at IS NOT OLD.created_at
+  OR NEW.created_at_order_key IS NOT OLD.created_at_order_key
+BEGIN
+    SELECT RAISE(ABORT, 'holding creation timestamp is immutable');
 END;
 
 CREATE TRIGGER holding_audit_append_only_update
 BEFORE UPDATE ON audit_events
 WHEN OLD.action IN ('holding_created', 'holding_removed')
+  OR NEW.action IN ('holding_created', 'holding_removed')
 BEGIN
     SELECT RAISE(ABORT, 'holding audit events are append-only');
 END;
+
+CREATE TRIGGER holding_audit_actor_guard
+BEFORE INSERT ON audit_events
+WHEN NEW.action IN ('holding_created', 'holding_removed')
+BEGIN
+    SELECT RAISE(ABORT, 'invalid holding audit actor')
+    WHERE length(NEW.actor) NOT BETWEEN 1 AND 128
+       OR NEW.actor GLOB '*[^A-Za-z0-9._~-]*'
+       OR substr(NEW.actor, 1, 1) NOT GLOB '[A-Za-z0-9]';
+END;
+CREATE TRIGGER holding_audit_actor_update_guard
+BEFORE UPDATE OF actor, action ON audit_events
+WHEN NEW.action IN ('holding_created', 'holding_removed')
+BEGIN
+    SELECT RAISE(ABORT, 'invalid holding audit actor')
+    WHERE length(NEW.actor) NOT BETWEEN 1 AND 128
+       OR NEW.actor GLOB '*[^A-Za-z0-9._~-]*'
+       OR substr(NEW.actor, 1, 1) NOT GLOB '[A-Za-z0-9]';
+END;
+
 CREATE TRIGGER holding_audit_append_only_delete
 BEFORE DELETE ON audit_events
 WHEN OLD.action IN ('holding_created', 'holding_removed')
@@ -264,12 +359,32 @@ BEGIN
     );
 END;
 
+CREATE TRIGGER holding_mutation_audit_owner_update_guard
+BEFORE UPDATE ON audit_event_portfolios
+WHEN EXISTS (
+    SELECT 1 FROM audit_events
+    WHERE id = OLD.audit_event_id AND action IN ('holding_created', 'holding_removed')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'holding audit ownership is append-only');
+END;
+CREATE TRIGGER holding_mutation_audit_owner_delete_guard
+BEFORE DELETE ON audit_event_portfolios
+WHEN EXISTS (
+    SELECT 1 FROM audit_events
+    WHERE id = OLD.audit_event_id AND action IN ('holding_created', 'holding_removed')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'holding audit ownership is append-only');
+END;
+
 CREATE TRIGGER holding_mutation_activity_scope_guard
 BEFORE INSERT ON activity_events
 WHEN NEW.action IN ('holding_created', 'holding_removed')
 BEGIN
     SELECT RAISE(ABORT, 'holding Activity must reference its audit')
-    WHERE NEW.source_audit_event_id IS NULL
+    WHERE NEW.actor_category NOT IN ('browser_user', 'machine')
+       OR NEW.source_audit_event_id IS NULL
        OR NEW.category <> 'holding'
        OR NEW.entity_type <> 'holding'
        OR NEW.entity_id IS NULL
@@ -381,8 +496,11 @@ DROP TABLE _holding_contract_default_state;
 --
 --   1. BEGIN IMMEDIATE; verify the authenticated principal and exact
 --      portfolio revision witness (If-Match).
---   2. Check the scoped idempotency key/fingerprint. Replay the stored
---      response verbatim; a different fingerprint returns 409.
+--   2. Check the (actor_category, actor_id, portfolio_id, operation,
+--      idempotency_key) namespace and canonical fingerprint. Replay the
+--      stored response verbatim; a same-operation different fingerprint
+--      returns 409. Create and remove namespaces are independent; route is
+--      fingerprinted but is not a physical namespace column.
 --   3. Resolve an existing portfolio_instruments row, or insert the bounded
 --      inline instrument and its portfolio association, but never both inputs.
 --   4. Insert the active lot, or UPDATE one active lot to lifecycle='removed'
