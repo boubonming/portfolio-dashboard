@@ -2,6 +2,7 @@ openapi: 3.0.3
 info:
   title: Portfolio Dashboard API
   version: 1.1.0-phase-d-contract
+  license: { name: MIT, url: 'https://opensource.org/license/mit/' }
   description: >-
     Authenticated portfolio-scoped holdings, immutable valuation snapshots,
     editable investment theses, and the Phase D scoped advisory review contract.
@@ -49,7 +50,9 @@ paths:
       summary: Read one portfolio overview
       description: Returns source-traceable lots and the latest immutable snapshot. Reporting currency changes only this read view.
       operationId: getPortfolioOverview
-      security: [{ sessionCookie: [] }]
+      security:
+        - sessionCookie: []
+        - machineBearer: []
       parameters:
         - name: portfolioId
           in: path
@@ -63,6 +66,11 @@ paths:
       responses:
         '200':
           description: Portfolio overview. A no_snapshot or incomplete state is explicit and does not include a fabricated total.
+          headers:
+            ETag: { description: Exact portfolio holdings revision used as If-Match by holding mutations, schema: { type: string, minLength: 3, maxLength: 256 } }
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+            Vary: { $ref: '#/components/headers/PrivateVary' }
+            X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PortfolioOverview' }
@@ -105,6 +113,120 @@ paths:
         '404': { description: Portfolio or API route not found }
         '405': { description: Read-only endpoint does not accept mutation methods }
         '500': { description: Internal server error }
+  /api/v1/portfolios/{portfolioId}/holdings:
+    post:
+      summary: Create one active holding lot
+      description: >-
+        Creates one lot through the same portfolio-scoped store operation used
+        by the browser and the explicitly authorized Hermes machine principal.
+        Browser calls use the authenticated session, strict same-origin Origin,
+        and session-bound CSRF. Machine calls use the exact configured bearer
+        scope and require portfolio:read plus holdings:write. All decimal and
+        date values are canonical strings; no JSON number is accepted.
+      operationId: createPortfolioHolding
+      security:
+        - sessionCookie: []
+        - machineBearer: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { $ref: '#/components/schemas/IdempotencyKey' } }
+        - { name: If-Match, in: header, required: true, description: Exact ETag returned by the portfolio overview read. Browser callers additionally send Origin and X-CSRF-Token; machine callers must not send a CSRF value., schema: { type: string, minLength: 3, maxLength: 256 } }
+        - { name: Origin, in: header, required: false, description: Required for browser callers and must exactly equal the configured application origin; ignored only for a valid machine bearer., schema: { type: string, format: uri, maxLength: 512 } }
+        - { name: X-CSRF-Token, in: header, required: false, description: Required for browser callers and bound to the authenticated session; forbidden for machine callers., schema: { type: string, minLength: 32, maxLength: 512 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HoldingCreateRequest' }
+            example:
+              instrument: { instrument_id: instrument-demo-001 }
+              quantity: '12.5000'
+              unit_cost: '10.00'
+              cost_basis: '125.0000'
+              currency: USD
+              account_id: account-demo-001
+              acquisition_date: '2026-01-15'
+              provenance: { kind: manual, reference: broker-statement-2026-01-15 }
+      responses:
+        '201':
+          description: Holding committed atomically and is active.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+            Vary: { $ref: '#/components/headers/PrivateVary' }
+            X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
+            Location: { description: Canonical holding URL, schema: { type: string, maxLength: 512 } }
+            ETag: { description: New exact portfolio revision witness, schema: { type: string, minLength: 3, maxLength: 256 } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HoldingMutationReceipt' }
+              example:
+                operation: create
+                result: applied
+                holding: { portfolio_id: demo-portfolio, holding_id: lot-demo-002, instrument_id: instrument-demo-001, symbol: DEMO, quantity: '12.5000', unit_cost: '10.00', cost_basis: '125.0000', currency: USD, account_id: account-demo-001, acquisition_date: '2026-01-15', lifecycle: active, created_at: '2026-01-15T08:00:00.000000000Z', removed_at: null, provenance: { kind: manual, reference: broker-statement-2026-01-15 } }
+                portfolio_revision: 8
+                snapshot_state: stale
+                current_snapshot_id: snap-2026-01-15
+                actor: { category: machine, id: hermes-holdings-writer, permissions: [portfolio:read, holdings:write] }
+                audit_event_id: audit-holding-002
+                activity_event_id: activity-holding-002
+                idempotency_key: create-demo-idem-001
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/HoldingScopeNotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedPost' }
+        '409': { $ref: '#/components/responses/MutationConflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/portfolios/{portfolioId}/holdings/{holdingId}:
+    delete:
+      summary: Logically remove one active holding lot
+      description: >-
+        Archives the active lot without deleting it. Immutable snapshots,
+        reviews, review targets, theses/history, Activity, and audit records
+        remain addressable. A new valuation snapshot is required before the
+        portfolio can be current again.
+      operationId: removePortfolioHolding
+      security:
+        - sessionCookie: []
+        - machineBearer: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: holdingId, in: path, required: true, schema: { $ref: '#/components/schemas/HoldingId' } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { $ref: '#/components/schemas/IdempotencyKey' } }
+        - { name: If-Match, in: header, required: true, description: Exact ETag returned by the portfolio overview read. Browser callers additionally send Origin and X-CSRF-Token; machine callers must not send a CSRF value., schema: { type: string, minLength: 3, maxLength: 256 } }
+        - { name: Origin, in: header, required: false, description: Required for browser callers and must exactly equal the configured application origin; ignored only for a valid machine bearer., schema: { type: string, format: uri, maxLength: 512 } }
+        - { name: X-CSRF-Token, in: header, required: false, description: Required for browser callers and bound to the authenticated session; forbidden for machine callers., schema: { type: string, minLength: 32, maxLength: 512 } }
+      responses:
+        '200':
+          description: Holding archived atomically, or the stored receipt for an idempotent replay.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/NoStore' }
+            Vary: { $ref: '#/components/headers/PrivateVary' }
+            X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
+            ETag: { description: New exact portfolio revision witness, schema: { type: string, minLength: 3, maxLength: 256 } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HoldingMutationReceipt' }
+              example:
+                operation: remove
+                result: applied
+                holding: { portfolio_id: demo-portfolio, holding_id: lot-demo-001, instrument_id: instrument-demo-001, symbol: DEMO, quantity: '12.5000', unit_cost: '10.00', cost_basis: '125.0000', currency: USD, account_id: null, acquisition_date: '2026-01-15', lifecycle: removed, created_at: '2026-01-15T08:00:00.000000000Z', removed_at: '2026-01-16T08:00:00.000000000Z', provenance: { kind: manual, reference: broker-statement-2026-01-15 } }
+                portfolio_revision: 9
+                snapshot_state: stale
+                current_snapshot_id: snap-2026-01-15
+                actor: { category: browser_user, id: local-owner, permissions: [portfolio:read] }
+                audit_event_id: audit-holding-003
+                activity_event_id: activity-holding-003
+                idempotency_key: remove-demo-idem-001
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/HoldingScopeNotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedDelete' }
+        '409': { $ref: '#/components/responses/MutationConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
   /api/v1/portfolios/{portfolioId}/export.csv:
     get:
       summary: Download a portfolio-scoped CSV overview
@@ -404,7 +526,9 @@ components:
         Opaque machine credential for the fixed Hermes principal. The token is
         injected into the Hermes environment, compared in constant time, and
         never stored in SQLite, returned, logged, placed in a URL, or exposed
-        to browser code. The same active principal requires reviews:write for review submission; portfolio:read is the only optional additional permission.
+        to browser code. Holding mutations require the separately configured
+        holdings:write permission in addition to portfolio:read. It is disabled
+        by default and is not implied by reviews:write.
   headers:
     NoStore:
       description: Private responses are never stored by shared or browser caches.
@@ -471,6 +595,17 @@ components:
         Vary: { $ref: '#/components/headers/PrivateVary' }
         X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
       content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
+    MethodNotAllowedDelete:
+      description: Known holding resource path with an unsupported method.
+      headers:
+        Allow:
+          description: Exact canonical DELETE method for the holding resource.
+          schema: { type: string, enum: [DELETE] }
+          example: DELETE
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+        Vary: { $ref: '#/components/headers/PrivateVary' }
+        X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
+      content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
     PortfolioNotFound:
       description: Portfolio does not exist; cross-portfolio existence is not disclosed.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
@@ -481,6 +616,10 @@ components:
       content: { application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } } }
     HoldingOrSnapshotNotFound:
       description: Holding, snapshot, or portfolio association does not exist.
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } } }
+    HoldingScopeNotFound:
+      description: Portfolio, account, instrument, or holding is absent or is not valid in this portfolio.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
       content: { application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } } }
     PortfolioSnapshotOrTargetNotFound:
@@ -495,6 +634,13 @@ components:
       description: Key was used with a different request fingerprint, or the immutable operation conflicts with an existing record.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
       content: { application/json: { schema: { $ref: '#/components/schemas/IdempotencyConflictError' } } }
+    MutationConflict:
+      description: >-
+        The portfolio revision witness is stale, the idempotency key has a
+        different request fingerprint, or the target is already archived.
+        The response never reveals another principal's request body.
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/MutationConflictError' } } }
     PayloadTooLarge:
       description: Request exceeds the 256 KiB review or feedback body limit.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
@@ -759,6 +905,132 @@ components:
         currency: { type: string }
         value: { type: string, description: Exact decimal reporting-currency value grouped by original source currency. }
         percentage: { type: string, description: Exact two-decimal percentage apportioned by largest remainder; displayed percentages reconcile to 100. }
+    IdempotencyKey:
+      type: string
+      minLength: 16
+      maxLength: 128
+      pattern: '^[A-Za-z0-9._~-]+$'
+      description: Opaque retry key scoped to actor, portfolio, route, and operation; never a secret.
+    HoldingQuantity:
+      type: string
+      minLength: 1
+      maxLength: 40
+      pattern: '^[1-9][0-9]*(?:[.][0-9]{1,18})?$'
+      description: Positive canonical base-10 quantity, with at most 18 fractional digits.
+    HoldingMoney:
+      type: string
+      minLength: 1
+      maxLength: 40
+      pattern: '^(?:0|[1-9][0-9]*)(?:[.][0-9]{1,18})?$'
+      description: Non-negative canonical base-10 amount, with at most 18 fractional digits.
+    InstrumentReference:
+      type: object
+      additionalProperties: false
+      required: [instrument_id]
+      properties:
+        instrument_id: { $ref: '#/components/schemas/InstrumentId' }
+      description: Existing instrument already associated with this portfolio.
+    InlineInstrument:
+      type: object
+      additionalProperties: false
+      required: [symbol, currency]
+      properties:
+        symbol: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9._/-]*$' }
+        description: { type: string, minLength: 1, maxLength: 256 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        asset_type: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9._-]+$' }
+        exchange: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9._-]+$' }
+      description: Bounded new global instrument definition, associated with this portfolio in the same transaction.
+    HoldingInstrumentInput:
+      oneOf:
+        - $ref: '#/components/schemas/InstrumentReference'
+        - $ref: '#/components/schemas/InlineInstrument'
+      description: Exactly one of instrument_id or the inline definition is accepted; sending both is invalid.
+    HoldingProvenance:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [manual, statement, other] }
+        reference: { type: string, minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9][A-Za-z0-9._:/ -]*$' }
+      description: Safe source label only; credentials, bearer values, CSRF values, and raw request bodies are forbidden.
+    HoldingCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [instrument, quantity, unit_cost, cost_basis, currency, provenance]
+      properties:
+        instrument: { $ref: '#/components/schemas/HoldingInstrumentInput' }
+        quantity: { $ref: '#/components/schemas/HoldingQuantity' }
+        unit_cost: { $ref: '#/components/schemas/HoldingMoney' }
+        cost_basis: { $ref: '#/components/schemas/HoldingMoney' }
+        currency: { type: string, pattern: '^[A-Z]{3}$', description: Must equal the instrument currency. }
+        account_id: { type: string, nullable: true, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        acquisition_date: { type: string, format: date, nullable: true, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' }
+        provenance: { $ref: '#/components/schemas/HoldingProvenance' }
+      description: >-
+        The server verifies exact quantity x unit_cost equals cost_basis at
+        the declared decimal scale and rejects any non-canonical representation,
+        including JSON numbers, exponent notation, leading zeroes, and negative values.
+    HoldingRecord:
+      type: object
+      additionalProperties: false
+      required: [portfolio_id, holding_id, instrument_id, symbol, quantity, unit_cost, cost_basis, currency, account_id, acquisition_date, lifecycle, created_at, removed_at, provenance]
+      properties:
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        holding_id: { $ref: '#/components/schemas/HoldingId' }
+        instrument_id: { $ref: '#/components/schemas/InstrumentId' }
+        symbol: { type: string, minLength: 1, maxLength: 64 }
+        description: { type: string, minLength: 1, maxLength: 256 }
+        quantity: { $ref: '#/components/schemas/HoldingQuantity' }
+        unit_cost: { $ref: '#/components/schemas/HoldingMoney' }
+        cost_basis: { $ref: '#/components/schemas/HoldingMoney' }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        account_id: { type: string, nullable: true, minLength: 1, maxLength: 128 }
+        acquisition_date: { type: string, format: date, nullable: true, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' }
+        lifecycle: { type: string, enum: [active, removed] }
+        created_at: { $ref: '#/components/schemas/CanonicalDateTime' }
+        removed_at: { type: string, format: date-time, nullable: true, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$' }
+        provenance: { $ref: '#/components/schemas/HoldingProvenance' }
+    MutationActor:
+      type: object
+      additionalProperties: false
+      required: [category, id, permissions]
+      properties:
+        category: { type: string, enum: [browser_user, machine] }
+        id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        permissions: { type: array, minItems: 1, maxItems: 2, uniqueItems: true, items: { type: string, enum: [portfolio:read, holdings:write] } }
+      description: Immutable safe attribution captured by the mutation; no credential material is included.
+    HoldingMutationReceipt:
+      type: object
+      additionalProperties: false
+      required: [operation, result, holding, portfolio_revision, snapshot_state, current_snapshot_id, actor, audit_event_id, activity_event_id, idempotency_key]
+      properties:
+        operation: { type: string, enum: [create, remove] }
+        result: { type: string, enum: [applied, replayed] }
+        holding: { $ref: '#/components/schemas/HoldingRecord' }
+        portfolio_revision: { type: integer, minimum: 1 }
+        snapshot_state: { type: string, enum: [stale, no_snapshot] }
+        current_snapshot_id: { type: string, nullable: true, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
+        actor: { $ref: '#/components/schemas/MutationActor' }
+        audit_event_id: { type: string, minLength: 1, maxLength: 128 }
+        activity_event_id: { type: string, minLength: 1, maxLength: 128 }
+        idempotency_key: { $ref: '#/components/schemas/IdempotencyKey' }
+      description: >-
+        The receipt is safe to persist and replay. It contains no bearer,
+        session, CSRF, secret, or raw request payload.
+    MutationConflictError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, request_id]
+          properties:
+            code: { type: string, enum: [stale_revision, idempotency_conflict, holding_not_active] }
+            message: { type: string, minLength: 1, maxLength: 256 }
+            request_id: { type: string, minLength: 1, maxLength: 128 }
     Holding:
       type: object
       required: [lot_id, symbol, quantity, currency, freshness, data_quality, missing_broker, missing_acquisition_date]
@@ -1097,7 +1369,7 @@ components:
       properties:
         principal_id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
         principal_type: { type: string, enum: [browser_user, machine] }
-        permissions: { type: array, minItems: 1, maxItems: 2, uniqueItems: true, items: { type: string, enum: [portfolio:read, reviews:write] } }
+        permissions: { type: array, minItems: 1, maxItems: 3, uniqueItems: true, items: { type: string, enum: [portfolio:read, reviews:write, holdings:write] } }
       description: >-
         Immutable effective permissions captured at authentication time. A
         machine review attribution always has reviews:write as its primary
