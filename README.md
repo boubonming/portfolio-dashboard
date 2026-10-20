@@ -55,6 +55,20 @@ set `PORTFOLIO_ENV=development PORTFOLIO_COOKIE_SECURE=false`; there are no
 default credentials or secrets. CSRF tokens are returned by session bootstrap,
 kept in frontend memory, and required on unsafe same-origin API requests.
 
+Generate the bcrypt password hash interactively; never put the plaintext
+password on the command line:
+
+```sh
+htpasswd -nBC 12 portfolio-admin
+```
+
+Enter and confirm the password at the prompts. The output includes
+`portfolio-admin:` followed by the bcrypt value. Copy only the bcrypt portion
+after the first colon, not `portfolio-admin:`. Store the complete bcrypt value
+in single quotes in `.env`, for example
+`PORTFOLIO_AUTH_PASSWORD_HASH='REPLACE_WITH_COMPLETE_BCRYPT_VALUE'`. Never
+paste the hash or plaintext password into chat, and never commit either one.
+
 The optional least-privilege machine identity is an external Hermes bearer
 identity, not an embedded runtime. Configure all five settings together:
 `PORTFOLIO_MACHINE_PRINCIPAL_ID` (stable non-secret audit identity),
