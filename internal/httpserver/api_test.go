@@ -140,6 +140,43 @@ func TestPortfolioOverviewAPIIsScopedAndKeepsDecimalsAsStrings(t *testing.T) {
 	}
 }
 
+func TestForeignInstrumentReassignmentCannotReachOverviewOrCSV(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
+	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-foreign", "Foreign", "MYR", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-foreign", "FOREIGN", "Foreign instrument", "USD", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-foreign", "instrument-foreign", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`UPDATE lots SET instrument_id=? WHERE id=?`, "instrument-foreign", "lot-api"); err == nil {
+		t.Fatal("foreign instrument reassignment unexpectedly succeeded")
+	}
+	var instrumentID string
+	if err := database.DB.QueryRow(`SELECT instrument_id FROM lots WHERE id=?`, "lot-api").Scan(&instrumentID); err != nil {
+		t.Fatal(err)
+	}
+	if instrumentID != "instrument-api" {
+		t.Fatalf("lot instrument_id=%q after rejected reassignment", instrumentID)
+	}
+
+	handler := authenticatedAPIHandler(t, database)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview", nil))
+	if response.Code != http.StatusOK || contains(response.Body.String(), "FOREIGN") || contains(response.Body.String(), "Foreign instrument") {
+		t.Fatalf("overview exposed foreign instrument: status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/export.csv?currency=MYR", nil))
+	if response.Code != http.StatusOK || contains(response.Body.String(), "FOREIGN") || contains(response.Body.String(), "Foreign instrument") {
+		t.Fatalf("CSV exposed foreign instrument: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestPortfolioOverviewAPINoSnapshotIsExplicit(t *testing.T) {
 	database := apiFixture(t)
 	defer database.Close()

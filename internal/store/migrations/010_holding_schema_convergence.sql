@@ -179,6 +179,15 @@ BEGIN
         WHERE portfolio_id = NEW.portfolio_id AND instrument_id = NEW.instrument_id
     );
 END;
+CREATE TRIGGER holding_instrument_scope_guard_update
+BEFORE UPDATE OF portfolio_id, instrument_id ON lots
+BEGIN
+    SELECT RAISE(ABORT, 'holding instrument is outside portfolio')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM portfolio_instruments
+        WHERE portfolio_id = NEW.portfolio_id AND instrument_id = NEW.instrument_id
+    );
+END;
 CREATE TRIGGER holding_account_scope_guard_insert
 BEFORE INSERT ON lots
 WHEN NEW.account_id IS NOT NULL
@@ -258,6 +267,20 @@ BEGIN
        OR NEW.created_at_order_key IS NULL
        OR NEW.removed_at < NEW.created_at_order_key;
 END;
+
+CREATE TRIGGER holding_archival_immutable_guard
+BEFORE UPDATE ON lots
+WHEN OLD.lifecycle='removed' OR (OLD.lifecycle='active' AND NEW.lifecycle='removed' AND (
+    NEW.portfolio_id IS NOT OLD.portfolio_id OR NEW.instrument_id IS NOT OLD.instrument_id OR
+    NEW.account_id IS NOT OLD.account_id OR NEW.quantity IS NOT OLD.quantity OR
+    NEW.unit_cost IS NOT OLD.unit_cost OR NEW.cost_basis IS NOT OLD.cost_basis OR
+    NEW.currency IS NOT OLD.currency OR NEW.acquisition_date IS NOT OLD.acquisition_date OR
+    NEW.created_at IS NOT OLD.created_at OR NEW.created_at_order_key IS NOT OLD.created_at_order_key))
+BEGIN SELECT RAISE(ABORT, 'holding fields are immutable'); END;
+CREATE TRIGGER holding_created_at_immutable_guard
+BEFORE UPDATE OF created_at, created_at_order_key ON lots
+WHEN NEW.created_at IS NOT OLD.created_at OR NEW.created_at_order_key IS NOT OLD.created_at_order_key
+BEGIN SELECT RAISE(ABORT, 'holding creation timestamp is immutable'); END;
 
 CREATE TRIGGER holding_mutation_idempotency_principal_guard
 BEFORE INSERT ON holding_mutation_idempotency
