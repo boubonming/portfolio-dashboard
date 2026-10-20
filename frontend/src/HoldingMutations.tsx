@@ -193,19 +193,52 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const archiveRestoreRef = useRef<{ lotId: string; success: boolean } | null>(null)
   const archiveBackgroundRef = useRef<ArchiveBackground | null>(null)
   const archiveContextRef = useRef<ArchiveContext | null>(null)
+  const archiveLotRef = useRef<Holding | null>(null)
+  const activeRef = useRef(active)
+  const portfolioIdRef = useRef(portfolioId)
   const scopeRef = useRef(scopeKey)
+
+  const restoreArchiveBackground = () => {
+    const previous = archiveBackgroundRef.current
+    if (!previous) return
+    previous.element.inert = previous.inert
+    if (previous.ariaHidden === null) previous.element.removeAttribute('aria-hidden')
+    else previous.element.setAttribute('aria-hidden', previous.ariaHidden)
+    archiveBackgroundRef.current = null
+  }
+  const invalidateArchiveAuthority = () => {
+    generationRef.current += 1
+    controllerRef.current?.abort()
+    controllerRef.current = null
+    busyRef.current = false
+    createAttempt.current = null
+    removeAttempt.current = null
+    archiveLotRef.current = null
+    archiveContextRef.current = null
+    archiveOriginRef.current = null
+    archiveRestoreRef.current = null
+    restoreArchiveBackground()
+  }
+  const clearArchiveState = (resetForm = false) => {
+    invalidateArchiveAuthority()
+    setBusy(false)
+    setArchiveLot(null)
+    setError('')
+    setStatus('')
+    if (resetForm) { setDraft(emptyDraft()); setFormOpen(false); setErrors({}) }
+  }
+  const authorityChanged = activeRef.current !== active || portfolioIdRef.current !== portfolioId || scopeRef.current !== scopeKey
+  if (!active || authorityChanged) invalidateArchiveAuthority()
+  activeRef.current = active
+  portfolioIdRef.current = portfolioId
+  scopeRef.current = scopeKey
+  archiveLotRef.current = archiveContextRef.current ? archiveLot : null
 
   const archiveContextMatches = Boolean(archiveLot && archiveContextRef.current && archiveContextRef.current.portfolioId === portfolioId && archiveContextRef.current.scopeKey === scopeKey && archiveContextRef.current.lotId === archiveLot.lot_id)
   const archiveVisible = active && archiveContextMatches
 
   const abortWork = () => {
-    generationRef.current += 1
-    controllerRef.current?.abort()
-    controllerRef.current = null
-    busyRef.current = false
-    setBusy(false)
-    createAttempt.current = null
-    removeAttempt.current = null
+    clearArchiveState()
   }
   useEffect(() => {
     if (!active) abortWork()
@@ -264,12 +297,6 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   useLayoutEffect(() => {
     if (!archiveLot || archiveVisible) return
     abortWork()
-    archiveContextRef.current = null
-    archiveOriginRef.current = null
-    archiveRestoreRef.current = null
-    setArchiveLot(null)
-    setError('')
-    setStatus('')
   }, [archiveLot, archiveVisible])
   useLayoutEffect(() => {
     if (archiveLot || !archiveRestoreRef.current) return
@@ -375,7 +402,9 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     } catch (reason) {
       if (!current()) return
       if (reason instanceof APIError && reason.status === 401) {
-        createAttempt.current = null; removeAttempt.current = null; abortWork(); setDraft(emptyDraft()); setFormOpen(false); setArchiveLot(null); setErrors({}); setStatus(''); setError(''); onUnauthorized(); return
+        clearArchiveState(true)
+        onUnauthorized()
+        return
       }
       if (reason instanceof TypeError) { setStatus(''); setError('Network uncertainty. Retry with the same safe attempt; the draft is preserved.'); return }
       setStatus(''); setError(reason instanceof Error ? reason.message : 'The holding change could not be applied. Try again.')
@@ -386,15 +415,16 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
 
   const confirmArchive = async () => {
     const archiveContext = archiveContextRef.current
-    if (!archiveLot || !archiveContext || !archiveVisible || busyRef.current || archiveContext.portfolioId !== portfolioId || archiveContext.scopeKey !== scopeKey || archiveContext.lotId !== archiveLot.lot_id) return
-    const lotId = archiveLot.lot_id
+    const lot = archiveLotRef.current
+    if (!lot || !archiveContext || !activeRef.current || busyRef.current || archiveContext.portfolioId !== portfolioIdRef.current || archiveContext.portfolioId !== portfolioId || archiveContext.scopeKey !== scopeRef.current || archiveContext.scopeKey !== scopeKey || archiveContext.lotId !== lot.lot_id) return
+    const lotId = lot.lot_id
     const etag = etagRef.current
-    const targetSignature = `${portfolioId}|${scopeKey}|remove|${lotId}`
+    const targetSignature = `${portfolioIdRef.current}|${scopeRef.current}|remove|${lotId}`
     const existingAttempt = removeAttempt.current?.targetSignature === targetSignature ? removeAttempt.current : null
-    if (!existingAttempt && (typeof etag !== 'string' || validatePortfolioETag(etag, portfolioId) === null)) return
-    const attempt = existingAttempt || { operation: 'remove' as const, portfolioId, scopeKey, targetSignature, key: randomIdempotencyKey(), body: '', etag: etag as string, lotId }
+    if (!existingAttempt && (typeof etag !== 'string' || validatePortfolioETag(etag, portfolioIdRef.current) === null)) return
+    const attempt = existingAttempt || { operation: 'remove' as const, portfolioId: portfolioIdRef.current, scopeKey: scopeRef.current, targetSignature, key: randomIdempotencyKey(), body: '', etag: etag as string, lotId }
     removeAttempt.current = attempt
-    await submit('remove', attempt, lotId, `/api/v1/portfolios/${encodeURIComponent(portfolioId)}/holdings/${encodeURIComponent(lotId)}`, 'DELETE')
+    await submit('remove', attempt, lotId, `/api/v1/portfolios/${encodeURIComponent(portfolioIdRef.current)}/holdings/${encodeURIComponent(lotId)}`, 'DELETE')
   }
 
   if (!active) return null
@@ -413,7 +443,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
         {errors.form && <p className="field-error" role="alert" aria-live="assertive">{errors.form}</p>}
         <div className="holding-form-actions"><button type="submit" disabled={busy || (!mutationETagValid && !createAttempt.current)} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</button><button type="button" onClick={() => { setFormOpen(false); setErrors({}); setError(''); addButtonRef.current?.focus() }} disabled={busy}>Cancel</button></div>
       </form>}
-      <div className="archive-controls"><h3>Archive an active lot</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p>{holdings.map((holding) => <div className="archive-row" key={holding.lot_id}><span><strong>Archive lot {holding.lot_id}</strong><span className="subline">Logical removal; history preserved</span></span><button type="button" ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} data-archive-lot-id={holding.lot_id} onClick={(event) => { archiveOriginRef.current = event.currentTarget as HTMLButtonElement; archiveContextRef.current = { portfolioId, scopeKey, lotId: holding.lot_id }; (event.currentTarget as HTMLButtonElement).focus(); setError(''); setStatus(''); setArchiveLot(holding) }} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-label={`Archive lot ${holding.lot_id}`}>Archive lot</button></div>)}</div>
+      <div className="archive-controls"><h3>Archive an active lot</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p>{holdings.map((holding) => <div className="archive-row" key={holding.lot_id}><span><strong>Archive lot {holding.lot_id}</strong><span className="subline">Logical removal; history preserved</span></span><button type="button" ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} data-archive-lot-id={holding.lot_id} onClick={(event) => { archiveOriginRef.current = event.currentTarget as HTMLButtonElement; archiveContextRef.current = { portfolioId, scopeKey, lotId: holding.lot_id }; archiveLotRef.current = holding; (event.currentTarget as HTMLButtonElement).focus(); setError(''); setStatus(''); setArchiveLot(holding) }} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-label={`Archive lot ${holding.lot_id}`}>Archive lot</button></div>)}</div>
     </section>
     {archiveVisible && createPortal(<div className="confirmation-backdrop"><section ref={dialogRef} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title" aria-describedby={error ? 'archive-dialog-description archive-dialog-error' : 'archive-dialog-description'}><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive lot {archiveLot?.lot_id}?</h2><p id="archive-dialog-description">This will logically archive the exact lot, not sell, trade, or permanently delete it. Its financial history, reviews, thesis and audit records remain preserved.</p>{error && <p ref={archiveErrorRef} id="archive-dialog-error" className="notice error" role="alert" aria-live="assertive" tabIndex={-1}>{error}</p>}<div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving lot…' : `Confirm archive lot ${archiveLot?.lot_id}`}</button><button type="button" onClick={() => { archiveRestoreRef.current = { lotId: archiveLot?.lot_id || '', success: false }; setArchiveLot(null) }} disabled={busy}>Cancel archive</button></div></section></div>, document.body)}
   </>

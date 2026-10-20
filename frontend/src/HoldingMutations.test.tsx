@@ -74,6 +74,34 @@ describe('HoldingMutations', () => {
     expect(fetchMock.mock.calls[0][1]?.method).toBe('DELETE')
   })
 
+  it('invalidates a retained archive handler synchronously after a 401 logout', async () => {
+    const props = baseProps()
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 401, headers: new Headers(), json: async () => ({}) } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    const root = document.createElement('div')
+    root.id = 'root'
+    document.body.appendChild(root)
+    const rendered = render(<HoldingMutations {...props} />, { container: root })
+    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    const retainedConfirm = screen.getByRole('button', { name: 'Confirm archive lot lot-a' })
+    const propsKey = Object.keys(retainedConfirm).find((key) => key.startsWith('__reactProps$'))
+    const retainedHandler = propsKey ? (retainedConfirm as unknown as Record<string, { onClick?: () => Promise<void> }>)[propsKey]?.onClick : undefined
+    expect(retainedHandler).toBeTypeOf('function')
+    fireEvent.click(retainedConfirm)
+
+    await waitFor(() => expect(props.onUnauthorized).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(root.hasAttribute('aria-hidden')).toBe(false)
+    expect(root.inert).toBe(false)
+    await retainedHandler?.()
+    rendered.rerender(<HoldingMutations {...props} active={false} />)
+    rendered.rerender(<HoldingMutations {...props} active />)
+    await retainedHandler?.()
+    await Promise.resolve()
+    expect(fetchMock).toHaveBeenCalledOnce()
+    root.remove()
+  })
+
   it('rejects a receipt with unexpected fields', () => {
     expect(() => validateHoldingMutationReceipt({ ...receipt, unexpected: true }, { operation: 'create', portfolioId: 'portfolio-default', idempotencyKey: receipt.idempotency_key, body: JSON.stringify({}), lotId: undefined })).toThrow()
   })
