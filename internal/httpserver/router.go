@@ -73,6 +73,9 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 		reviews := noStorePrivate(reviewRoutes(database, authenticator))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/reviews", reviews)
 		mux.Handle("/api/v1/portfolios/{portfolioId}/reviews/", reviews)
+		mutations := noStorePrivate(holdingMutationRoutes(database, authenticator))
+		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings", mutations)
+		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings/{holdingId}", mutations)
 	}
 	portfolio := http.Handler(portfolioRoutes(database))
 	if authenticator != nil {
@@ -262,6 +265,12 @@ func portfolioOverview(database *store.Store) http.HandlerFunc {
 			}
 			return
 		}
+		var revision int
+		if err := database.DB.QueryRowContext(r.Context(), `SELECT holdings_revision FROM portfolios WHERE id=?`, parts[3]).Scan(&revision); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+			return
+		}
+		w.Header().Set("ETag", holdingETag(parts[3], revision))
 		writeJSON(w, http.StatusOK, view)
 	}
 }
