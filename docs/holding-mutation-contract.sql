@@ -1,5 +1,8 @@
 -- CONTRACT ARTIFACT ONLY: do not place under internal/store/migrations.
--- Execute once, inside one transaction, after runtime migrations 001-008.
+-- This is executable target-state feasibility evidence for the unmerged
+-- contract branch, not Store.Migrate or shipped runtime migration evidence.
+-- Execute once, inside one scratch-database transaction, after baseline SQL
+-- migrations 001-008; no schema_migrations version is changed here.
 -- The future runtime migration must preserve the operation/trigger ordering in
 -- docs/holding-mutation-contract.md and verify every object listed there.
 -- NO IMPORT SURFACE INVARIANT: this artifact initializes only canonical
@@ -205,6 +208,9 @@ BEGIN
        OR substr(NEW.created_at, 15, 2) NOT BETWEEN '00' AND '59'
        OR substr(NEW.created_at, 18, 2) NOT BETWEEN '00' AND '59'
        OR NEW.created_at < '1970-01-01T00:00:00.000000000Z';
+    SELECT RAISE(ABORT, 'new holding requires matching created_at_order_key')
+    WHERE NEW.created_at_order_key IS NULL
+       OR NEW.created_at_order_key IS NOT NEW.created_at;
     SELECT RAISE(ABORT, 'invalid active holding removal fields')
     WHERE NEW.lifecycle = 'active'
       AND (NEW.removed_at IS NOT NULL OR NEW.removed_by_category IS NOT NULL OR NEW.removed_by_id IS NOT NULL);
@@ -248,8 +254,7 @@ BEGIN
        OR NEW.removed_by_id GLOB '*[^A-Za-z0-9._~-]*'
        OR substr(NEW.removed_by_id, 1, 1) NOT GLOB '[A-Za-z0-9]';
     SELECT RAISE(ABORT, 'invalid_holding_created_at')
-    WHERE NEW.created_at_order_key IS NULL
-      AND NEW.created_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z';
+    WHERE NEW.created_at_order_key IS NULL;
     SELECT RAISE(ABORT, 'invalid holding removal timestamp')
     WHERE length(NEW.removed_at) <> 30
        OR NEW.removed_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'
@@ -261,7 +266,7 @@ BEGIN
        OR (NEW.created_at_order_key IS NOT NULL AND
            (length(NEW.created_at_order_key) <> 30 OR
             NEW.created_at_order_key NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'))
-       OR NEW.removed_at < COALESCE(NEW.created_at_order_key, NEW.created_at);
+       OR NEW.removed_at < NEW.created_at_order_key;
 END;
 
 CREATE TRIGGER holding_archival_immutable_guard
@@ -474,11 +479,12 @@ INSERT INTO instruments(id, symbol, description, currency, asset_type, exchange,
 VALUES ('__holding_contract_probe_instrument', 'CONTRACT-PROBE', 'Contract probe', 'MYR', 'equity', 'TEST', '1970-01-01T00:00:00.000000000Z');
 INSERT INTO portfolio_instruments(portfolio_id, instrument_id, created_at)
 VALUES ('portfolio-default', '__holding_contract_probe_instrument', '1970-01-01T00:00:00.000000000Z');
-INSERT INTO lots(id, portfolio_id, instrument_id, account_id, quantity, unit_cost, cost_basis, currency, acquisition_date, created_at)
-VALUES ('__holding_contract_probe_lot', 'portfolio-default', '__holding_contract_probe_instrument', NULL, '1', '1', '1', 'MYR', NULL, '1970-01-01T00:00:00.000000000Z');
+INSERT INTO lots(id, portfolio_id, instrument_id, account_id, quantity, unit_cost, cost_basis, currency, acquisition_date, created_at, created_at_order_key)
+VALUES ('__holding_contract_probe_lot', 'portfolio-default', '__holding_contract_probe_instrument', NULL, '1', '1', '1', 'MYR', NULL, '1970-01-01T00:00:00.000000000Z', '1970-01-01T00:00:00.000000000Z');
 INSERT INTO _holding_contract_assertion(check_name, ok)
 SELECT 'first_api_created_holding', CASE WHEN
     EXISTS (SELECT 1 FROM lots WHERE id = '__holding_contract_probe_lot' AND portfolio_id = 'portfolio-default' AND lifecycle = 'active')
+    AND (SELECT created_at_order_key FROM lots WHERE id = '__holding_contract_probe_lot') = (SELECT created_at FROM lots WHERE id = '__holding_contract_probe_lot')
     AND NOT EXISTS (SELECT 1 FROM holding_mutation_idempotency WHERE holding_id = '__holding_contract_probe_lot')
     THEN 1 ELSE 0 END;
 INSERT INTO _holding_contract_assertion(check_name, ok)

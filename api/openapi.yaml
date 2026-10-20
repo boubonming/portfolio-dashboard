@@ -4,12 +4,16 @@ info:
   version: 1.1.0-phase-d-contract
   license: { name: MIT, url: 'https://opensource.org/license/mit/' }
   description: >-
-    Authenticated portfolio-scoped holdings, immutable valuation snapshots,
-    editable investment theses, and the Phase D scoped advisory review contract.
-    Phase D endpoints are contract-only in this change; runtime handlers will
-    follow the implementation pipeline in docs/review-api-contract.md. There
-    is no portfolio-document import, bootstrap import, or import preview/apply/
-    status surface: a fresh database starts with an empty portfolio-default.
+    Target release contract for authenticated portfolio-scoped holdings,
+    immutable valuation snapshots, editable investment theses, and the Phase D
+    scoped advisory review contract. This OpenAPI document is contract-only on
+    the current unmerged branch; runtime handlers, numbered migration loading,
+    startup initialization, and UI wiring are not shipped by this change. The
+    completed implementation will have no portfolio-document import, bootstrap
+    import, or import preview/apply/status surface and will start with an empty
+    portfolio-default. The baseline runtime's importer, source identity,
+    readmodel/export/frontend consumers, and missing holdings:write wiring are
+    known removal/replacement work, not acceptable target architecture.
 servers:
   - url: /
 paths:
@@ -50,7 +54,7 @@ paths:
   /api/v1/portfolios/{portfolioId}/overview:
     get:
       summary: Read one portfolio overview
-      description: Returns canonical database holdings and the latest immutable snapshot. Reporting currency changes only this read view. The initialized portfolio-default returns 200 with an empty holdings list and explicit no_snapshot state before the first holding is created.
+      description: Returns canonical database holdings and the latest immutable snapshot in the target runtime. Reporting currency changes only this read view. After the next-milestone initialization is implemented, portfolio-default returns 200 with an empty holdings list and explicit no_snapshot state before the first holding is created; this contract-only branch does not claim that runtime behavior is shipped.
       operationId: getPortfolioOverview
       security:
         - sessionCookie: []

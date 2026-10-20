@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""Executable evidence for the non-runtime holding contract artifact.
+"""Executable target-state feasibility evidence for the holding contract.
 
 This harness intentionally exercises the physical SQLite boundary.  It does
 not claim that rejected standalone statements prove application rollback; the
 rollback matrix below stages the complete mutation sequence inside savepoints
 and verifies every table and the revision witness after each injected failure.
+It applies baseline SQL files 001-008 directly in scratch SQLite and then the
+non-runtime artifact; it does not exercise Store.Migrate, schema version
+rollback, HTTP handlers, or a shipped runtime mutation path.
 """
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sqlite3
+import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MIGRATIONS = ROOT / "internal" / "store" / "migrations"
@@ -19,7 +24,7 @@ TS = "2026-01-03T00:00:00.000000000Z"
 RETAIN = "2033-01-03T00:00:00.000000000Z"
 
 
-def migrated() -> sqlite3.Connection:
+def baseline_migrations() -> sqlite3.Connection:
     db = sqlite3.connect(":memory:")
     db.execute("PRAGMA foreign_keys=ON")
     for path in sorted(MIGRATIONS.glob("*.sql")):
@@ -87,7 +92,7 @@ def table_counts(db: sqlite3.Connection) -> dict[str, int]:
 
 
 def check_fresh() -> None:
-    db = migrated()
+    db = baseline_migrations()
     db.executescript(ARTIFACT.read_text())
     assert db.execute("SELECT name, reporting_currency, holdings_revision FROM portfolios WHERE id='portfolio-default'").fetchone() == ("Portfolio", "MYR", 0)
     assert db.execute("SELECT COUNT(*) FROM lots WHERE portfolio_id='portfolio-default'").fetchone()[0] == 0
@@ -121,6 +126,50 @@ def check_legacy_timestamps(db: sqlite3.Connection) -> None:
     assert dict(db.execute("SELECT id,created_at FROM lots WHERE id LIKE 'lot-%'")) == originals
 
 
+def check_new_row_order_key(db: sqlite3.Connection) -> None:
+    created_at = "2026-01-07T00:00:00.000000000Z"
+    before = table_counts(db)
+    expect_reject(
+        db,
+        "INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at) VALUES ('lot-missing-key','portfolio-default','instrument-shared','1','1','1','MYR',?)",
+        (created_at,),
+    )
+    expect_reject(
+        db,
+        "INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES ('lot-mismatched-key','portfolio-default','instrument-shared','1','1','1','MYR',?,?)",
+        (created_at, "2026-01-07T00:00:00.000000001Z"),
+    )
+    assert table_counts(db) == before
+
+    db.execute(
+        "INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES ('lot-order-key','portfolio-default','instrument-shared','1','1','1','MYR',?,?)",
+        (created_at, created_at),
+    )
+    assert db.execute("SELECT created_at,created_at_order_key FROM lots WHERE id='lot-order-key'").fetchone() == (created_at, created_at)
+    db.commit()
+
+    before_reject = table_counts(db)
+    expect_reject(
+        db,
+        "UPDATE lots SET lifecycle='removed',removed_at='2026-01-06T23:59:59.999999999Z',removed_by_category='browser_user',removed_by_id='local-owner' WHERE id='lot-order-key'",
+    )
+    assert table_counts(db) == before_reject
+
+    savepoint = "order_key_archive_rollback"
+    db.execute("SAVEPOINT " + savepoint)
+    db.execute(
+        "UPDATE lots SET lifecycle='removed',removed_at='2026-01-07T00:00:00.000000001Z',removed_by_category='browser_user',removed_by_id='local-owner' WHERE id='lot-order-key'"
+    )
+    db.execute("ROLLBACK TO " + savepoint)
+    db.execute("RELEASE " + savepoint)
+    assert db.execute("SELECT lifecycle,created_at_order_key FROM lots WHERE id='lot-order-key'").fetchone() == ("active", created_at)
+
+    db.execute(
+        "UPDATE lots SET lifecycle='removed',removed_at='2026-01-07T00:00:00.000000001Z',removed_by_category='browser_user',removed_by_id='local-owner' WHERE id='lot-order-key'"
+    )
+    db.commit()
+
+
 def valid_holding_chain(db: sqlite3.Connection, suffix: str, operation: str, key: str, holding: str = "lot-two") -> None:
     action = "holding_created" if operation == "create" else "holding_removed"
     payload = '{"portfolio_id":"portfolio-default","holding_id":"%s","operation":"%s","occurred_at":"%s"}' % (holding, operation, TS)
@@ -138,7 +187,10 @@ def check_actor_and_idempotency(db: sqlite3.Connection) -> None:
     expect_reject(db, "UPDATE machine_principals SET id='bad/actor' WHERE id='bad actor'")
     db.execute("UPDATE machine_principals SET permission_holdings_write=1 WHERE id='bad actor'")
     db.commit()
+    before = table_counts(db)
     expect_reject(db, "INSERT INTO holding_mutation_idempotency VALUES ('machine','bad actor','portfolio-default','create','malformed-principal-key','%s','lot-two','audit-legacy','activity-legacy',1,1,'{}',?,?)" % ('b' * 64), (TS, RETAIN))
+    assert table_counts(db) == before
+    assert not db.execute("SELECT 1 FROM holding_mutation_idempotency WHERE actor_id='bad actor'").fetchone()
     assert db.execute("SELECT permission_holdings_write FROM machine_principals WHERE id='bad actor'").fetchone()[0] == 1
 
     valid_holding_chain(db, "create", "create", "same-key-1234567")
@@ -160,6 +212,64 @@ def check_actor_and_idempotency(db: sqlite3.Connection) -> None:
     valid_holding_chain(db, "remove", "remove", "same-key-1234567")
     db.commit()
     assert db.execute("SELECT COUNT(*) FROM holding_mutation_idempotency WHERE idempotency_key='same-key-1234567'").fetchone()[0] == 2
+
+
+def machine_mutation_attempt(db: sqlite3.Connection, principal: str, ordinal: int, expected: bool) -> None:
+    savepoint = "machine_grant_%d" % ordinal
+    before = table_counts(db)
+    db.execute("SAVEPOINT " + savepoint)
+    lot = "machine-grant-lot-%d" % ordinal
+    audit = "machine-grant-audit-%d" % ordinal
+    activity = "machine-grant-activity-%d" % ordinal
+    key = "machine-grant-key-%d" % ordinal
+    payload = '{"portfolio_id":"portfolio-default","holding_id":"%s","operation":"create","occurred_at":"%s"}' % (lot, TS)
+    try:
+        db.execute(
+            "INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES (?,?,?,?,?,?,?,?,?)",
+            (lot, "portfolio-default", "instrument-shared", "1", "1", "1", "MYR", TS, TS),
+        )
+        db.execute("INSERT INTO audit_events VALUES (?,?,?,?,?,?,?,?)", (audit, principal, "holding_created", "holding", lot, payload, TS, RETAIN))
+        db.execute("INSERT INTO audit_event_portfolios VALUES (?,?,?)", (audit, "portfolio-default", RETAIN))
+        db.execute("INSERT INTO activity_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (activity, "portfolio-default", "machine", "holding_created", "holding", "holding", lot, "created", "", TS, TS, audit, RETAIN))
+        db.execute("INSERT INTO holding_mutation_idempotency VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", ("machine", principal, "portfolio-default", "create", key, "d" * 64, lot, audit, activity, 1, 1, '{"ok":true}', TS, RETAIN))
+    except sqlite3.IntegrityError:
+        db.execute("ROLLBACK TO " + savepoint)
+        db.execute("RELEASE " + savepoint)
+        assert not expected
+        assert table_counts(db) == before, principal
+        return
+    db.execute("RELEASE " + savepoint)
+    assert expected
+    db.commit()
+    assert table_counts(db) != before
+    assert db.execute("SELECT actor_category,actor_id,response_payload FROM holding_mutation_idempotency WHERE idempotency_key=?", (key,)).fetchone() == ("machine", principal, '{"ok":true}')
+
+
+def check_machine_grant_matrix(db: sqlite3.Connection) -> None:
+    principals = (
+        ("machine-default-false", "portfolio-default", 1, 0, 1, 0),
+        ("machine-reviews-only", "portfolio-default", 1, 1, 1, 0),
+        ("machine-inactive", "portfolio-default", 1, 0, 0, 1),
+        ("machine-wrong-portfolio", "portfolio-other", 1, 0, 1, 1),
+        ("machine-read-only", "portfolio-default", 1, 0, 1, 0),
+        ("machine-holdings-only", "portfolio-default", 0, 0, 1, 1),
+        ("machine-valid", "portfolio-default", 1, 0, 1, 1),
+    )
+    for principal, portfolio, read, reviews, active, holdings_write in principals:
+        if principal == "machine-default-false":
+            db.execute(
+                "INSERT INTO machine_principals(id,portfolio_id,permission_portfolio_read,permission_reviews_write,active,created_at) VALUES (?,?,?,?,?,?)",
+                (principal, portfolio, read, reviews, active, TS),
+            )
+        else:
+            db.execute(
+                "INSERT INTO machine_principals(id,portfolio_id,permission_portfolio_read,permission_reviews_write,active,created_at,permission_holdings_write) VALUES (?,?,?,?,?,?,?)",
+                (principal, portfolio, read, reviews, active, TS, holdings_write),
+            )
+    db.commit()
+    for ordinal, (principal, *_rest) in enumerate(principals):
+        machine_mutation_attempt(db, principal, ordinal, principal == "machine-valid")
+    assert db.execute("SELECT COUNT(*) FROM holding_mutation_idempotency WHERE actor_category='machine'").fetchone()[0] == 1
 
 
 def check_audit_immutability(db: sqlite3.Connection) -> None:
@@ -195,7 +305,7 @@ def check_transactional_rollback(db: sqlite3.Connection) -> None:
             if boundary == "instrument":
                 raise RuntimeError("injected failure")
             db.execute("INSERT INTO portfolio_instruments VALUES (?,?,?)", ("portfolio-default", instrument, TS))
-            db.execute("INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at) VALUES (?,?,?,?,?,?,?,?)", (lot, "portfolio-default", instrument, "1", "1", "1", "MYR", TS))
+            db.execute("INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES (?,?,?,?,?,?,?,?,?)", (lot, "portfolio-default", instrument, "1", "1", "1", "MYR", TS, TS))
             if boundary == "lot":
                 raise RuntimeError("injected failure")
             db.execute("UPDATE portfolios SET holdings_revision=holdings_revision+1 WHERE id='portfolio-default'")
@@ -242,7 +352,7 @@ def check_schema_metadata(db: sqlite3.Connection) -> None:
 
 
 def check_populated() -> None:
-    db = migrated()
+    db = baseline_migrations()
     seed_populated(db)
     before = historical_rows(db)
     db.executescript(ARTIFACT.read_text())
@@ -256,24 +366,75 @@ def check_populated() -> None:
 
     db.execute("INSERT INTO instruments VALUES ('instrument-new','NEW','New','MYR','equity','TEST',?)", (TS,))
     db.execute("INSERT INTO portfolio_instruments VALUES ('portfolio-default','instrument-new',?)", (TS,))
-    db.execute("INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,created_at) VALUES ('lot-new','portfolio-default','instrument-new',NULL,'1','1','1','MYR',?)", (TS,))
+    db.execute("INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES ('lot-new','portfolio-default','instrument-new',NULL,'1','1','1','MYR',?,?)", (TS, TS))
     db.commit()
     lot_count = db.execute("SELECT COUNT(*) FROM lots").fetchone()[0]
-    expect_reject(db, "INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,created_at) VALUES ('bad-instrument','portfolio-default','instrument-other',NULL,'1','1','1','MYR',?)", (TS,))
-    expect_reject(db, "INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,created_at) VALUES ('bad-account','portfolio-default','instrument-shared','account-other','1','1','1','MYR',?)", (TS,))
+    expect_reject(db, "INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES ('bad-instrument','portfolio-default','instrument-other',NULL,'1','1','1','MYR',?,?)", (TS, TS))
+    expect_reject(db, "INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES ('bad-account','portfolio-default','instrument-shared','account-other','1','1','1','MYR',?,?)", (TS, TS))
     assert db.execute("SELECT COUNT(*) FROM lots").fetchone()[0] == lot_count
 
     check_legacy_timestamps(db)
+    check_new_row_order_key(db)
     db.execute("UPDATE portfolios SET holdings_revision=holdings_revision+1 WHERE id='portfolio-default'")
     expect_reject(db, "UPDATE portfolios SET holdings_revision=holdings_revision+2 WHERE id='portfolio-default'")
     check_actor_and_idempotency(db)
+    check_machine_grant_matrix(db)
     db.commit()
     check_audit_immutability(db)
     check_transactional_rollback(db)
     assert not db.execute("PRAGMA foreign_key_check").fetchall()
 
 
+def check_future_no_document_import_regression() -> None:
+    """Gate the post-implementation clean-tree removal invariant.
+
+    The current branch intentionally retains baseline runtime debt, so this
+    regression is opt-in for the implementation milestone.  Contract files
+    may mention the debt only as a prohibition, historical note, or removal
+    ledger; all other tracked files must be clean of the old active surface.
+    """
+    if os.environ.get("HOLDING_CONTRACT_IMPLEMENTED") != "1":
+        return
+    patterns = (
+        "Portfolio.md",
+        "import-preview",
+        "import-apply",
+        "import-status",
+        "source_row",
+        "source_ref",
+        "source_sha256",
+        "import_runs",
+        "import_items",
+    )
+    allowed_contract_files = {
+        "api/openapi.yaml",
+        "docs/holding-mutation-contract.md",
+        "docs/holding-mutation-contract.sql",
+        "docs/holding-mutation-contract-harness.py",
+    }
+    tracked = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines()
+    for relative in tracked:
+        if pathlib.PurePosixPath(relative).name.startswith("."):
+            continue  # Ignore files are not application architecture.
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text().splitlines()
+        except UnicodeDecodeError:
+            continue
+        for line_number, line in enumerate(lines, start=1):
+            if not any(term in line for term in patterns):
+                continue
+            if relative not in allowed_contract_files:
+                raise AssertionError(f"active document-import identity remains: {relative}:{line_number}")
+            context = line.lower()
+            if not any(marker in context for marker in ("no ", "never", "remove", "removal", "historical", "baseline", "prohibit", "not runtime")):
+                raise AssertionError(f"unaccounted contract reference: {relative}:{line_number}")
+
+
 if __name__ == "__main__":
     check_fresh()
     check_populated()
-    print("holding mutation contract harness: PASS (fresh, populated, actor grammar, idempotency replay/conflict/cross-operation, legacy timestamps, audit ownership immutability, staged rollback, foreign keys)")
+    check_future_no_document_import_regression()
+    print("holding mutation contract harness: PASS (target-state scratch feasibility, new-row comparison keys, machine grant matrix, actor grammar, idempotency replay/conflict/cross-operation, legacy timestamps, audit ownership immutability, staged rollback, foreign keys)")
