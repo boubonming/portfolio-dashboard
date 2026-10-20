@@ -94,7 +94,7 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 // snapshot endpoint's generic-target validation and disclose a route shape.
 func privatePathGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) {
+		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) || (holdingNamespacePath(r.URL.EscapedPath()) && unsafeHoldingPath(r.URL.EscapedPath())) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Vary", "Cookie")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -121,6 +121,37 @@ func unsafeSnapshotPath(escapedPath string) bool {
 	}
 	for _, part := range strings.Split(strings.TrimPrefix(escapedPath, "/"), "/") {
 		if part == "." || part == ".." || part == "" {
+			return true
+		}
+	}
+	return strings.HasSuffix(escapedPath, "/")
+}
+
+func holdingNamespacePath(escapedPath string) bool {
+	parts := strings.Split(strings.TrimPrefix(escapedPath, "/"), "/")
+	if len(parts) >= 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[4] == "holdings" {
+		// The portfolio thesis API owns /holdings/{id}/thesis; leave that
+		// established namespace to its own route validation.
+		if len(parts) >= 7 && parts[6] == "thesis" {
+			return false
+		}
+		return true
+	}
+	return strings.Contains(strings.ToLower(escapedPath), "/holdings%")
+}
+
+func unsafeHoldingPath(escapedPath string) bool {
+	if strings.Contains(escapedPath, "%") || strings.Contains(escapedPath, "//") {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(escapedPath, "/"), "/")
+	for _, part := range parts {
+		if part == "." || part == ".." || part == "" {
+			return true
+		}
+	}
+	for index, part := range parts {
+		if part == "holdings" && len(parts) != index+1 && len(parts) != index+2 {
 			return true
 		}
 	}

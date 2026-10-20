@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
+	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 )
@@ -75,10 +77,17 @@ func (s *Store) CreateHolding(ctx context.Context, params HoldingCreateParams) (
 	if err := validateMutationParams(params.PortfolioID, params.IdempotencyKey, params.RequestFingerprint, params.Actor); err != nil {
 		return HoldingMutationResult{}, err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	return s.withHoldingMutationRetry(ctx, func(attemptCtx context.Context) (HoldingMutationResult, error) {
+		return s.createHoldingOnce(attemptCtx, params)
+	})
+}
+
+func (s *Store) createHoldingOnce(ctx context.Context, params HoldingCreateParams) (HoldingMutationResult, error) {
+	tx, release, err := s.beginHoldingTx(ctx)
 	if err != nil {
 		return HoldingMutationResult{}, err
 	}
+	defer release()
 	defer tx.Rollback()
 	if err := verifyMutationActor(ctx, tx, params.Actor, params.PortfolioID); err != nil {
 		return HoldingMutationResult{}, err
@@ -152,10 +161,17 @@ func (s *Store) RemoveHolding(ctx context.Context, params HoldingRemoveParams) (
 	if err := validateMutationParams(params.PortfolioID, params.IdempotencyKey, params.RequestFingerprint, params.Actor); err != nil {
 		return HoldingMutationResult{}, err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	return s.withHoldingMutationRetry(ctx, func(attemptCtx context.Context) (HoldingMutationResult, error) {
+		return s.removeHoldingOnce(attemptCtx, params)
+	})
+}
+
+func (s *Store) removeHoldingOnce(ctx context.Context, params HoldingRemoveParams) (HoldingMutationResult, error) {
+	tx, release, err := s.beginHoldingTx(ctx)
 	if err != nil {
 		return HoldingMutationResult{}, err
 	}
+	defer release()
 	defer tx.Rollback()
 	if err := verifyMutationActor(ctx, tx, params.Actor, params.PortfolioID); err != nil {
 		return HoldingMutationResult{}, err
@@ -227,6 +243,99 @@ func (s *Store) RemoveHolding(ctx context.Context, params HoldingRemoveParams) (
 		return HoldingMutationResult{}, err
 	}
 	return HoldingMutationResult{Receipt: receipt}, nil
+}
+
+// withHoldingMutationRetry retries the complete transaction, never an
+// individual statement. A deferred SQLite transaction can fail while
+// upgrading its read lock; restarting is required so idempotency and the
+// portfolio revision are read again after the competing commit.
+func (s *Store) withHoldingMutationRetry(ctx context.Context, operation func(context.Context) (HoldingMutationResult, error)) (HoldingMutationResult, error) {
+	const maxAttempts = 8
+	const maxElapsed = 2 * time.Second
+	started := time.Now()
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return HoldingMutationResult{}, err
+		}
+		remaining := maxElapsed - time.Since(started)
+		if remaining <= 0 {
+			return HoldingMutationResult{}, ErrStaleRevision
+		}
+		attemptDuration := 250 * time.Millisecond
+		if remaining < attemptDuration {
+			attemptDuration = remaining
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptDuration)
+		result, err := operation(attemptCtx)
+		attemptErr := attemptCtx.Err()
+		cancel()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return HoldingMutationResult{}, ctxErr
+		}
+		if err == nil {
+			return result, nil
+		}
+		if attemptErr == nil && !isSQLiteBusy(err) {
+			return HoldingMutationResult{}, err
+		}
+		if attempt == maxAttempts-1 || time.Since(started) >= maxElapsed {
+			return HoldingMutationResult{}, ErrStaleRevision
+		}
+		backoff := time.Duration(attempt+1) * 10 * time.Millisecond
+		if attemptErr != nil {
+			backoff = 0
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return HoldingMutationResult{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return HoldingMutationResult{}, ErrStaleRevision
+}
+
+func (s *Store) beginHoldingTx(ctx context.Context) (*sql.Tx, func(), error) {
+	conn, err := s.DB.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	var previousTimeout int
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&previousTimeout); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	timeout := previousTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		milliseconds := int(remaining / time.Millisecond)
+		if remaining > time.Duration(milliseconds)*time.Millisecond {
+			milliseconds++
+		}
+		if milliseconds < 0 {
+			milliseconds = 0
+		}
+		if timeout == 0 || milliseconds < timeout {
+			timeout = milliseconds
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=`+strconv.Itoa(timeout)); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	release := func() {
+		_, _ = conn.ExecContext(context.Background(), `PRAGMA busy_timeout=`+strconv.Itoa(previousTimeout))
+		_ = conn.Close()
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return tx, release, nil
 }
 
 func validateMutationParams(portfolioID, key, fingerprint string, actor MutationActor) error {

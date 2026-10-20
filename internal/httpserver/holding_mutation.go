@@ -27,6 +27,10 @@ var holdingDecimal = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]{1,18})?$`)
 
 func holdingMutationRoutes(database *store.Store, authenticator *auth.Authenticator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			writePhaseDError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy the API contract.")
+			return
+		}
 		actor, browser, ok := authenticateHoldingMutation(w, r, database, authenticator)
 		if !ok {
 			return
@@ -79,12 +83,12 @@ func authenticateHoldingMutation(w http.ResponseWriter, r *http.Request, databas
 	}
 	token, bearerPresent, bearerWellFormed := auth.BearerToken(r)
 	if sessionCount > 0 && bearerPresent || sessionCount > 1 {
-		writeHoldingUnauthorized(w, false)
+		writeHoldingUnauthorized(w)
 		return store.MutationActor{}, false, false
 	}
 	if bearerPresent {
 		if !bearerWellFormed || !authenticator.MachineTokenValid(token) {
-			writeHoldingUnauthorized(w, true)
+			writeHoldingUnauthorized(w)
 			return store.MutationActor{}, false, false
 		}
 		parts := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "/")
@@ -105,11 +109,11 @@ func authenticateHoldingMutation(w http.ResponseWriter, r *http.Request, databas
 		return store.MutationActor{Category: "machine", ID: principal.PrincipalID, Permissions: []string{"portfolio:read", "holdings:write"}}, false, true
 	}
 	if sessionCount != 1 {
-		writeHoldingUnauthorized(w, false)
+		writeHoldingUnauthorized(w)
 		return store.MutationActor{}, false, false
 	}
 	if _, err := authenticator.Session(r); err != nil {
-		writeHoldingUnauthorized(w, false)
+		writeHoldingUnauthorized(w)
 		return store.MutationActor{}, false, false
 	}
 	return store.MutationActor{Category: "browser_user", ID: "local-owner", Permissions: []string{"portfolio:read"}}, true, true
@@ -253,10 +257,8 @@ func holdingFingerprint(method, path, operation, etag string, body []byte) strin
 	return fmt.Sprintf("%x", hash[:])
 }
 
-func writeHoldingUnauthorized(w http.ResponseWriter, bearer bool) {
-	if bearer {
-		w.Header().Set("WWW-Authenticate", auth.MachineBearerRealm)
-	}
+func writeHoldingUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", auth.MachineBearerRealm)
 	writePhaseDError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 }
 

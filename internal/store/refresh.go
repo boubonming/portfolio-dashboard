@@ -165,7 +165,7 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 }
 
 func (s *Store) refreshTargets(ctx context.Context, portfolioID string) ([]refreshTarget, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT DISTINCT l.instrument_id,i.symbol,l.currency FROM lots l JOIN instruments i ON i.id=l.instrument_id WHERE l.portfolio_id=? ORDER BY l.instrument_id`, portfolioID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT DISTINCT l.instrument_id,i.symbol,l.currency FROM lots l JOIN instruments i ON i.id=l.instrument_id WHERE l.portfolio_id=? AND l.lifecycle='active' ORDER BY l.instrument_id`, portfolioID)
 	if err != nil {
 		return nil, err
 	}

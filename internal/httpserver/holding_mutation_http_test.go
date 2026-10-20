@@ -47,6 +47,16 @@ func TestMachineCanCreateAndReplayHoldingThroughMutationRoute(t *testing.T) {
 	if second.Code != http.StatusCreated || second.Body.String() != first.Body.String() {
 		t.Fatalf("replay status=%d body=%s first=%s", second.Code, second.Body.String(), first.Body.String())
 	}
+	queryRequest := httptest.NewRequest(http.MethodPost, "/api/v1/portfolios/portfolio-api/holdings?unexpected=1", strings.NewReader(body))
+	queryRequest.Header.Set("Authorization", "Bearer "+secret)
+	queryRequest.Header.Set("Content-Type", "application/json")
+	queryRequest.Header.Set("Idempotency-Key", "machine-query-key-1")
+	queryRequest.Header.Set("If-Match", `"portfolio-api-1"`)
+	queryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(queryResponse, queryRequest)
+	if queryResponse.Code != http.StatusBadRequest {
+		t.Fatalf("query variant status=%d body=%s", queryResponse.Code, queryResponse.Body.String())
+	}
 	if first.Header().Get("Location") == "" || first.Header().Get("ETag") != `"portfolio-api-1"` {
 		t.Fatalf("headers location=%q etag=%q", first.Header().Get("Location"), first.Header().Get("ETag"))
 	}
@@ -96,5 +106,54 @@ func TestBrowserHoldingMutationRequiresExactOriginAndSessionCSRF(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestHoldingMutationRejectsQueryBeforeAuthenticationOrBodyParsing(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandlerWithAuth(database, auth.Config{
+		Username: "fixture-user", PasswordHash: string(hash), SessionSecret: base64.StdEncoding.EncodeToString([]byte("holding-query-session-secret-diversity-123")), PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/portfolios/portfolio-api/holdings?unexpected=1", strings.NewReader("not-json"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var lots int
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM lots WHERE portfolio_id=?`, "portfolio-api").Scan(&lots); err != nil {
+		t.Fatal(err)
+	}
+	if lots != 1 {
+		t.Fatalf("query variant changed lots: %d", lots)
+	}
+}
+
+func TestHoldingMutationUnauthorizedAlwaysEmitsBearerChallenge(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandlerWithAuth(database, auth.Config{
+		Username: "fixture-user", PasswordHash: string(hash), SessionSecret: base64.StdEncoding.EncodeToString([]byte("holding-challenge-session-secret-diversity-123")), PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/portfolios/portfolio-api/holdings", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized || response.Header().Get("WWW-Authenticate") != auth.MachineBearerRealm {
+		t.Fatalf("status=%d challenge=%q body=%s", response.Code, response.Header().Get("WWW-Authenticate"), response.Body.String())
 	}
 }
