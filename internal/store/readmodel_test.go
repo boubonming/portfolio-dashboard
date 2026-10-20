@@ -16,7 +16,7 @@ func TestPortfolioOverviewDoesNotLeakCrossPortfolioAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalSnapshotTime(time.Now().UTC())
 	for _, portfolio := range [2]string{"portfolio-owner", "portfolio-broker"} {
 		if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, portfolio, portfolio, "MYR", now, now); err != nil {
 			t.Fatal(err)
@@ -28,7 +28,13 @@ func TestPortfolioOverviewDoesNotLeakCrossPortfolioAccount(t *testing.T) {
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "instrument-owner", "OWNER", "MYR", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,created_at) VALUES(?,?,?,?,?,?,?)`, "lot-owner", "portfolio-owner", "instrument-owner", "account-broker", "1", "MYR", now); err != nil {
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-owner", "instrument-owner", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-foreign-account", "portfolio-owner", "instrument-owner", "account-broker", "1", "MYR", now, now); err == nil {
+		t.Fatal("foreign account fixture was accepted")
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-owner", "portfolio-owner", "instrument-owner", nil, "1", "MYR", now, now); err != nil {
 		t.Fatal(err)
 	}
 	view, err := s.PortfolioOverview(ctx, "portfolio-owner", "MYR")
@@ -48,14 +54,17 @@ func TestPortfolioOverviewExposesDerivedCostBasisAndSourceUnitCost(t *testing.T)
 	}
 	defer s.Close()
 	now := time.Now().UTC()
-	nowText := now.Format(time.RFC3339Nano)
+	nowText := canonicalSnapshotTime(now)
 	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-cost", "Cost fixture", "MYR", nowText, nowText); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-cost", "COST", "Cost instrument", "MYR", nowText); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,currency,created_at) VALUES(?,?,?,?,?,?,?)`, "lot-cost", "portfolio-cost", "instrument-cost", "2", "5", "MYR", nowText); err != nil {
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-cost", "instrument-cost", nowText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-cost", "portfolio-cost", "instrument-cost", "2", "5", "MYR", nowText, nowText); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AddQuote(ctx, QuoteInput{ID: "quote-cost", InstrumentID: "instrument-cost", Currency: "MYR", Price: "10", Source: "fixture", MarketAt: now.Add(-time.Hour).Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {

@@ -30,6 +30,7 @@ services:
       PORTFOLIO_MACHINE_PORTFOLIO_ID: "${PORTFOLIO_MACHINE_PORTFOLIO_ID:-}"
       PORTFOLIO_MACHINE_PORTFOLIO_READ: "${PORTFOLIO_MACHINE_PORTFOLIO_READ:-false}"
       PORTFOLIO_MACHINE_REVIEWS_WRITE: "${PORTFOLIO_MACHINE_REVIEWS_WRITE:-false}"
+      PORTFOLIO_MACHINE_HOLDINGS_WRITE: "${PORTFOLIO_MACHINE_HOLDINGS_WRITE:-false}"
     healthcheck:
       test: ["CMD", "/app/portfolio-dashboard", "healthcheck", "-url", "http://127.0.0.1:8080/healthz"]
       interval: 30s

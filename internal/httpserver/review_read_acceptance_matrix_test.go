@@ -684,7 +684,10 @@ func TestReviewHTTPPathAndMethodErrorMatrixRemainsNested(t *testing.T) {
 	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-api-other", "FIX-OTHER", "Foreign fixture instrument", "USD", foreignNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,source_row,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "lot-api-other", "portfolio-api-other", "instrument-api-other", "0.125", "1.20", "0.15", "USD", 1, "foreign#row=1", "foreign-fixture-hash", foreignNow); err != nil {
+	if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-api-other", "instrument-api-other", foreignNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?,?)`, "lot-api-other", "portfolio-api-other", "instrument-api-other", "0.125", "1.20", "0.15", "USD", foreignNow, foreignNow); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.AddQuote(context.Background(), store.QuoteInput{ID: "quote-api-other", InstrumentID: "instrument-api-other", Price: "123.4500", Currency: "USD", Source: "fixture", MarketAt: foreignNow, Basis: "close", Provenance: "test"}); err != nil {

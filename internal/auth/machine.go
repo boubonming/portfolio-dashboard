@@ -28,6 +28,7 @@ type MachineConfig struct {
 	BearerSecret  string `json:"-"`
 	PortfolioRead bool   `json:"portfolio_read"`
 	ReviewsWrite  bool   `json:"reviews_write"`
+	HoldingsWrite bool   `json:"holdings_write"`
 }
 
 // MachinePrincipal is the non-secret database identity and effective scope.
@@ -38,13 +39,14 @@ type MachinePrincipal struct {
 	PortfolioID   string
 	PortfolioRead bool
 	ReviewsWrite  bool
+	HoldingsWrite bool
 }
 
 // Validate permits the machine credential to be disabled by leaving every
 // field empty, but rejects every partial or weak configuration.
 func (c MachineConfig) Validate() error {
 	empty := c.PrincipalID == "" && c.PortfolioID == "" && c.BearerSecret == ""
-	if empty && !c.PortfolioRead && !c.ReviewsWrite {
+	if empty && !c.PortfolioRead && !c.ReviewsWrite && !c.HoldingsWrite {
 		return nil
 	}
 	if c.PrincipalID == "" || c.PortfolioID == "" || c.BearerSecret == "" {
@@ -75,14 +77,14 @@ func (c MachineConfig) Validate() error {
 func (c MachineConfig) Enabled() bool { return c.BearerSecret != "" }
 
 func (c MachineConfig) Principal() MachinePrincipal {
-	return MachinePrincipal{PrincipalID: c.PrincipalID, PortfolioID: c.PortfolioID, PortfolioRead: c.PortfolioRead, ReviewsWrite: c.ReviewsWrite}
+	return MachinePrincipal{PrincipalID: c.PrincipalID, PortfolioID: c.PortfolioID, PortfolioRead: c.PortfolioRead, ReviewsWrite: c.ReviewsWrite, HoldingsWrite: c.HoldingsWrite}
 }
 
 // String deliberately omits the bearer value. MachineConfig is passed through
 // startup and test diagnostics, where a default fmt rendering must not become
 // a credential disclosure path.
 func (c MachineConfig) String() string {
-	return fmt.Sprintf("MachineConfig{principal_id:%q portfolio_id:%q bearer_secret:<redacted> portfolio_read:%t}", c.PrincipalID, c.PortfolioID, c.PortfolioRead)
+	return fmt.Sprintf("MachineConfig{principal_id:%q portfolio_id:%q bearer_secret:<redacted> portfolio_read:%t reviews_write:%t holdings_write:%t}", c.PrincipalID, c.PortfolioID, c.PortfolioRead, c.ReviewsWrite, c.HoldingsWrite)
 }
 
 // GoString keeps Go-syntax diagnostics from bypassing String and exposing the

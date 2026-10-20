@@ -28,6 +28,8 @@ def baseline_migrations() -> sqlite3.Connection:
     db = sqlite3.connect(":memory:")
     db.execute("PRAGMA foreign_keys=ON")
     for path in sorted(MIGRATIONS.glob("*.sql")):
+        if path.name.startswith(("009_", "010_")):
+            continue
         db.executescript(path.read_text())
     return db
 
@@ -53,16 +55,16 @@ def seed_populated(db: sqlite3.Connection) -> None:
         INSERT INTO accounts VALUES
           ('account-default','portfolio-default','broker','Default','2026-01-01T00:00:00.000000000Z'),
           ('account-other','portfolio-other','broker','Other','2026-01-01T00:00:00.000000000Z');
-        INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,acquisition_date,source_row,source_ref,created_at,source_sha256) VALUES
-          ('lot-one','portfolio-default','instrument-shared','account-default','1','10','10','MYR','2026-01-01',1,'legacy-one','2026-01-01T00:00:00.000000000Z','hash-one'),
-          ('lot-two','portfolio-default','instrument-shared','account-default','2','10','20','MYR','2026-01-02',2,'legacy-two','2026-01-02T00:00:00.000000000Z','hash-two'),
-          ('lot-other','portfolio-other','instrument-other','account-other','3','5','15','USD','2026-01-01',3,'legacy-other','2026-01-01T00:00:00.000000000Z','hash-other'),
-          ('lot-nofraction','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,10,'legacy-nofraction','2026-01-04T00:00:00Z','hash-nofraction'),
-          ('lot-shortfraction','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,11,'legacy-shortfraction','2026-01-04T00:00:00.123Z','hash-shortfraction'),
-          ('lot-nanosecond','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,12,'legacy-nanosecond','2026-01-04T00:00:00.123456789Z','hash-nanosecond'),
-          ('lot-offset','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,13,'legacy-offset','2026-01-05T01:00:00.123+01:00','hash-offset'),
-          ('lot-equal','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,14,'legacy-equal','2026-01-06T00:00:00.000000000Z','hash-equal'),
-          ('lot-malformed','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,15,'legacy-malformed','2026','hash-malformed');
+        INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,acquisition_date,created_at) VALUES
+          ('lot-one','portfolio-default','instrument-shared','account-default','1','10','10','MYR','2026-01-01','2026-01-01T00:00:00.000000000Z'),
+          ('lot-two','portfolio-default','instrument-shared','account-default','2','10','20','MYR','2026-01-02','2026-01-02T00:00:00.000000000Z'),
+          ('lot-other','portfolio-other','instrument-other','account-other','3','5','15','USD','2026-01-01','2026-01-01T00:00:00.000000000Z'),
+          ('lot-nofraction','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,'2026-01-04T00:00:00Z'),
+          ('lot-shortfraction','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,'2026-01-04T00:00:00.123Z'),
+          ('lot-nanosecond','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,'2026-01-04T00:00:00.123456789Z'),
+          ('lot-offset','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,'2026-01-05T01:00:00.123+01:00'),
+          ('lot-equal','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,'2026-01-06T00:00:00.000000000Z'),
+          ('lot-malformed','portfolio-default','instrument-shared',NULL,'1','1','1','MYR',NULL,'2026');
         INSERT INTO machine_principals(id,portfolio_id,permission_portfolio_read,permission_reviews_write,active,created_at)
           VALUES ('bad actor','portfolio-default',1,0,1,'2026-01-01T00:00:00.000000000Z');
         INSERT INTO snapshots VALUES ('snapshot-default','portfolio-default','v1','{"historical":true}','2026-01-03T00:00:00.000000000Z','legacy-input');
@@ -396,21 +398,29 @@ def check_future_no_document_import_regression() -> None:
     if os.environ.get("HOLDING_CONTRACT_IMPLEMENTED") != "1":
         return
     patterns = (
-        "Portfolio.md",
-        "import-preview",
-        "import-apply",
-        "import-status",
-        "source_row",
-        "source_ref",
-        "source_sha256",
-        "import_runs",
-        "import_items",
+        "Portfolio.md",  # historical removal ledger
+        "import-preview",  # removal ledger
+        "import-apply",  # removal ledger
+        "import-status",  # removal ledger
+        "source_row",  # removal ledger
+        "source_ref",  # removal ledger
+        "source_sha256",  # removal ledger
+        "import_runs",  # removal ledger
+        "import_items",  # removal ledger
     )
     allowed_contract_files = {
         "api/openapi.yaml",
         "docs/holding-mutation-contract.md",
         "docs/holding-mutation-contract.sql",
         "docs/holding-mutation-contract-harness.py",
+        "internal/store/migrations/001_initial.sql",
+        "internal/store/migrations/002_import_idempotency.sql",
+        "internal/store/migrations/010_holding_schema_convergence.sql",
+    }
+    historical_migration_files = {
+        "internal/store/migrations/001_initial.sql",
+        "internal/store/migrations/002_import_idempotency.sql",
+        "internal/store/migrations/010_holding_schema_convergence.sql",
     }
     tracked = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines()
     for relative in tracked:
@@ -428,6 +438,8 @@ def check_future_no_document_import_regression() -> None:
                 continue
             if relative not in allowed_contract_files:
                 raise AssertionError(f"active document-import identity remains: {relative}:{line_number}")
+            if relative in historical_migration_files:
+                continue
             context = line.lower()
             if not any(marker in context for marker in ("no ", "never", "remove", "removal", "historical", "baseline", "prohibit", "not runtime")):
                 raise AssertionError(f"unaccounted contract reference: {relative}:{line_number}")

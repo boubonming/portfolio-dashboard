@@ -282,9 +282,6 @@ WHEN OLD.lifecycle = 'removed'
       NEW.cost_basis IS NOT OLD.cost_basis OR
       NEW.currency IS NOT OLD.currency OR
       NEW.acquisition_date IS NOT OLD.acquisition_date OR
-      NEW.source_row IS NOT OLD.source_row OR
-      NEW.source_ref IS NOT OLD.source_ref OR
-      NEW.source_sha256 IS NOT OLD.source_sha256 OR
       NEW.created_at IS NOT OLD.created_at OR
       NEW.created_at_order_key IS NOT OLD.created_at_order_key
   ))

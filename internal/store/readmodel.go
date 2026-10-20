@@ -18,7 +18,6 @@ var ErrInvalidReportingCurrency = errors.New("invalid reporting currency")
 type sourceHolding struct {
 	lotID, symbol, description, quantity, currency string
 	unitCost, costBasis, broker, acquisitionDate   sql.NullString
-	sourceRow                                      int
 }
 
 // PortfolioOverview returns a read-only, portfolio-scoped view. A requested
@@ -84,6 +83,14 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 		}
 	}
 	view.Snapshot = snapshotView(payload, valuation)
+	var currentRevision int
+	if err := s.DB.QueryRowContext(ctx, `SELECT holdings_revision FROM portfolios WHERE id = ?`, portfolioID).Scan(&currentRevision); err != nil {
+		return domain.PortfolioOverview{}, err
+	}
+	if payload.Input.HoldingsRevision != currentRevision {
+		view.Snapshot.State = "stale"
+		view.Snapshot.StaleDependencies = appendUnique(view.Snapshot.StaleDependencies, "holdings_revision")
+	}
 	view.Allocation = domain.BuildAllocation(input, valuation)
 
 	values := make(map[string]domain.LotValuation, len(valuation.Lots))
@@ -142,7 +149,7 @@ func normalizeReportingCurrency(value string) (string, error) {
 }
 
 func (s *Store) loadSourceHoldings(ctx context.Context, portfolioID string) ([]domain.HoldingView, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT l.id,i.symbol,COALESCE(i.description,''),l.quantity,l.currency,l.unit_cost,l.cost_basis,a.broker,l.acquisition_date,COALESCE(l.source_row,0) FROM lots l JOIN instruments i ON i.id = l.instrument_id LEFT JOIN accounts a ON a.id = l.account_id AND a.portfolio_id = l.portfolio_id WHERE l.portfolio_id = ? ORDER BY l.source_row,l.id`, portfolioID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT l.id,i.symbol,COALESCE(i.description,''),l.quantity,l.currency,l.unit_cost,l.cost_basis,a.broker,l.acquisition_date FROM lots l JOIN instruments i ON i.id = l.instrument_id LEFT JOIN accounts a ON a.id = l.account_id AND a.portfolio_id = l.portfolio_id WHERE l.portfolio_id = ? AND l.lifecycle = 'active' ORDER BY l.id`, portfolioID)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +157,7 @@ func (s *Store) loadSourceHoldings(ctx context.Context, portfolioID string) ([]d
 	holdings := []domain.HoldingView{}
 	for rows.Next() {
 		var source sourceHolding
-		if err := rows.Scan(&source.lotID, &source.symbol, &source.description, &source.quantity, &source.currency, &source.unitCost, &source.costBasis, &source.broker, &source.acquisitionDate, &source.sourceRow); err != nil {
+		if err := rows.Scan(&source.lotID, &source.symbol, &source.description, &source.quantity, &source.currency, &source.unitCost, &source.costBasis, &source.broker, &source.acquisitionDate); err != nil {
 			return nil, err
 		}
 		holding := domain.HoldingView{LotID: source.lotID, Symbol: source.symbol, Description: source.description, Quantity: source.quantity, Currency: source.currency, Freshness: domain.Freshness{Status: domain.Missing}, DataQuality: []string{}}
@@ -168,7 +175,6 @@ func (s *Store) loadSourceHoldings(ctx context.Context, portfolioID string) ([]d
 		}
 		holding.MissingBroker = holding.Broker == nil
 		holding.MissingAcquisitionDate = holding.AcquisitionDate == nil
-		holding.SourceRow = source.sourceRow
 		holdings = append(holdings, holding)
 	}
 	return holdings, rows.Err()

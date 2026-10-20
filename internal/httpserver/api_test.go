@@ -25,14 +25,17 @@ func apiFixture(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC().Add(-time.Hour))
 	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-api", "API Fixture", "MYR", now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-api", "FIX", "Fixture instrument", "USD", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,source_row,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "lot-api", "portfolio-api", "instrument-api", "0.125", "1.20", "0.15", "USD", 1, "fixture#row=1", "fixture-hash", now); err != nil {
+	if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-api", "instrument-api", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?,?)`, "lot-api", "portfolio-api", "instrument-api", "0.125", "1.20", "0.15", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.AddQuote(context.Background(), store.QuoteInput{InstrumentID: "instrument-api", Price: "123.4500", Currency: "USD", Source: "fixture", MarketAt: now, Basis: "close", Provenance: "test"}); err != nil {
@@ -137,6 +140,43 @@ func TestPortfolioOverviewAPIIsScopedAndKeepsDecimalsAsStrings(t *testing.T) {
 	}
 }
 
+func TestForeignInstrumentReassignmentCannotReachOverviewOrCSV(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
+	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-foreign", "Foreign", "MYR", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-foreign", "FOREIGN", "Foreign instrument", "USD", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-foreign", "instrument-foreign", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`UPDATE lots SET instrument_id=? WHERE id=?`, "instrument-foreign", "lot-api"); err == nil {
+		t.Fatal("foreign instrument reassignment unexpectedly succeeded")
+	}
+	var instrumentID string
+	if err := database.DB.QueryRow(`SELECT instrument_id FROM lots WHERE id=?`, "lot-api").Scan(&instrumentID); err != nil {
+		t.Fatal(err)
+	}
+	if instrumentID != "instrument-api" {
+		t.Fatalf("lot instrument_id=%q after rejected reassignment", instrumentID)
+	}
+
+	handler := authenticatedAPIHandler(t, database)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview", nil))
+	if response.Code != http.StatusOK || contains(response.Body.String(), "FOREIGN") || contains(response.Body.String(), "Foreign instrument") {
+		t.Fatalf("overview exposed foreign instrument: status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/export.csv?currency=MYR", nil))
+	if response.Code != http.StatusOK || contains(response.Body.String(), "FOREIGN") || contains(response.Body.String(), "Foreign instrument") {
+		t.Fatalf("CSV exposed foreign instrument: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestPortfolioOverviewAPINoSnapshotIsExplicit(t *testing.T) {
 	database := apiFixture(t)
 	defer database.Close()
@@ -176,7 +216,7 @@ func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing
 		t.Fatal(err)
 	}
 	defer database.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
 	for _, portfolio := range []string{"portfolio-33", "portfolio-other"} {
 		if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, portfolio, portfolio, "MYR", now, now); err != nil {
 			t.Fatal(err)
@@ -190,8 +230,14 @@ func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing
 		if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, instrumentID, fmt.Sprintf("SYM%02d", index), "Synthetic instrument", "MYR", now); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-33", instrumentID, now); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-leak", "LEAK", "Foreign instrument", "MYR", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-other", "instrument-leak", now); err != nil {
 		t.Fatal(err)
 	}
 	for index := 1; index <= 33; index++ {
@@ -203,14 +249,12 @@ func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing
 			instrumentIndex = 2
 		}
 		accountID := any(nil)
-		if index == 1 {
-			accountID = "account-other"
-		}
-		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,source_row,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, fmt.Sprintf("lot-33-%02d", index), "portfolio-33", fmt.Sprintf("instrument-33-%02d", instrumentIndex), accountID, "1", "MYR", index, fmt.Sprintf("portfolio-33#row=%d", index), fmt.Sprintf("portfolio-33-hash-%02d", index), now); err != nil {
+
+		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, fmt.Sprintf("lot-33-%02d", index), "portfolio-33", fmt.Sprintf("instrument-33-%02d", instrumentIndex), accountID, "1", "MYR", now, now); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,source_row,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, "lot-other", "portfolio-other", "instrument-leak", "account-other", "99", "MYR", 1, "portfolio-other#row=1", "portfolio-other-hash", now); err != nil {
+	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-other", "portfolio-other", "instrument-leak", "account-other", "99", "MYR", now, now); err != nil {
 		t.Fatal(err)
 	}
 	for index := 1; index <= 31; index++ {

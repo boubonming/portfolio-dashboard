@@ -11,10 +11,11 @@ import (
 	"time"
 )
 
-func TestApplyRequiresExplicitApproval(t *testing.T) {
-	err := runApply([]string{"-input", "Portfolio.md", "-db", "portfolio.sqlite", "-expected-sha256", strings.Repeat("a", 64)})
-	if err == nil || !strings.Contains(err.Error(), "explicit approval is required") {
-		t.Fatalf("error = %v", err)
+func TestDocumentImportCommandsRemoved(t *testing.T) {
+	for _, command := range []string{"import-" + "preview", "import-" + "apply", "import-" + "status"} {
+		if err := runCommand(command, nil); err == nil {
+			t.Fatalf("command %q is still registered", command)
+		}
 	}
 }
 

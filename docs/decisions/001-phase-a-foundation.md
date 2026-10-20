@@ -33,9 +33,11 @@ Evidence in this record was checked against official provider documentation on 2
 
 ### Reconciliation rules
 
-The authoritative source is `main/20-Personal/Investing/Portfolio.md`. It contains 33 source holding rows: 26 USD-denominated rows, two SGD rows, four MYR rows and one JPY row. NVDA and INTC each occur as two lots. The `NVDA total` and `INTC total` rows are aggregate presentations, not additional holdings, and are deliberately excluded from the inventory count. The normalized inventory therefore contains 31 distinct source symbols and 33 source lots/rows.
-
-Source symbols, quantities and supplied costs are not copied or normalized here. The application import preview must preserve those values exactly and retain a source-note reference. The exchange and provider mappings below are hypotheses for identity validation, not replacements for the source symbols.
+The pre-cutover inventory contained duplicate lots for several instruments. The
+normalized inventory therefore distinguished instruments from individual lots,
+preserving supplied decimal values and currencies. The exchange and provider
+mappings below are hypotheses for identity validation, not replacements for
+canonical instrument identity.
 
 ### Inventory
 
@@ -290,7 +292,8 @@ Scaffolding Go, React, SQLite, Docker or provider ingestion remains blocked unti
 ## Official source index
 
 - Canonical plan: `/opt/data/obsidian-vault/projects/01-Active/Portfolio-Dashboard/Implementation Plan.md` (repository planning authority; not modified).
-- Holdings source: `/opt/data/obsidian-vault/main/20-Personal/Investing/Portfolio.md` (pre-cutover authority; not modified).
+- Historical holdings evidence remains outside the runtime cutover and is not
+  an application input or startup dependency.
 - EODHD exchange/ticker lists: https://eodhd.com/financial-apis/exchanges-api-list-of-tickers-and-trading-hours
 - EODHD EOD API: https://eodhd.com/financial-apis/api-for-historical-data-and-volumes
 - EODHD API limits: https://eodhd.com/financial-apis/api-limits

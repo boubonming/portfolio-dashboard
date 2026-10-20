@@ -17,7 +17,7 @@ import (
 
 	"github.com/boubonming/portfolio-dashboard/internal/config"
 	"github.com/boubonming/portfolio-dashboard/internal/httpserver"
-	"github.com/boubonming/portfolio-dashboard/internal/importer"
+
 	"github.com/boubonming/portfolio-dashboard/internal/marketdata"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 )
@@ -64,12 +64,7 @@ func newHTTPServer(address string, handler http.Handler) *http.Server {
 
 func runCommand(command string, args []string) error {
 	switch command {
-	case "import-preview":
-		return runPreview(args)
-	case "import-apply":
-		return runApply(args)
-	case "import-status":
-		return runStatus(args)
+
 	case "quote-add":
 		return runQuoteAdd(args)
 	case "fx-add":
@@ -89,7 +84,7 @@ func runCommand(command string, args []string) error {
 	case "healthcheck":
 		return runHealthcheck(args)
 	default:
-		return fmt.Errorf("unknown command %q (use healthcheck, import-preview, import-apply, import-status, mapping-add, mapping-list, market-refresh, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
+		return fmt.Errorf("unknown command %q (use healthcheck, mapping-add, mapping-list, market-refresh, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
 	}
 }
 
@@ -150,83 +145,6 @@ func runHealthcheck(args []string) error {
 		return fmt.Errorf("healthcheck endpoint returned HTTP %d", response.StatusCode)
 	}
 	return nil
-}
-
-func runPreview(args []string) error {
-	flags := flag.NewFlagSet("import-preview", flag.ContinueOnError)
-	input := flags.String("input", "", "authoritative Markdown input path")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if *input == "" {
-		return errors.New("-input is required")
-	}
-	preview, err := importer.PreviewFile(*input)
-	if err != nil {
-		return err
-	}
-	return writeJSON(preview)
-}
-
-func runApply(args []string) error {
-	flags := flag.NewFlagSet("import-apply", flag.ContinueOnError)
-	input := flags.String("input", "", "authoritative Markdown input path")
-	database := flags.String("db", "", "SQLite database path")
-	expectedHash := flags.String("expected-sha256", "", "exact source SHA-256 from the approved preview")
-	approved := flags.Bool("approve", false, "explicitly approve this exact preview hash for persistence")
-	reportingCurrency := flags.String("reporting-currency", "MYR", "portfolio reporting currency")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if *input == "" || *database == "" || *expectedHash == "" {
-		return errors.New("-input, -db, and -expected-sha256 are required")
-	}
-	if !*approved {
-		return errors.New("explicit approval is required: pass -approve")
-	}
-	preview, err := importer.PreviewFile(*input)
-	if err != nil {
-		return err
-	}
-	if preview.SourceSHA256 != *expectedHash {
-		return fmt.Errorf("source hash mismatch: got %s, expected %s", preview.SourceSHA256, *expectedHash)
-	}
-	if err := importer.ValidateApproved(preview); err != nil {
-		return err
-	}
-	ctx := context.Background()
-	db, err := store.Open(ctx, *database)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	result, err := db.Apply(ctx, preview, *input, *expectedHash, *reportingCurrency)
-	if err != nil {
-		return err
-	}
-	return writeJSON(result)
-}
-
-func runStatus(args []string) error {
-	flags := flag.NewFlagSet("import-status", flag.ContinueOnError)
-	database := flags.String("db", "", "SQLite database path")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if *database == "" {
-		return errors.New("-db is required")
-	}
-	ctx := context.Background()
-	db, err := store.Open(ctx, *database)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	status, err := db.Status(ctx)
-	if err != nil {
-		return err
-	}
-	return writeJSON(status)
 }
 
 func openDatabase(path string) (*store.Store, context.Context, error) {

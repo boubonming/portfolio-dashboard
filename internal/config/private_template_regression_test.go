@@ -56,7 +56,7 @@ func TestPrivateTemplateDisabledOptionalConfigurationStaysDisabled(t *testing.T)
 	if values["PORTFOLIO_HOST_PORT"] != "8080" {
 		t.Errorf("PORTFOLIO_HOST_PORT template value = %q, want 8080", values["PORTFOLIO_HOST_PORT"])
 	}
-	for _, name := range []string{"PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE"} {
+	for _, name := range []string{"PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE", "PORTFOLIO_MACHINE_HOLDINGS_WRITE"} {
 		if values[name] != "false" {
 			t.Errorf("%s template value = %q, want false", name, values[name])
 		}
@@ -68,11 +68,12 @@ func TestPrivateTemplateDisabledOptionalConfigurationStaysDisabled(t *testing.T)
 	}
 	t.Setenv("PORTFOLIO_MACHINE_PORTFOLIO_READ", values["PORTFOLIO_MACHINE_PORTFOLIO_READ"])
 	t.Setenv("PORTFOLIO_MACHINE_REVIEWS_WRITE", values["PORTFOLIO_MACHINE_REVIEWS_WRITE"])
+	t.Setenv("PORTFOLIO_MACHINE_HOLDINGS_WRITE", values["PORTFOLIO_MACHINE_HOLDINGS_WRITE"])
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("disabled template configuration rejected: %v", err)
 	}
-	if cfg.Auth.Machine.Enabled() || cfg.Auth.Machine.PortfolioRead || cfg.Auth.Machine.ReviewsWrite {
+	if cfg.Auth.Machine.Enabled() || cfg.Auth.Machine.PortfolioRead || cfg.Auth.Machine.ReviewsWrite || cfg.Auth.Machine.HoldingsWrite {
 		t.Fatalf("disabled machine configuration became active: %s", cfg.Auth.Machine)
 	}
 	if cfg.ProviderKeys.Finnhub != "" || cfg.ProviderKeys.AlphaVantage != "" || cfg.ProviderKeys.OpenExchangeRates != "" {

@@ -25,7 +25,7 @@ func thesisFixtureAt(t *testing.T, databasePath string) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalSnapshotTime(time.Now().UTC())
 	for _, id := range []string{"portfolio-a", "portfolio-b"} {
 		if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, id, id, "USD", now, now); err != nil {
 			t.Fatal(err)
@@ -34,8 +34,13 @@ func thesisFixtureAt(t *testing.T, databasePath string) *Store {
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "instrument-shared", "SHARED", "USD", now); err != nil {
 		t.Fatal(err)
 	}
+	for _, portfolio := range []string{"portfolio-a", "portfolio-b"} {
+		if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, portfolio, "instrument-shared", now); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, lot := range []struct{ id, portfolio string }{{"holding-a", "portfolio-a"}, {"holding-b", "portfolio-b"}} {
-		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at) VALUES(?,?,?,?,?,?)`, lot.id, lot.portfolio, "instrument-shared", "1", "USD", now); err != nil {
+		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, lot.id, lot.portfolio, "instrument-shared", "1", "USD", now, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -123,8 +128,8 @@ func TestThesisValidationRejectsUnsafeBoundsAndSources(t *testing.T) {
 func TestThesisAllowsSameInstrumentLotsAndDelayedHistoricalRetry(t *testing.T) {
 	s := thesisFixture(t)
 	defer s.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at) VALUES(?,?,?,?,?,?)`, "holding-a2", "portfolio-a", "instrument-shared", "2", "USD", now); err != nil {
+	now := canonicalSnapshotTime(time.Now().UTC())
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, "holding-a2", "portfolio-a", "instrument-shared", "2", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()

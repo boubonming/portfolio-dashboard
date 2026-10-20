@@ -11,7 +11,6 @@
 *.db-*
 **/backup*
 **/*.bak
-Portfolio.md
 preview.json
 frontend/node_modules
 frontend/dist

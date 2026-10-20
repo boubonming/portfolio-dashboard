@@ -33,20 +33,28 @@ func newReviewRegressionFixture(t *testing.T) *reviewRegressionFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, time.January, 2, 12, 0, 0, 123456789, time.UTC)
 	nowText := now.Format(time.RFC3339Nano)
 	for _, statement := range []string{
 		`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES('review-portfolio','Review fixture','USD',?,?)`,
 		`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES('review-instrument','REV','Review fixture','USD',?)`,
-		`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,source_row,source_ref,source_sha256,created_at) VALUES('review-lot','review-portfolio','review-instrument','1','2','2','USD',1,'review#1','review-hash',?)`,
+		`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES('review-lot','review-portfolio','review-instrument','1','2','2','USD',?,?)`,
 	} {
 		args := []any{nowText, nowText}
-		if strings.Contains(statement, "instruments") || strings.Contains(statement, "lots") {
+		if strings.Contains(statement, "lots") {
+			args = []any{nowText, nowText}
+		} else if strings.Contains(statement, "instruments") {
 			args = []any{nowText}
 		}
 		if _, err := s.DB.Exec(statement, args...); err != nil {
 			s.Close()
 			t.Fatal(err)
+		}
+		if strings.Contains(statement, "instruments") {
+			if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "review-portfolio", "review-instrument", nowText); err != nil {
+				s.Close()
+				t.Fatal(err)
+			}
 		}
 	}
 	if _, err := s.AddQuote(ctx, QuoteInput{InstrumentID: "review-instrument", Price: "2", Currency: "USD", Source: "fixture", MarketAt: nowText, Basis: "close", Provenance: "review fixture"}); err != nil {

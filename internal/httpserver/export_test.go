@@ -48,7 +48,7 @@ func TestPortfolioExportCSVUsesOverviewDecimalsAndStableLotRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantHeaders := []string{"portfolio_id", "portfolio_name", "reporting_currency", "snapshot_state", "snapshot_id", "calculation_version", "snapshot_as_of", "snapshot_created_at", "snapshot_complete", "lot_id", "symbol", "name", "description", "quantity", "source_currency", "unit_cost", "cost_basis", "latest_price", "latest_value", "reporting_value", "quote_source", "market_timestamp", "freshness_state", "freshness_age", "broker", "acquisition_date", "source_row", "missing_broker", "missing_acquisition_date", "data_quality_flags"}
+	wantHeaders := []string{"portfolio_id", "portfolio_name", "reporting_currency", "snapshot_state", "snapshot_id", "calculation_version", "snapshot_as_of", "snapshot_created_at", "snapshot_complete", "lot_id", "symbol", "name", "description", "quantity", "source_currency", "unit_cost", "cost_basis", "latest_price", "latest_value", "reporting_value", "quote_source", "market_timestamp", "freshness_state", "freshness_age", "broker", "acquisition_date", "missing_broker", "missing_acquisition_date", "data_quality_flags"}
 	if strings.Join(headers, "\x00") != strings.Join(wantHeaders, "\x00") {
 		t.Fatalf("headers=%v", headers)
 	}
@@ -120,18 +120,23 @@ func TestPortfolioExportCSVEscapesFormulaTextAndKeepsCSVData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
 	for _, statement := range []struct {
 		query string
 		args  []any
 	}{
-		{`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, []any{"portfolio-safe", "Portfolio", "MYR", now, now}},
+		{`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, []any{"portfolio-safe", "Safe Portfolio", "MYR", now, now}},
 		{`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, []any{"instrument-safe", "=SUM(A1)", "Name, \"quoted\"\n東京", "MYR", now}},
 		{`INSERT INTO accounts(id,portfolio_id,broker,created_at) VALUES(?,?,?,?)`, []any{"account-safe", "portfolio-safe", "+broker", now}},
-		{`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,source_row,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, []any{"lot-safe", "portfolio-safe", "instrument-safe", "account-safe", "0.000000000000000001", "1.2300", "0.000000000000000001", "MYR", 7, now}},
+		{`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?,?,?)`, []any{"lot-safe", "portfolio-safe", "instrument-safe", "account-safe", "0.000000000000000001", "1.2300", "0.000000000000000001", "MYR", now, now}},
 	} {
 		if _, err := database.DB.Exec(statement.query, statement.args...); err != nil {
 			t.Fatal(err)
+		}
+		if strings.Contains(statement.query, "INSERT INTO instruments") {
+			if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-safe", "instrument-safe", now); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	response := httptest.NewRecorder()
@@ -244,23 +249,10 @@ func TestExportTextEscapesFormulaPrefixesAndPreservesCanonicalValues(t *testing.
 	}
 }
 
-func TestExportHoldingRowLeavesAbsentAndZeroSourceRowsBlank(t *testing.T) {
-	view := domain.PortfolioOverview{Portfolio: domain.PortfolioSummary{ID: "portfolio-source-row"}}
-	for _, test := range []struct {
-		name      string
-		sourceRow int
-		want      string
-	}{
-		{name: "absent", sourceRow: 0, want: ""},
-		{name: "positive", sourceRow: 12, want: "12"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			holding := domain.HoldingView{SourceRow: test.sourceRow}
-			row := exportHoldingRow(view, holding)
-			if got := row[26]; got != test.want {
-				t.Fatalf("source_row=%q, want %q", got, test.want)
-			}
-		})
+func TestExportHoldingRowOmitsLegacyProvenance(t *testing.T) {
+	row := exportHoldingRow(domain.PortfolioOverview{}, domain.HoldingView{})
+	if len(row) != len(exportHeaders) {
+		t.Fatalf("row columns=%d headers=%d", len(row), len(exportHeaders))
 	}
 }
 
@@ -280,18 +272,21 @@ func TestRenderPortfolioCSVReturnsNoPartialBytesWhenGenerationIsCanceled(t *test
 func TestPortfolioExportCSVKeepsThirtyThreeLotsAndDuplicateSymbols(t *testing.T) {
 	database := apiFixture(t)
 	defer database.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
 	for index := 1; index <= 30; index++ {
 		instrumentID := fmt.Sprintf("instrument-export-%02d", index)
 		if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, instrumentID, fmt.Sprintf("SYM%02d", index), "Fixture", "MYR", now); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,source_row,created_at) VALUES(?,?,?,?,?,?,?)`, fmt.Sprintf("lot-export-%02d", index), "portfolio-api", instrumentID, "1", "MYR", index+1, now); err != nil {
+		if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-api", instrumentID, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, fmt.Sprintf("lot-export-%02d", index), "portfolio-api", instrumentID, "1", "MYR", now, now); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for index := 1; index <= 2; index++ {
-		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,source_row,created_at) VALUES(?,?,?,?,?,?,?)`, fmt.Sprintf("lot-export-duplicate-%02d", index), "portfolio-api", fmt.Sprintf("instrument-export-%02d", index), "2", "MYR", index+31, now); err != nil {
+		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, fmt.Sprintf("lot-export-duplicate-%02d", index), "portfolio-api", fmt.Sprintf("instrument-export-%02d", index), "2", "MYR", now, now); err != nil {
 			t.Fatal(err)
 		}
 	}
