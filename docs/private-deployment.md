@@ -51,28 +51,83 @@ docker inspect "$(docker compose ps -q portfolio-dashboard)" \
   --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}'
 ```
 
-For an offline backup, stop the service first and stream the database through a temporary helper container; the application remains non-root and is not started:
+For an offline backup, stop the service first and archive the dedicated volume contents through a temporary helper container. The application and helper remain non-root:
 
 ```sh
-mkdir -p backups
-VOLUME_NAME="$(docker inspect "$(docker compose ps -q portfolio-dashboard)" \
+set -eu
+umask 077
+BACKUP_DIR=backups
+BACKUP_FILE="${BACKUP_DIR}/portfolio-dashboard.sqlite.tgz"
+mkdir -p "${BACKUP_DIR}"
+chmod 700 "${BACKUP_DIR}"
+CONTAINER_ID="$(docker compose ps --all --quiet portfolio-dashboard)"
+if [ -z "${CONTAINER_ID}" ]; then
+  echo "portfolio-dashboard container was not found" >&2
+  exit 1
+fi
+VOLUME_NAME="$(docker inspect "${CONTAINER_ID}" \
   --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')"
+if [ -z "${VOLUME_NAME}" ]; then
+  echo "the portfolio-dashboard container has no /data volume" >&2
+  exit 1
+fi
+TEMP_FILE="${BACKUP_FILE}.tmp.$$"
+cleanup() {
+  status=$?
+  rm -f "${TEMP_FILE}"
+  if [ "${status}" -ne 0 ]; then
+    docker compose start portfolio-dashboard || echo "could not restart portfolio-dashboard" >&2
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT
 docker compose stop portfolio-dashboard
 docker run --rm --user 65532:65532 \
   -v "${VOLUME_NAME}:/data:ro" \
-  busybox:1.36.1 tar czf - -C /data portfolio-dashboard.sqlite \
-  > backups/portfolio-dashboard.sqlite.tgz
+  busybox:1.36.1 tar czf - -C /data . \
+  > "${TEMP_FILE}"
+chmod 600 "${TEMP_FILE}"
+mv -f "${TEMP_FILE}" "${BACKUP_FILE}"
 docker compose start portfolio-dashboard
+trap - EXIT
 ```
 
-Restore offline by stopping the service, extracting the backup into the same volume with the fixed runtime identity, and starting the service again:
+Restore offline by resolving the volume from the existing container, stopping the service, replacing the SQLite file set, and starting the service again:
 
 ```sh
+set -eu
+umask 077
+BACKUP_FILE=backups/portfolio-dashboard.sqlite.tgz
+if [ ! -r "${BACKUP_FILE}" ]; then
+  echo "backup file is not readable: ${BACKUP_FILE}" >&2
+  exit 1
+fi
+CONTAINER_ID="$(docker compose ps --all --quiet portfolio-dashboard)"
+if [ -z "${CONTAINER_ID}" ]; then
+  echo "portfolio-dashboard container was not found" >&2
+  exit 1
+fi
+VOLUME_NAME="$(docker inspect "${CONTAINER_ID}" \
+  --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')"
+if [ -z "${VOLUME_NAME}" ]; then
+  echo "the portfolio-dashboard container has no /data volume" >&2
+  exit 1
+fi
+cleanup() {
+  status=$?
+  if [ "${status}" -ne 0 ]; then
+    docker compose start portfolio-dashboard || echo "could not restart portfolio-dashboard" >&2
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT
 docker compose stop portfolio-dashboard
-cat backups/portfolio-dashboard.sqlite.tgz | docker run -i --rm --user 65532:65532 \
+docker run -i --rm --user 65532:65532 \
   -v "${VOLUME_NAME}:/data" \
-  busybox:1.36.1 sh -c 'rm -f /data/portfolio-dashboard.sqlite && tar xzf - -C /data'
+  busybox:1.36.1 sh -c 'rm -f /data/portfolio-dashboard.sqlite /data/portfolio-dashboard.sqlite-* && tar xzf - -C /data' \
+  < "${BACKUP_FILE}"
 docker compose start portfolio-dashboard
+trap - EXIT
 ```
 
 The runtime image runs as non-root with a read-only root filesystem, a bounded non-executable `/tmp`, no Linux capabilities, and `no-new-privileges`. Only `/data` is writable. The image healthcheck invokes the application binary's restricted `healthcheck` command, which can call only an HTTP(S) `/healthz` URL on literal loopback with an explicit port, never follows redirects or environment proxies, has a bounded timeout, reads at most 4 KiB, and accepts only HTTP 200.

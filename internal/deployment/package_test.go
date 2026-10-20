@@ -389,6 +389,75 @@ func TestNamedVolumeDocumentationIsComplete(t *testing.T) {
 	}
 }
 
+func TestNamedVolumeBackupRestoreBlocksAreSelfContained(t *testing.T) {
+	documentation := repoFile(t, "docs/private-deployment.md")
+	blocks := regexp.MustCompile("(?ms)```sh\\s+(.*?)\\s+```").FindAllStringSubmatch(documentation, -1)
+	if len(blocks) == 0 {
+		t.Fatal("docs/private-deployment.md has no shell command blocks")
+	}
+
+	var backup, restore string
+	for _, match := range blocks {
+		block := match[1]
+		switch {
+		case strings.Contains(block, "BACKUP_FILE") && strings.Contains(block, "tar czf"):
+			backup = block
+		case strings.Contains(block, "BACKUP_FILE") && strings.Contains(block, "tar xzf"):
+			restore = block
+		}
+	}
+	if backup == "" || restore == "" {
+		t.Fatalf("could not identify independent backup and restore blocks")
+	}
+
+	for name, block := range map[string]string{"backup": backup, "restore": restore} {
+		normalized := strings.Join(strings.Fields(block), " ")
+		for _, phrase := range []string{
+			"set -eu",
+			"docker compose ps --all --quiet portfolio-dashboard",
+			"docker inspect \"${CONTAINER_ID}\"",
+			"eq .Destination \"/data\"",
+			"if [ -z \"${CONTAINER_ID}\" ]; then",
+			"if [ -z \"${VOLUME_NAME}\" ]; then",
+			"docker compose stop portfolio-dashboard",
+			"trap cleanup EXIT",
+			"docker compose start portfolio-dashboard",
+			"--user 65532:65532",
+		} {
+			if ! strings.Contains(normalized, phrase) {
+				t.Errorf("%s block is missing %q", name, phrase)
+			}
+		}
+		volumeAssignment := strings.Index(block, "VOLUME_NAME=\"$(docker inspect")
+		volumeUse := strings.Index(block, "${VOLUME_NAME}")
+		if volumeAssignment < 0 || volumeUse < 0 || volumeAssignment > volumeUse {
+			t.Errorf("%s block uses VOLUME_NAME without defining it first", name)
+		}
+	}
+
+	backupText := strings.Join(strings.Fields(backup), " ")
+	for _, phrase := range []string{
+		"umask 077",
+		"chmod 700 \"${BACKUP_DIR}\"",
+		"tar czf - -C /data .",
+		"chmod 600 \"${TEMP_FILE}\"",
+	} {
+		if !strings.Contains(backupText, phrase) {
+			t.Errorf("backup block is missing %q", phrase)
+		}
+	}
+
+	restoreText := strings.Join(strings.Fields(restore), " ")
+	for _, phrase := range []string{
+		"rm -f /data/portfolio-dashboard.sqlite /data/portfolio-dashboard.sqlite-*",
+		"tar xzf - -C /data",
+	} {
+		if !strings.Contains(restoreText, phrase) {
+			t.Errorf("restore block is missing %q", phrase)
+		}
+	}
+}
+
 func TestRootEnvExampleIsTrackedAllowedAndMatchesCompatibilityTemplate(t *testing.T) {
 	root := repoFile(t, ".env.example")
 	compatibility := repoFile(t, "deploy/private.env.example")
