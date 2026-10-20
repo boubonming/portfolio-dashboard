@@ -157,7 +157,7 @@ func TestDockerfileProductionInvariants(t *testing.T) {
 		"RUN go mod download",
 		"RUN go build -trimpath -buildvcs=false -ldflags='-s -w' -o /out/portfolio-dashboard ./cmd/portfolio-dashboard",
 		"RUN install -d -m 0700 /out/data",
-		"COPY --from=server-build --chown=65532:65532 /out/data /data",
+		"COPY --from=server-build --chown=65532:65532 --chmod=0700 /out/data /data",
 		"VOLUME [\"/data\"]",
 		"USER 65532:65532",
 		"EXPOSE 8080",
@@ -236,7 +236,13 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 	requireStrings(t, security, "no-new-privileges:true")
 	requireStrings(t, stringList(t, service["cap_drop"], "service.cap_drop"), "ALL")
 	requireStrings(t, stringList(t, service["tmpfs"], "service.tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=16m")
-	requireStrings(t, stringList(t, service["ports"], "service.ports"), "127.0.0.1:${PORTFOLIO_HOST_PORT:-8080}:8080")
+	ports := stringList(t, service["ports"], "service.ports")
+	requireStrings(t, ports, "${PORTFOLIO_HOST_IP:-127.0.0.1}:${PORTFOLIO_HOST_PORT:-8080}:8080")
+	for _, port := range ports {
+		if strings.Contains(port, "0.0.0.0") {
+			t.Errorf("service.ports must not publish on every interface: %q", port)
+		}
+	}
 	requireStrings(t, stringList(t, service["volumes"], "service.volumes"), "portfolio-data:/data")
 	volumes := yamlMap(t, document["volumes"], "volumes")
 	if len(volumes) != 1 {
@@ -375,6 +381,14 @@ func TestNamedVolumeDocumentationIsComplete(t *testing.T) {
 			"/data/portfolio-dashboard.sqlite",
 			"docker compose pull",
 			"docker compose up -d",
+			"PORTFOLIO_HOST_IP=127.0.0.1",
+			"containerized or external reverse proxy",
+			"specific current trusted interface address",
+			"same address plus `PORTFOLIO_HOST_PORT`",
+			"current interface address from live infrastructure",
+			"Never use `0.0.0.0` unless explicitly accepting exposure on every host interface",
+			"<trusted-host-interface>:8086",
+			"exact HTTPS public origin",
 		} {
 			if !strings.Contains(text, phrase) {
 				t.Errorf("%s is missing deployment documentation phrase %q", name, phrase)
@@ -623,10 +637,13 @@ func TestPrivateEnvTemplateOptionalConfigurationIsDisabled(t *testing.T) {
 		}
 		values[name] = value
 	}
-	for _, name := range []string{"PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
+	for _, name := range []string{"PORTFOLIO_HOST_IP", "PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
 		if _, ok := values[name]; !ok {
 			t.Errorf("missing Compose interpolation setting %s", name)
 		}
+	}
+	if values["PORTFOLIO_HOST_IP"] != "127.0.0.1" {
+		t.Errorf("PORTFOLIO_HOST_IP = %q, want loopback default", values["PORTFOLIO_HOST_IP"])
 	}
 
 	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET", "FINNHUB_API_KEY", "ALPHA_VANTAGE_API_KEY", "OPEN_EXCHANGE_RATES_APP_ID"} {

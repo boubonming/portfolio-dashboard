@@ -50,6 +50,12 @@ func TestPrivateTemplateDisabledOptionalConfigurationStaysDisabled(t *testing.T)
 			t.Errorf("%s template value = %q, want blank", name, values[name])
 		}
 	}
+	if values["PORTFOLIO_HOST_IP"] != "127.0.0.1" {
+		t.Errorf("PORTFOLIO_HOST_IP template value = %q, want loopback default", values["PORTFOLIO_HOST_IP"])
+	}
+	if values["PORTFOLIO_HOST_PORT"] != "8080" {
+		t.Errorf("PORTFOLIO_HOST_PORT template value = %q, want 8080", values["PORTFOLIO_HOST_PORT"])
+	}
 	for _, name := range []string{"PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE"} {
 		if values[name] != "false" {
 			t.Errorf("%s template value = %q, want false", name, values[name])
