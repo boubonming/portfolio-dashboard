@@ -18,7 +18,7 @@ No local multi-platform image build is claimed by this repository. The pull-requ
 
 ## Operator setup
 
-1. The tracked root `compose.yaml` and `.env.example` are the primary deployment files. Copy `.env.example` to `.env`, set mode `0600`, and replace the required `REPLACE_WITH_*` values. Leave optional machine/provider entries blank unless enabling those features. Set `PORTFOLIO_DATA_DIR` to an operator-owned directory; the example supplies safe defaults for container UID/GID (`65532`), host port (`8080`), and reporting currency (`MYR`). Compose uses the literal repository-owned `ghcr.io/boubonming/portfolio-dashboard:main` image and automatically reads the root `.env` file:
+1. The tracked root `compose.yaml` and `.env.example` are the primary deployment files. Copy `.env.example` to `.env`, set mode `0600`, and replace the required `REPLACE_WITH_*` values. Leave optional machine/provider entries blank unless enabling those features. Compose creates and manages the `portfolio-data` named volume automatically; no host data directory or ownership setup is required. The service runs as fixed non-root UID/GID `65532:65532`, and the database remains `/data/portfolio-dashboard.sqlite` inside the service. Compose uses the literal repository-owned `ghcr.io/boubonming/portfolio-dashboard:main` image and automatically reads the root `.env` file:
 
    ```sh
    cp .env.example .env
@@ -36,21 +36,44 @@ No local multi-platform image build is claimed by this repository. The pull-requ
    Enter and confirm the password at the prompts. The output includes `portfolio-admin:` followed by the bcrypt value; copy only the bcrypt portion after the first colon, not `portfolio-admin:`. Store the complete bcrypt value in single quotes in `.env`, for example `PORTFOLIO_AUTH_PASSWORD_HASH='REPLACE_WITH_COMPLETE_BCRYPT_VALUE'`. Never paste the hash or plaintext password into chat, and never commit either one. Leave machine credentials and provider keys blank unless their feature is explicitly enabled. Provider keys and the optional machine bearer secret are injected from `.env` only; they are not in the image, SQLite database, URLs, or logs. Both machine grant flags must remain `false` while machine credentials are blank.
 
    The optional machine configuration is a least-privilege external Hermes bearer identity, not an embedded runtime. It consists of the three identity/secret values (`PORTFOLIO_MACHINE_PRINCIPAL_ID`, `PORTFOLIO_MACHINE_PORTFOLIO_ID`, and `PORTFOLIO_MACHINE_BEARER_SECRET`) plus both grants (`PORTFOLIO_MACHINE_PORTFOLIO_READ` and `PORTFOLIO_MACHINE_REVIEWS_WRITE`). It is disabled fail closed when the three values are blank and both grants are `false`; normal Hermes review generation requires all three values and both grants `true`. The identity is bound to one portfolio, can read snapshot/context data and submit immutable advisory reviews, but cannot edit holdings or trade. Market-provider credentials are optional and independent of these machine settings.
-3. Choose the host data directory and numeric container identity. The default container identity is UID/GID `65532`; if the deployment user has different IDs, set `PORTFOLIO_CONTAINER_UID` and `PORTFOLIO_CONTAINER_GID` in `.env` before creating the directory. Make the bind mount owned by those same IDs so SQLite is created and migrated by the application user, not root:
-
-   ```sh
-   install -d -m 0700 /path/to/portfolio-dashboard-data
-   sudo chown 65532:65532 /path/to/portfolio-dashboard-data
-   # Set PORTFOLIO_DATA_DIR=/path/to/portfolio-dashboard-data in .env.
-   ```
-
-4. Review the rendered Compose configuration, then start it. The default host binding is loopback-only (`127.0.0.1:8080`); TLS and any public reverse proxy are intentionally outside this package. The application listens on port 8080 and stores SQLite at `/data/portfolio-dashboard.sqlite`. Ordinary `docker compose up -d` uses the locally cached `:main` image when present. To deliberately update the image, pull it first and then start the service:
+3. Review the rendered Compose configuration, then start it. The default host binding is loopback-only (`127.0.0.1:8080`); TLS and any public reverse proxy are intentionally outside this package. The application listens on port 8080 and stores SQLite at `/data/portfolio-dashboard.sqlite`. Ordinary `docker compose up -d` uses the locally cached `:main` image when present. To deliberately update the image, pull it first and then start the service:
 
    ```sh
    docker compose pull
    docker compose up -d
    docker compose ps
    ```
+
+The Compose volume key is `portfolio-data`, but Compose may prefix the actual Docker volume name with the project name. Inspect the actual mounted name from the running service before maintenance:
+
+```sh
+docker inspect "$(docker compose ps -q portfolio-dashboard)" \
+  --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}'
+```
+
+For an offline backup, stop the service first and stream the database through a temporary helper container; the application remains non-root and is not started:
+
+```sh
+mkdir -p backups
+VOLUME_NAME="$(docker inspect "$(docker compose ps -q portfolio-dashboard)" \
+  --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')"
+docker compose stop portfolio-dashboard
+docker run --rm --user 65532:65532 \
+  -v "${VOLUME_NAME}:/data:ro" \
+  busybox:1.36.1 tar czf - -C /data portfolio-dashboard.sqlite \
+  > backups/portfolio-dashboard.sqlite.tgz
+docker compose start portfolio-dashboard
+```
+
+Restore offline by stopping the service, extracting the backup into the same volume with the fixed runtime identity, and starting the service again:
+
+```sh
+docker compose stop portfolio-dashboard
+cat backups/portfolio-dashboard.sqlite.tgz | docker run -i --rm --user 65532:65532 \
+  -v "${VOLUME_NAME}:/data" \
+  busybox:1.36.1 sh -c 'rm -f /data/portfolio-dashboard.sqlite && tar xzf - -C /data'
+docker compose start portfolio-dashboard
+```
 
 The runtime image runs as non-root with a read-only root filesystem, a bounded non-executable `/tmp`, no Linux capabilities, and `no-new-privileges`. Only `/data` is writable. The image healthcheck invokes the application binary's restricted `healthcheck` command, which can call only an HTTP(S) `/healthz` URL on literal loopback with an explicit port, never follows redirects or environment proxies, has a bounded timeout, reads at most 4 KiB, and accepts only HTTP 200.
 

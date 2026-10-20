@@ -24,10 +24,12 @@ COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY --from=frontend-build /src/internal/web/dist ./internal/web/dist
 RUN go build -trimpath -buildvcs=false -ldflags='-s -w' -o /out/portfolio-dashboard ./cmd/portfolio-dashboard
+RUN install -d -m 0700 /out/data
 
 FROM ${RUNTIME_IMAGE} AS runtime
 WORKDIR /app
 COPY --from=server-build /out/portfolio-dashboard /app/portfolio-dashboard
+COPY --from=server-build --chown=65532:65532 /out/data /data
 VOLUME ["/data"]
 EXPOSE 8080
 USER 65532:65532
