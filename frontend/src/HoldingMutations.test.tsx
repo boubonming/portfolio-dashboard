@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import HoldingMutations, { validateHoldingMutationReceipt, validatePortfolioETag } from './HoldingMutations'
 
@@ -192,6 +193,97 @@ describe('HoldingMutations', () => {
     expect(dialog.contains(alert)).toBe(true)
     expect(document.activeElement).toBe(alert)
     expect((screen.getByRole('button', { name: 'Confirm archive lot lot-a' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('wraps forward and reverse Tab from a focused archive alert', async () => {
+    const props = { ...baseProps(), holdings: [{ ...holding, lot_id: 'lot-a' }, { ...holding, lot_id: 'lot-b' }] }
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 415, headers: new Headers(), clone: () => ({ json: async () => ({}) }) } as unknown as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+    const alert = screen.getByRole('alert')
+    const confirm = screen.getByRole('button', { name: 'Confirm archive lot lot-a' })
+    const cancel = screen.getByRole('button', { name: 'Cancel archive' })
+    expect(document.activeElement).toBe(alert)
+    fireEvent.keyDown(alert, { key: 'Tab' })
+    expect(document.activeElement).toBe(confirm)
+    fireEvent.keyDown(alert, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(cancel)
+  })
+
+  it('tears down an archive modal before a changed portfolio and scope can reuse it', () => {
+    const root = document.createElement('div')
+    root.id = 'root'
+    root.setAttribute('aria-hidden', 'false')
+    root.inert = true
+    document.body.appendChild(root)
+    const props = baseProps()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<HoldingMutations {...props} />, { container: root })
+    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+
+    rerender(<HoldingMutations {...props} portfolioId="portfolio-next" overviewETag={'"portfolio-next-7"'} scopeKey="portfolio-next:SGD:overview" />)
+
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(root.getAttribute('aria-hidden')).toBe('false')
+    expect(root.inert).toBe(true)
+    expect(fetchMock).not.toHaveBeenCalled()
+    root.remove()
+  })
+
+  it('aborts an in-flight archive and restores the background on scope replacement', async () => {
+    const root = document.createElement('div')
+    root.id = 'root'
+    root.setAttribute('aria-hidden', 'previous')
+    root.inert = false
+    document.body.appendChild(root)
+    const props = baseProps()
+    let resolveFetch: (response: Response) => void = () => undefined
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>((resolve) => { resolveFetch = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<HoldingMutations {...props} />, { container: root })
+    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    const request = fetchMock.mock.calls[0][1]
+
+    rerender(<HoldingMutations {...props} scopeKey="portfolio-default:SGD:overview" />)
+
+    expect((request?.signal as AbortSignal).aborted).toBe(true)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(root.getAttribute('aria-hidden')).toBe('previous')
+    expect(root.inert).toBe(false)
+    resolveFetch({ ok: true, status: 200, headers: new Headers(), json: async () => ({}) } as Response)
+    await Promise.resolve()
+    expect(props.onRefresh).not.toHaveBeenCalled()
+    root.remove()
+  })
+
+  it('restores modal containment for active logout, unmount, and StrictMode effect cycles', () => {
+    const root = document.createElement('div')
+    root.id = 'root'
+    root.setAttribute('aria-hidden', 'previous')
+    root.inert = true
+    document.body.appendChild(root)
+    const props = baseProps()
+    const { rerender, unmount } = render(<StrictMode><HoldingMutations {...props} /></StrictMode>, { container: root })
+    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    rerender(<StrictMode><HoldingMutations {...props} active={false} /></StrictMode>)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(root.getAttribute('aria-hidden')).toBe('previous')
+    expect(root.inert).toBe(true)
+    rerender(<StrictMode><HoldingMutations {...props} /></StrictMode>)
+    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    unmount()
+    expect(root.getAttribute('aria-hidden')).toBe('previous')
+    expect(root.inert).toBe(true)
+    root.remove()
   })
 
   it('does not restore focus to a detached trigger after a successful single-lot archive', async () => {

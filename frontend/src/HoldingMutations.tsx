@@ -163,8 +163,9 @@ type Props = {
   onUnauthorized: () => void
 }
 
-type Attempt = { operation: HoldingMutationOperation; portfolioId: string; targetSignature: string; key: string; body: string; etag: string; lotId?: string }
+type Attempt = { operation: HoldingMutationOperation; portfolioId: string; scopeKey: string; targetSignature: string; key: string; body: string; etag: string; lotId?: string }
 type ArchiveBackground = { element: HTMLElement; inert: boolean; ariaHidden: string | null }
+type ArchiveContext = { portfolioId: string; scopeKey: string; lotId: string }
 
 export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, onRefresh, onUnauthorized }: Props) {
   const [formOpen, setFormOpen] = useState(false)
@@ -191,7 +192,11 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const archiveOriginRef = useRef<HTMLButtonElement | null>(null)
   const archiveRestoreRef = useRef<{ lotId: string; success: boolean } | null>(null)
   const archiveBackgroundRef = useRef<ArchiveBackground | null>(null)
+  const archiveContextRef = useRef<ArchiveContext | null>(null)
   const scopeRef = useRef(scopeKey)
+
+  const archiveContextMatches = Boolean(archiveLot && archiveContextRef.current && archiveContextRef.current.portfolioId === portfolioId && archiveContextRef.current.scopeKey === scopeKey && archiveContextRef.current.lotId === archiveLot.lot_id)
+  const archiveVisible = active && archiveContextMatches
 
   const abortWork = () => {
     generationRef.current += 1
@@ -208,9 +213,9 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   }, [active, portfolioId, scopeKey])
   useEffect(() => { etagRef.current = overviewETag; scopeRef.current = scopeKey }, [overviewETag, scopeKey])
   useEffect(() => { if (formOpen) formHeadingRef.current?.focus() }, [formOpen])
-  useLayoutEffect(() => { if (archiveLot) dialogHeadingRef.current?.focus() }, [archiveLot])
+  useLayoutEffect(() => { if (archiveVisible) dialogHeadingRef.current?.focus() }, [archiveVisible])
   useLayoutEffect(() => {
-    if (!archiveLot) return
+    if (!archiveVisible) return
     const element = document.getElementById('root') || contentRef.current?.parentElement
     if (!element || archiveBackgroundRef.current) return
     archiveBackgroundRef.current = { element, inert: element.inert === true, ariaHidden: element.getAttribute('aria-hidden') }
@@ -224,9 +229,9 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       else previous.element.setAttribute('aria-hidden', previous.ariaHidden)
       archiveBackgroundRef.current = null
     }
-  }, [archiveLot])
+  }, [archiveVisible])
   useEffect(() => {
-    if (!archiveLot) return
+    if (!archiveVisible || !archiveLot) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if (!busyRef.current) { event.preventDefault(); archiveRestoreRef.current = { lotId: archiveLot.lot_id, success: false }; setArchiveLot(null) }
@@ -237,13 +242,13 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       const focusable = Array.from(dialog?.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])
       if (!focusable.length) {
         event.preventDefault()
-        dialogHeadingRef.current?.focus()
+        ;(archiveErrorRef.current?.isConnected ? archiveErrorRef.current : dialogHeadingRef.current)?.focus()
         return
       }
       const first = focusable[0]
       const last = focusable[focusable.length - 1]
       const active = document.activeElement
-      if (active === dialogHeadingRef.current || !dialog?.contains(active)) {
+      if (active === dialogHeadingRef.current || active === archiveErrorRef.current || !dialog?.contains(active)) {
         event.preventDefault()
         ;(event.shiftKey ? last : first).focus()
       } else if (event.shiftKey && active === first) { event.preventDefault(); last.focus() }
@@ -255,7 +260,17 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     document.addEventListener('keydown', onKeyDown)
     document.addEventListener('focusin', onFocusIn)
     return () => { document.removeEventListener('keydown', onKeyDown); document.removeEventListener('focusin', onFocusIn) }
-  }, [archiveLot])
+  }, [archiveVisible])
+  useLayoutEffect(() => {
+    if (!archiveLot || archiveVisible) return
+    abortWork()
+    archiveContextRef.current = null
+    archiveOriginRef.current = null
+    archiveRestoreRef.current = null
+    setArchiveLot(null)
+    setError('')
+    setStatus('')
+  }, [archiveLot, archiveVisible])
   useLayoutEffect(() => {
     if (archiveLot || !archiveRestoreRef.current) return
     const restore = archiveRestoreRef.current
@@ -266,17 +281,12 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       : [archiveOriginRef.current, addButtonRef.current]
     const target = candidates.find((candidate): candidate is HTMLElement => Boolean(candidate?.isConnected))
     target?.focus()
+    archiveContextRef.current = null
+    archiveOriginRef.current = null
   }, [archiveLot, holdings, status])
   useLayoutEffect(() => {
-    if (archiveLot && error && !busy) archiveErrorRef.current?.focus()
-  }, [archiveLot, error, busy])
-  useEffect(() => {
-    if (!active && archiveLot) {
-      archiveRestoreRef.current = null
-      setArchiveLot(null)
-    }
-  }, [active, archiveLot])
-
+    if (archiveVisible && archiveLot && error && !busy) archiveErrorRef.current?.focus()
+  }, [archiveVisible, archiveLot, error, busy])
   const update = (field: keyof Draft, value: string) => {
     setDraft((current) => ({ ...current, [field]: value }))
     setErrors((current) => { const next = { ...current }; delete next[field]; delete next.form; return next })
@@ -322,17 +332,17 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       : { symbol: draft.symbol, currency: draft.instrumentCurrency, ...(draft.description ? { description: draft.description } : {}), ...(draft.assetType ? { asset_type: draft.assetType } : {}), ...(draft.exchange ? { exchange: draft.exchange } : {}) }
     const payload = { instrument, quantity: draft.quantity, unit_cost: draft.unitCost, cost_basis: draft.costBasis, currency: draft.currency, ...(draft.accountId ? { account_id: draft.accountId } : {}), ...(draft.acquisitionDate ? { acquisition_date: draft.acquisitionDate } : {}) }
     const body = JSON.stringify(payload)
-    const targetSignature = `${portfolioId}|create|${body}`
+    const targetSignature = `${portfolioId}|${scopeKey}|create|${body}`
     const existingAttempt = createAttempt.current?.targetSignature === targetSignature ? createAttempt.current : null
     const etag = etagRef.current
     if (!existingAttempt && (typeof etag !== 'string' || validatePortfolioETag(etag, portfolioId) === null)) { setError('No current overview revision is available. Reload the overview before adding a holding.'); return }
-    const attempt = existingAttempt || { operation: 'create' as const, portfolioId, targetSignature, key: randomIdempotencyKey(), body, etag: etag as string }
+    const attempt = existingAttempt || { operation: 'create' as const, portfolioId, scopeKey, targetSignature, key: randomIdempotencyKey(), body, etag: etag as string }
     createAttempt.current = attempt
     await submit('create', attempt, undefined, `/api/v1/portfolios/${encodeURIComponent(portfolioId)}/holdings`, 'POST', body)
   }
 
   const submit = async (operation: HoldingMutationOperation, attempt: Attempt, lotId: string | undefined, url: string, method: 'POST' | 'DELETE', body?: string) => {
-    if (busyRef.current || !active || validatePortfolioETag(attempt.etag, portfolioId) === null) return
+    if (busyRef.current || !active || attempt.portfolioId !== portfolioId || attempt.scopeKey !== scopeKey || validatePortfolioETag(attempt.etag, portfolioId) === null) return
     const generation = generationRef.current
     const controller = new AbortController()
     controllerRef.current = controller
@@ -375,13 +385,14 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   }
 
   const confirmArchive = async () => {
-    if (!archiveLot || busyRef.current) return
+    const archiveContext = archiveContextRef.current
+    if (!archiveLot || !archiveContext || !archiveVisible || busyRef.current || archiveContext.portfolioId !== portfolioId || archiveContext.scopeKey !== scopeKey || archiveContext.lotId !== archiveLot.lot_id) return
     const lotId = archiveLot.lot_id
     const etag = etagRef.current
-    const targetSignature = `${portfolioId}|remove|${lotId}`
+    const targetSignature = `${portfolioId}|${scopeKey}|remove|${lotId}`
     const existingAttempt = removeAttempt.current?.targetSignature === targetSignature ? removeAttempt.current : null
     if (!existingAttempt && (typeof etag !== 'string' || validatePortfolioETag(etag, portfolioId) === null)) return
-    const attempt = existingAttempt || { operation: 'remove' as const, portfolioId, targetSignature, key: randomIdempotencyKey(), body: '', etag: etag as string, lotId }
+    const attempt = existingAttempt || { operation: 'remove' as const, portfolioId, scopeKey, targetSignature, key: randomIdempotencyKey(), body: '', etag: etag as string, lotId }
     removeAttempt.current = attempt
     await submit('remove', attempt, lotId, `/api/v1/portfolios/${encodeURIComponent(portfolioId)}/holdings/${encodeURIComponent(lotId)}`, 'DELETE')
   }
@@ -402,9 +413,9 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
         {errors.form && <p className="field-error" role="alert" aria-live="assertive">{errors.form}</p>}
         <div className="holding-form-actions"><button type="submit" disabled={busy || (!mutationETagValid && !createAttempt.current)} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</button><button type="button" onClick={() => { setFormOpen(false); setErrors({}); setError(''); addButtonRef.current?.focus() }} disabled={busy}>Cancel</button></div>
       </form>}
-      <div className="archive-controls"><h3>Archive an active lot</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p>{holdings.map((holding) => <div className="archive-row" key={holding.lot_id}><span><strong>Archive lot {holding.lot_id}</strong><span className="subline">Logical removal; history preserved</span></span><button type="button" ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} data-archive-lot-id={holding.lot_id} onClick={(event) => { archiveOriginRef.current = event.currentTarget as HTMLButtonElement; (event.currentTarget as HTMLButtonElement).focus(); setError(''); setStatus(''); setArchiveLot(holding) }} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-label={`Archive lot ${holding.lot_id}`}>Archive lot</button></div>)}</div>
+      <div className="archive-controls"><h3>Archive an active lot</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p>{holdings.map((holding) => <div className="archive-row" key={holding.lot_id}><span><strong>Archive lot {holding.lot_id}</strong><span className="subline">Logical removal; history preserved</span></span><button type="button" ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} data-archive-lot-id={holding.lot_id} onClick={(event) => { archiveOriginRef.current = event.currentTarget as HTMLButtonElement; archiveContextRef.current = { portfolioId, scopeKey, lotId: holding.lot_id }; (event.currentTarget as HTMLButtonElement).focus(); setError(''); setStatus(''); setArchiveLot(holding) }} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-label={`Archive lot ${holding.lot_id}`}>Archive lot</button></div>)}</div>
     </section>
-    {archiveLot && createPortal(<div className="confirmation-backdrop"><section ref={dialogRef} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title" aria-describedby={error ? 'archive-dialog-description archive-dialog-error' : 'archive-dialog-description'}><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive lot {archiveLot.lot_id}?</h2><p id="archive-dialog-description">This will logically archive the exact lot, not sell, trade, or permanently delete it. Its financial history, reviews, thesis and audit records remain preserved.</p>{error && <p ref={archiveErrorRef} id="archive-dialog-error" className="notice error" role="alert" aria-live="assertive" tabIndex={-1}>{error}</p>}<div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving lot…' : `Confirm archive lot ${archiveLot.lot_id}`}</button><button type="button" onClick={() => { archiveRestoreRef.current = { lotId: archiveLot.lot_id, success: false }; setArchiveLot(null) }} disabled={busy}>Cancel archive</button></div></section></div>, document.body)}
+    {archiveVisible && createPortal(<div className="confirmation-backdrop"><section ref={dialogRef} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title" aria-describedby={error ? 'archive-dialog-description archive-dialog-error' : 'archive-dialog-description'}><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive lot {archiveLot?.lot_id}?</h2><p id="archive-dialog-description">This will logically archive the exact lot, not sell, trade, or permanently delete it. Its financial history, reviews, thesis and audit records remain preserved.</p>{error && <p ref={archiveErrorRef} id="archive-dialog-error" className="notice error" role="alert" aria-live="assertive" tabIndex={-1}>{error}</p>}<div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving lot…' : `Confirm archive lot ${archiveLot?.lot_id}`}</button><button type="button" onClick={() => { archiveRestoreRef.current = { lotId: archiveLot?.lot_id || '', success: false }; setArchiveLot(null) }} disabled={busy}>Cancel archive</button></div></section></div>, document.body)}
   </>
 }
 
