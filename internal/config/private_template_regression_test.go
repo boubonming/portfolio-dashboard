@@ -105,12 +105,12 @@ func TestAuthHashTemplateAndDocumentationStayLiteralAndSecretFree(t *testing.T) 
 			}
 		}
 		for key, want := range map[string]string{
-			"PORTFOLIO_AUTH_PASSWORD_HASH": "'REPLACE_WITH_BCRYPT_PASSWORD_HASH'",
-			"PORTFOLIO_SESSION_SECRET":     "REPLACE_WITH_INDEPENDENT_RANDOM_BASE64_SECRET",
+			"PORTFOLIO_AUTH_PASSWORD_HASH":    "'REPLACE_WITH_BCRYPT_PASSWORD_HASH'",
+			"PORTFOLIO_SESSION_SECRET":        "REPLACE_WITH_INDEPENDENT_RANDOM_BASE64_SECRET",
 			"PORTFOLIO_MACHINE_BEARER_SECRET": "",
-			"FINNHUB_API_KEY":                  "",
-			"ALPHA_VANTAGE_API_KEY":             "",
-			"OPEN_EXCHANGE_RATES_APP_ID":       "",
+			"FINNHUB_API_KEY":                 "",
+			"ALPHA_VANTAGE_API_KEY":           "",
+			"OPEN_EXCHANGE_RATES_APP_ID":      "",
 		} {
 			if got := values[key]; got != want {
 				t.Errorf("%s %s = %q, want the non-secret placeholder %q", name, key, got, want)
