@@ -1,6 +1,6 @@
 # Portfolio holding mutation contract
 
-Status: runtime holding create/archive handlers and the existing numbered migration are shipped. Frontend holding controls remain explicitly pending; this document does not add an import, brokerage, trading, or quote-refresh workflow.
+Status: runtime holding create/archive handlers, the existing numbered migration, and authenticated frontend holding controls are shipped. This document does not add an import, brokerage, trading, or quote-refresh workflow.
 
 This document defines the release contract implemented by the runtime. The SQL artifact and harness remain executable scratch-database feasibility evidence after baseline SQL migrations 001-008; runtime verification is provided by the Store and HTTP acceptance tests. The runtime initializes one empty canonical portfolio, after which an authenticated browser session or an explicitly authorized Hermes machine may create a lot or logically archive a lot.
 
@@ -65,7 +65,7 @@ Legacy `lots.created_at` is historical display/audit data and is preserved byte-
 
 A successful create returns 201; a successful removal returns 200. A replay returns the exact stored receipt and original status/headers for the same actor category, actor ID, portfolio, operation, idempotency key, and request fingerprint. The physical namespace is exactly `(actor_category, actor_id, portfolio_id, operation, idempotency_key)`; there is no separate route dimension. `remove` is the archive operation, so the same key is independent in create and archive namespaces. Same-operation replay has no side effects; same-operation reuse with a different canonical fingerprint is `409 idempotency_conflict` with zero side effects. A receipt contains the operation, `applied` or `replayed`, safe holding record, new integer `portfolio_revision`, `snapshot_state`, current snapshot ID if any, actor witness, audit event ID, Activity event ID, and idempotency key. It contains no credential or raw request material.
 
-`GET overview` supplies the witness as an opaque strong ETag, for example `"portfolio-demo-7"`. A mutation must send that exact value in `If-Match`. The operation compares and increments the portfolio revision in the same SQLite transaction. Any mismatch is 409 `stale_revision` and has no side effects.
+`GET overview` supplies the witness as the exact strong ETag `"<portfolioId>-<canonical nonnegative revision>"`, for example `"portfolio-demo-7"`; weak tags, leading-zero revisions, wrong-portfolio tags, and duplicate/missing header values are invalid. A mutation must send that exact value in `If-Match`. The operation compares and increments the portfolio revision in the same SQLite transaction. Any mismatch is 409 `stale_revision` and has no side effects.
 
 ## 5. Snapshot semantics
 
@@ -171,11 +171,11 @@ Migration 010 is loaded through `Store.Migrate`; runtime tests cover fresh initi
 
 ## 10. Implementation/removal ledger (named work items and proof obligations)
 
-The following are explicit downstream implementation/removal items. They are not part of the shipped mutation handlers, and every item must retain the no-document-import invariant. Baseline paths named below are known conflicting debt, not acceptable architecture or an alternative implementation.
+The following historical baseline/removal items document remaining cleanup around adjacent consumers. They are not an alternative to the shipped mutation handlers, and every item must retain the no-document-import invariant. Baseline paths named below are known conflicting debt, not acceptable architecture or an alternative implementation.
 
 1. `internal/store/readmodel.go`: select only `lots.lifecycle='active'`, remove `source_row` from the read-model query/scan/domain mapping, and add a populated/archived overview regression proving removed lots are absent without changing historical rows.
 2. `internal/httpserver/export.go`: export active lots only, remove the `source_row` column and renderer, and add CSV header/row regressions for duplicate instruments and archived lots.
-3. `frontend/src/App.tsx` plus frontend types/UI: remove the `source_row` contract and render only active holdings; add component/API fixture regressions for an archived lot and an empty authenticated overview.
+3. `frontend/src/App.tsx` plus frontend types/UI: remove the `source_row` contract and render only active holdings; the authenticated holding create/archive controls are shipped in `frontend/src/HoldingMutations.tsx` with exact-value, receipt, retry, archive-confirmation, and refresh regressions. Add any remaining archived-lot and empty-overview fixture coverage when the baseline read-model cleanup lands.
 4. Valuation, snapshot, and domain identity: remove source/import hashes and source-row identity; derive valuation input identity only from canonical portfolio, holding, instrument, account, and holdings-revision state; add snapshot identity and stale-after-mutation tests.
 5. Config/auth/store persistence: add independent `holdings:write`, default false, persisted effective-grant intersection, redacted receipt/log handling, and machine-principal insert/update/upsert grammar checks; prove `reviews:write` never implies holding authority with config/auth/store tests.
 6. `compose.yaml`, root `.env.example`, `deploy/private.env.example`, and private Compose/deployment docs: wire the new grant explicitly, keep its default false, redact values, and assert template byte-identity wherever templates are intended to match; add deployment/config tests and a no-secret grep check.
@@ -186,4 +186,4 @@ Acceptance evidence for this ledger is named rather than implied: `go test ./...
 
 ## 11. Explicit non-goals and preserved behavior
 
-This slice implements holding create/archive handlers, persistence runtime changes, migration loading, authentication, idempotency, and revision ETags. It does not add frontend controls, edit/update, sell transactions, brokerage connectivity, trade execution, price refresh, account creation, or the baseline-surface removals listed in the ledger. Frontend controls remain pending and the API does not imply brokerage/trading/quote-refresh authority.
+This slice implements holding create/archive handlers, persistence runtime changes, migration loading, authentication, idempotency, revision ETags, and the authenticated browser controls in `frontend/src/HoldingMutations.tsx`. It does not add edit/update, sell transactions, brokerage connectivity, trade execution, price refresh, account creation, or the baseline-surface removals listed in the ledger; the API and UI do not imply brokerage/trading/quote-refresh authority.
