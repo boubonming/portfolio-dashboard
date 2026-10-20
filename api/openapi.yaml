@@ -6,9 +6,9 @@ info:
   description: >-
     Shipped runtime contract for authenticated portfolio-scoped holdings,
     immutable valuation snapshots, editable investment theses, and the Phase D
-    scoped advisory review contract. Holding create/archive handlers, runtime
-    migration loading, and authenticated startup initialization are shipped;
-    frontend holding controls remain explicitly pending. The
+    scoped advisory review contract. Holding create/archive handlers, their
+    authenticated frontend controls, runtime migration loading, and startup
+    initialization are shipped. The
     Runtime behavior has no portfolio-document import, bootstrap import, or
     import preview/apply/status surface and starts with an empty
     portfolio-default. The baseline runtime's importer, source identity,
@@ -73,7 +73,7 @@ paths:
         '200':
           description: Portfolio overview. A no_snapshot or incomplete state is explicit and does not include a fabricated total.
           headers:
-            ETag: { description: Exact portfolio holdings revision used as If-Match by holding mutations, schema: { type: string, minLength: 3, maxLength: 256 } }
+            ETag: { description: Exact portfolio holdings revision used as If-Match by holding mutations, schema: { type: string, minLength: 5, maxLength: 140, pattern: '^"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}-[0-9]+"$' } }
             Cache-Control: { $ref: '#/components/headers/NoStore' }
             Vary: { $ref: '#/components/headers/PrivateVary' }
             X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
@@ -142,7 +142,7 @@ paths:
       parameters:
         - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
         - { name: Idempotency-Key, in: header, required: true, schema: { $ref: '#/components/schemas/IdempotencyKey' } }
-        - { name: If-Match, in: header, required: true, description: Exact ETag returned by the portfolio overview read. Browser callers additionally send Origin and X-CSRF-Token; machine callers must not send a CSRF value., schema: { type: string, minLength: 3, maxLength: 256 } }
+        - { name: If-Match, in: header, required: true, description: Exact ETag returned by the portfolio overview read. Browser callers additionally send Origin and X-CSRF-Token; machine callers must not send a CSRF value., schema: { type: string, minLength: 5, maxLength: 140, pattern: '^"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}-[0-9]+"$' } }
         - { name: Origin, in: header, required: false, description: Required for browser callers and must exactly equal the configured application origin; ignored only for a valid machine bearer., schema: { type: string, format: uri, maxLength: 512 } }
         - { name: X-CSRF-Token, in: header, required: false, description: Required for browser callers and bound to the authenticated session; forbidden for machine callers., schema: { type: string, minLength: 32, maxLength: 512 } }
       requestBody:
@@ -166,7 +166,7 @@ paths:
             Vary: { $ref: '#/components/headers/PrivateVary' }
             X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
             Location: { description: Canonical holding URL, schema: { type: string, maxLength: 512 } }
-            ETag: { description: New exact portfolio revision witness, schema: { type: string, minLength: 3, maxLength: 256 } }
+            ETag: { description: New exact portfolio revision witness, schema: { type: string, minLength: 5, maxLength: 140, pattern: '^"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}-[0-9]+"$' } }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HoldingMutationReceipt' }
@@ -210,7 +210,7 @@ paths:
         - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
         - { name: holdingId, in: path, required: true, schema: { $ref: '#/components/schemas/HoldingId' } }
         - { name: Idempotency-Key, in: header, required: true, schema: { $ref: '#/components/schemas/IdempotencyKey' } }
-        - { name: If-Match, in: header, required: true, description: Exact ETag returned by the portfolio overview read. Browser callers additionally send Origin and X-CSRF-Token; machine callers must not send a CSRF value., schema: { type: string, minLength: 3, maxLength: 256 } }
+        - { name: If-Match, in: header, required: true, description: Exact ETag returned by the portfolio overview read. Browser callers additionally send Origin and X-CSRF-Token; machine callers must not send a CSRF value., schema: { type: string, minLength: 5, maxLength: 140, pattern: '^"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}-[0-9]+"$' } }
         - { name: Origin, in: header, required: false, description: Required for browser callers and must exactly equal the configured application origin; ignored only for a valid machine bearer., schema: { type: string, format: uri, maxLength: 512 } }
         - { name: X-CSRF-Token, in: header, required: false, description: Required for browser callers and bound to the authenticated session; forbidden for machine callers., schema: { type: string, minLength: 32, maxLength: 512 } }
       responses:
@@ -220,7 +220,7 @@ paths:
             Cache-Control: { $ref: '#/components/headers/NoStore' }
             Vary: { $ref: '#/components/headers/PrivateVary' }
             X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
-            ETag: { description: New exact portfolio revision witness, schema: { type: string, minLength: 3, maxLength: 256 } }
+            ETag: { description: New exact portfolio revision witness, schema: { type: string, minLength: 5, maxLength: 140, pattern: '^"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}-[0-9]+"$' } }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HoldingMutationReceipt' }

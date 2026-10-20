@@ -3,7 +3,7 @@ import type { FormEvent, RefObject } from 'react'
 import { apiFetch, APIError, jsonResponse } from './api'
 import ThesisEditor from './ThesisEditor'
 import Reviews, { type FeedbackAttemptStore } from './Reviews'
-import HoldingMutations from './HoldingMutations'
+import HoldingMutations, { validatePortfolioETag } from './HoldingMutations'
 
 export type Freshness = {
   status: 'fresh' | 'stale' | 'missing' | 'future' | 'invalid' | string
@@ -399,6 +399,7 @@ export default function App() {
   const exportGeneration = useRef(0)
   const feedbackAttemptsRef = useRef<FeedbackAttemptStore>(new Map())
   const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mutationSessionGeneration = authGeneration.current
 
   const clearPrivateState = useCallback(() => {
     authGeneration.current += 1
@@ -452,7 +453,7 @@ export default function App() {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== loadGeneration.current) return
         if (!currentPortfolioID(overview)) throw new Error('Invalid portfolio overview')
         setData(overview)
-        setOverviewETag(etag)
+        setOverviewETag(validatePortfolioETag(etag, overview.portfolio.id) === null ? undefined : etag)
         setState('ready')
         return etag
       })
@@ -464,6 +465,11 @@ export default function App() {
         if (rethrow) throw reason
       })
   }, [authState, clearPrivateState, currency])
+
+  const refreshHoldingOverview = useCallback((): Promise<string | void> => {
+    if (authState !== 'authenticated' || authGeneration.current !== mutationSessionGeneration) return Promise.resolve(undefined)
+    return load(true).then((etag) => authGeneration.current === mutationSessionGeneration && authState === 'authenticated' ? etag : undefined)
+  }, [authState, load, mutationSessionGeneration])
 
   const downloadCSV = useCallback(() => {
     if (authState !== 'authenticated' || exportState === 'loading') return
@@ -808,15 +814,15 @@ export default function App() {
             </dl>
           </section>
 
-          {data.snapshot.state === 'no_snapshot' && <section className="notice"><h2>No immutable snapshot yet</h2><p>Holdings are shown from the approved import, but prices and reporting values are withheld until a snapshot is created.</p></section>}
+          {data.snapshot.state === 'no_snapshot' && <section className="notice"><h2>No immutable snapshot yet</h2><p>Canonical holdings are shown, but prices and reporting values are withheld until a snapshot is created.</p></section>}
           {data.snapshot.state === 'incomplete' && <section className="notice warning"><h2>Valuation is incomplete</h2><p>Reporting total is intentionally withheld. Missing, stale or invalid market dependencies must be resolved before this view can be complete.</p></section>}
 
           <AllocationSection data={data} />
 
-          <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active={view === 'overview'} scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={() => load(true)} onUnauthorized={handleThesisUnauthorized} />
+          <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active={view === 'overview'} scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized} />
 
           <section className="table-card" aria-labelledby="holdings-title">
-            <div className="section-heading"><div><span className="eyebrow">Source-traceable lots</span><h2 id="holdings-title">Holdings</h2></div><span className="muted">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</span></div>
+            <div className="section-heading"><div><span className="eyebrow">Canonical active lots</span><h2 id="holdings-title">Holdings</h2></div><span className="muted">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</span></div>
             <div className="table-scroll">
               <table>
                 <caption className="visually-hidden">Holdings</caption>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { apiFetch, APIError } from './api'
 import type { Holding } from './App'
@@ -34,22 +34,29 @@ type ReceiptExpectation = {
   idempotencyKey: string
   body: string
   lotId?: string
+  responseETag?: string
 }
 
 const emptyDraft = (): Draft => ({ mode: 'inline', instrumentId: '', symbol: '', instrumentCurrency: '', description: '', assetType: '', exchange: '', quantity: '', unitCost: '', costBasis: '', currency: '', accountId: '', acquisitionDate: '' })
 const receiptKeys = ['operation', 'result', 'holding', 'portfolio_revision', 'snapshot_state', 'current_snapshot_id', 'actor', 'audit_event_id', 'activity_event_id', 'idempotency_key']
-const holdingKeys = ['portfolio_id', 'holding_id', 'instrument_id', 'symbol', 'description', 'quantity', 'unit_cost', 'cost_basis', 'currency', 'account_id', 'acquisition_date', 'lifecycle', 'created_at', 'removed_at']
+const holdingKeys = ['portfolio_id', 'holding_id', 'instrument_id', 'symbol', 'quantity', 'unit_cost', 'cost_basis', 'currency', 'account_id', 'acquisition_date', 'lifecycle', 'created_at', 'removed_at']
 const actorKeys = ['category', 'id', 'permissions']
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-const keysAre = (value: Record<string, unknown>, allowed: string[]) => Object.keys(value).every((key) => allowed.includes(key))
+const exactKeys = (value: Record<string, unknown>, required: string[], optional: string[] = []) => Object.keys(value).length >= required.length && required.every((key) => Object.prototype.hasOwnProperty.call(value, key)) && Object.keys(value).every((key) => required.includes(key) || optional.includes(key))
 const boundedIdentifier = (value: unknown) => typeof value === 'string' && identifierPattern.test(value)
 const boundedText = (value: unknown, max: number) => typeof value === 'string' && value.length >= 1 && value.length <= max
 const nullableText = (value: unknown, max: number) => value === null || (typeof value === 'string' && value.length >= 1 && value.length <= max)
+const nullableIdentifier = (value: unknown) => value === null || boundedIdentifier(value)
+const optionalText = (value: unknown, max: number) => typeof value === 'string' && value.length >= 1 && value.length <= max
 const canonicalDate = (value: unknown) => {
   if (typeof value !== 'string' || !datePattern.test(value)) return false
   try { return new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value } catch { return false }
 }
-const canonicalTimestamp = (value: unknown) => typeof value === 'string' && timestampPattern.test(value) && isFinite(Date.parse(value))
+const canonicalTimestamp = (value: unknown) => {
+  if (typeof value !== 'string' || !timestampPattern.test(value) || !isFinite(Date.parse(value))) return false
+  const year = Number(value.slice(0, 4)); const month = Number(value.slice(5, 7)); const day = Number(value.slice(8, 10))
+  return day <= new Date(Date.UTC(year, month, 0)).getUTCDate()
+}
 
 function decimalParts(value: string) {
   const [whole, fraction = ''] = value.split('.')
@@ -74,37 +81,52 @@ function randomIdempotencyKey() {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-function unexpected(value: unknown, allowed: string[]) {
-  return !isRecord(value) || !keysAre(value, allowed)
+export function validatePortfolioETag(value: unknown, portfolioId: string): number | null {
+  if (typeof value !== 'string' || !portfolioId || !identifierPattern.test(portfolioId)) return null
+  const escapedPortfolio = portfolioId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = value.match(new RegExp(`^"${escapedPortfolio}-([0-9]+)"$`))
+  if (!match || (match[1].length > 1 && match[1].startsWith('0'))) return null
+  const revision = Number(match[1])
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null
 }
 
 export function validateHoldingMutationReceipt(value: unknown, expected: ReceiptExpectation) {
-  if (unexpected(value, receiptKeys)) throw new Error('The server returned an invalid holding receipt.')
+  if (!isRecord(value) || !exactKeys(value, receiptKeys)) throw new Error('The server returned an invalid holding receipt.')
   const receipt = value as Record<string, unknown>
   if (receipt.operation !== expected.operation || (receipt.result !== 'applied' && receipt.result !== 'replayed') || receipt.idempotency_key !== expected.idempotencyKey) throw new Error('The server returned an invalid holding receipt.')
   if (typeof receipt.portfolio_revision !== 'number' || !isFinite(receipt.portfolio_revision) || receipt.portfolio_revision % 1 !== 0 || receipt.portfolio_revision < 1 || receipt.portfolio_revision > 9007199254740991 || !boundedIdentifier(receipt.audit_event_id) || !boundedIdentifier(receipt.activity_event_id)) throw new Error('The server returned an invalid holding receipt.')
   if (receipt.snapshot_state !== 'stale' && receipt.snapshot_state !== 'no_snapshot') throw new Error('The server returned an invalid holding receipt.')
   if (receipt.snapshot_state === 'no_snapshot' ? receipt.current_snapshot_id !== null : !boundedIdentifier(receipt.current_snapshot_id)) throw new Error('The server returned an invalid holding receipt.')
 
-  if (unexpected(receipt.actor, actorKeys)) throw new Error('The server returned an invalid holding receipt.')
+  if (!isRecord(receipt.actor) || !exactKeys(receipt.actor, actorKeys)) throw new Error('The server returned an invalid holding receipt.')
   const actor = receipt.actor as Record<string, unknown>
   if (actor.category !== 'browser_user' || actor.id !== 'local-owner' || !Array.isArray(actor.permissions) || actor.permissions.length !== 1 || actor.permissions[0] !== 'portfolio:read') throw new Error('The server returned an invalid holding receipt.')
 
-  if (unexpected(receipt.holding, holdingKeys)) throw new Error('The server returned an invalid holding receipt.')
+  if (!isRecord(receipt.holding) || !exactKeys(receipt.holding, holdingKeys, ['description'])) throw new Error('The server returned an invalid holding receipt.')
   const holding = receipt.holding as Record<string, unknown>
-  if (holding.portfolio_id !== expected.portfolioId || !boundedIdentifier(holding.holding_id) || !boundedIdentifier(holding.instrument_id) || !boundedText(holding.symbol, 64) || !boundedText(holding.quantity, 40) || !quantityPattern.test(holding.quantity as string) || !boundedText(holding.unit_cost, 40) || !moneyPattern.test(holding.unit_cost as string) || !boundedText(holding.cost_basis, 40) || !moneyPattern.test(holding.cost_basis as string) || typeof holding.currency !== 'string' || !currencyPattern.test(holding.currency) || (holding.description !== undefined && !nullableText(holding.description, 256)) || !nullableText(holding.account_id, 128) || !nullableText(holding.acquisition_date, 10) || (holding.acquisition_date !== null && !canonicalDate(holding.acquisition_date)) || (holding.removed_at !== null && !canonicalTimestamp(holding.removed_at)) || !canonicalTimestamp(holding.created_at)) throw new Error('The server returned an invalid holding receipt.')
+  if (holding.portfolio_id !== expected.portfolioId || !boundedIdentifier(holding.holding_id) || !boundedIdentifier(holding.instrument_id) || !boundedText(holding.symbol, 64) || !symbolPattern.test(holding.symbol as string) || !boundedText(holding.quantity, 40) || !quantityPattern.test(holding.quantity as string) || !boundedText(holding.unit_cost, 40) || !moneyPattern.test(holding.unit_cost as string) || !boundedText(holding.cost_basis, 40) || !moneyPattern.test(holding.cost_basis as string) || typeof holding.currency !== 'string' || !currencyPattern.test(holding.currency) || (holding.description !== undefined && !optionalText(holding.description, 256)) || !nullableIdentifier(holding.account_id) || !nullableText(holding.acquisition_date, 10) || (holding.acquisition_date !== null && !canonicalDate(holding.acquisition_date)) || (holding.removed_at !== null && !canonicalTimestamp(holding.removed_at)) || !canonicalTimestamp(holding.created_at)) throw new Error('The server returned an invalid holding receipt.')
   if (expected.operation === 'create' && (holding.lifecycle !== 'active' || holding.removed_at !== null)) throw new Error('The server returned an invalid holding receipt.')
   if (expected.operation === 'remove' && (holding.holding_id !== expected.lotId || holding.lifecycle !== 'removed' || holding.removed_at === null)) throw new Error('The server returned an invalid holding receipt.')
 
+  if (expected.responseETag !== undefined && validatePortfolioETag(expected.responseETag, expected.portfolioId) !== receipt.portfolio_revision) throw new Error('The server returned an invalid holding receipt.')
   let body: Record<string, unknown> | null = null
   try { body = JSON.parse(expected.body) as Record<string, unknown> } catch { body = null }
-  if (expected.operation === 'create' && body && isRecord(body)) {
+  if (expected.operation === 'create') {
+    if (!body || !isRecord(body) || !exactKeys(body, ['instrument', 'quantity', 'unit_cost', 'cost_basis', 'currency'], ['account_id', 'acquisition_date'])) throw new Error('The server returned an invalid holding receipt.')
+    if (typeof body.quantity !== 'string' || body.quantity.length > 40 || !quantityPattern.test(body.quantity) || typeof body.unit_cost !== 'string' || body.unit_cost.length > 40 || !moneyPattern.test(body.unit_cost) || typeof body.cost_basis !== 'string' || body.cost_basis.length > 40 || !moneyPattern.test(body.cost_basis) || !exactProductMatches(body.quantity, body.unit_cost, body.cost_basis) || typeof body.currency !== 'string' || !currencyPattern.test(body.currency) || (Object.prototype.hasOwnProperty.call(body, 'account_id') && !nullableIdentifier(body.account_id)) || (Object.prototype.hasOwnProperty.call(body, 'acquisition_date') && body.acquisition_date !== null && !canonicalDate(body.acquisition_date))) throw new Error('The server returned an invalid holding receipt.')
     if (holding.quantity !== body.quantity || holding.unit_cost !== body.unit_cost || holding.cost_basis !== body.cost_basis || holding.currency !== body.currency) throw new Error('The server returned an invalid holding receipt.')
-    if (isRecord(body.instrument)) {
-      if ('instrument_id' in body.instrument && holding.instrument_id !== body.instrument.instrument_id) throw new Error('The server returned an invalid holding receipt.')
-      if ('symbol' in body.instrument && holding.symbol !== body.instrument.symbol) throw new Error('The server returned an invalid holding receipt.')
-      if ('currency' in body.instrument && body.instrument.currency !== holding.currency) throw new Error('The server returned an invalid holding receipt.')
+    const bodyAccount = Object.prototype.hasOwnProperty.call(body, 'account_id') ? body.account_id : null
+    const bodyDate = Object.prototype.hasOwnProperty.call(body, 'acquisition_date') ? body.acquisition_date : null
+    if (holding.account_id !== bodyAccount || holding.acquisition_date !== bodyDate) throw new Error('The server returned an invalid holding receipt.')
+    if (!isRecord(body.instrument)) throw new Error('The server returned an invalid holding receipt.')
+    if ('instrument_id' in body.instrument) {
+      if (!exactKeys(body.instrument, ['instrument_id']) || holding.instrument_id !== body.instrument.instrument_id) throw new Error('The server returned an invalid holding receipt.')
+    } else {
+      if (!exactKeys(body.instrument, ['symbol', 'currency'], ['description', 'asset_type', 'exchange']) || holding.symbol !== body.instrument.symbol || holding.currency !== body.instrument.currency) throw new Error('The server returned an invalid holding receipt.')
+      if ('description' in body.instrument ? holding.description !== body.instrument.description : holding.description !== undefined) throw new Error('The server returned an invalid holding receipt.')
     }
+  } else if (expected.body !== '' || !expected.lotId) {
+    throw new Error('The server returned an invalid holding receipt.')
   }
   return receipt
 }
@@ -140,7 +162,7 @@ type Props = {
   onUnauthorized: () => void
 }
 
-type Attempt = { signature: string; key: string; body: string }
+type Attempt = { operation: HoldingMutationOperation; portfolioId: string; targetSignature: string; key: string; body: string; etag: string; lotId?: string }
 
 export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, onRefresh, onUnauthorized }: Props) {
   const [formOpen, setFormOpen] = useState(false)
@@ -158,7 +180,14 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const generationRef = useRef(0)
   const formHeadingRef = useRef<HTMLHeadingElement>(null)
   const dialogHeadingRef = useRef<HTMLHeadingElement>(null)
+  const dialogRef = useRef<HTMLElement>(null)
   const addButtonRef = useRef<HTMLButtonElement>(null)
+  const statusRef = useRef<HTMLParagraphElement>(null)
+  const contentRef = useRef<HTMLElement>(null)
+  const archiveTriggerRefs = useRef(new Map<string, HTMLButtonElement>())
+  const archiveOriginRef = useRef<string | null>(null)
+  const archiveRestoreRef = useRef<{ lotId: string; success: boolean } | null>(null)
+  const scopeRef = useRef(scopeKey)
 
   const abortWork = () => {
     generationRef.current += 1
@@ -166,14 +195,48 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     controllerRef.current = null
     busyRef.current = false
     setBusy(false)
+    createAttempt.current = null
+    removeAttempt.current = null
   }
   useEffect(() => {
     if (!active) abortWork()
     return () => abortWork()
   }, [active, portfolioId, scopeKey])
-  useEffect(() => { etagRef.current = overviewETag }, [overviewETag, scopeKey])
+  useEffect(() => { etagRef.current = overviewETag; scopeRef.current = scopeKey }, [overviewETag, scopeKey])
   useEffect(() => { if (formOpen) formHeadingRef.current?.focus() }, [formOpen])
-  useEffect(() => { if (archiveLot) dialogHeadingRef.current?.focus() }, [archiveLot])
+  useLayoutEffect(() => { if (archiveLot) dialogHeadingRef.current?.focus() }, [archiveLot])
+  useEffect(() => {
+    if (!archiveLot) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (!busyRef.current) { event.preventDefault(); if (contentRef.current) contentRef.current.inert = false; setArchiveLot(null); archiveTriggerRefs.current.get(archiveOriginRef.current || '')?.focus() }
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [archiveLot])
+  useEffect(() => {
+    if (archiveLot || !archiveRestoreRef.current) return
+    const restore = archiveRestoreRef.current
+    archiveRestoreRef.current = null
+    const exact = archiveTriggerRefs.current.get(restore.lotId)
+    const fallback = holdings.find((holding) => holding.lot_id !== restore.lotId)
+    window.setTimeout(() => (exact || (fallback && archiveTriggerRefs.current.get(fallback.lot_id)) || statusRef.current)?.focus(), 0)
+  }, [archiveLot, holdings, status])
+  useEffect(() => {
+    if (!contentRef.current) return
+    contentRef.current.inert = Boolean(archiveLot)
+    if (archiveLot) contentRef.current.setAttribute('aria-hidden', 'true')
+    else contentRef.current.removeAttribute('aria-hidden')
+  }, [archiveLot])
 
   const update = (field: keyof Draft, value: string) => {
     setDraft((current) => ({ ...current, [field]: value }))
@@ -193,9 +256,9 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       if (draft.assetType && !/^[A-Za-z0-9._-]+$/.test(draft.assetType)) next.assetType = 'Use letters, numbers, dot, underscore or hyphen.'
       if (draft.exchange && !/^[A-Za-z0-9._-]+$/.test(draft.exchange)) next.exchange = 'Use letters, numbers, dot, underscore or hyphen.'
     }
-    if (!quantityPattern.test(draft.quantity)) next.quantity = 'Use a positive canonical decimal.'
-    if (!moneyPattern.test(draft.unitCost)) next.unitCost = 'Use a non-negative canonical decimal.'
-    if (!moneyPattern.test(draft.costBasis)) next.costBasis = 'Use a non-negative canonical decimal.'
+    if (draft.quantity.length > 40 || !quantityPattern.test(draft.quantity)) next.quantity = 'Use a positive canonical decimal of at most 40 characters.'
+    if (draft.unitCost.length > 40 || !moneyPattern.test(draft.unitCost)) next.unitCost = 'Use a non-negative canonical decimal of at most 40 characters.'
+    if (draft.costBasis.length > 40 || !moneyPattern.test(draft.costBasis)) next.costBasis = 'Use a non-negative canonical decimal of at most 40 characters.'
     if (quantityPattern.test(draft.quantity) && moneyPattern.test(draft.unitCost) && moneyPattern.test(draft.costBasis) && !exactProductMatches(draft.quantity, draft.unitCost, draft.costBasis)) next.costBasis = 'Quantity × unit cost must equal cost basis exactly.'
     if (!currencyPattern.test(draft.currency)) next.currency = 'Use three uppercase currency letters.'
     if (draft.mode === 'inline' && currencyPattern.test(draft.instrumentCurrency) && draft.currency !== draft.instrumentCurrency) next.currency = 'Holding currency must match instrument currency.'
@@ -208,51 +271,59 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     event.preventDefault()
     if (busyRef.current || !active) return
     const nextErrors = validateDraft()
+    if (Object.keys(nextErrors).length) {
+      nextErrors.form = 'Fix the highlighted fields before creating the holding.'
+      document.getElementById(Object.keys(nextErrors).find((key) => key !== 'form') || 'holding-form-title')?.focus()
+    }
     setErrors(nextErrors)
     setError('')
     if (Object.keys(nextErrors).length) return
-    const etag = etagRef.current
-    if (!etag) { setError('No current overview revision is available. Reload the overview before adding a holding.'); return }
     const instrument = draft.mode === 'existing'
       ? { instrument_id: draft.instrumentId }
       : { symbol: draft.symbol, currency: draft.instrumentCurrency, ...(draft.description ? { description: draft.description } : {}), ...(draft.assetType ? { asset_type: draft.assetType } : {}), ...(draft.exchange ? { exchange: draft.exchange } : {}) }
     const payload = { instrument, quantity: draft.quantity, unit_cost: draft.unitCost, cost_basis: draft.costBasis, currency: draft.currency, ...(draft.accountId ? { account_id: draft.accountId } : {}), ...(draft.acquisitionDate ? { acquisition_date: draft.acquisitionDate } : {}) }
     const body = JSON.stringify(payload)
-    const signature = `${portfolioId}|${etag}|${body}`
-    const attempt = createAttempt.current?.signature === signature ? createAttempt.current : { signature, key: randomIdempotencyKey(), body }
+    const targetSignature = `${portfolioId}|create|${body}`
+    const existingAttempt = createAttempt.current?.targetSignature === targetSignature ? createAttempt.current : null
+    const etag = etagRef.current
+    if (!existingAttempt && (typeof etag !== 'string' || validatePortfolioETag(etag, portfolioId) === null)) { setError('No current overview revision is available. Reload the overview before adding a holding.'); return }
+    const attempt = existingAttempt || { operation: 'create' as const, portfolioId, targetSignature, key: randomIdempotencyKey(), body, etag: etag as string }
     createAttempt.current = attempt
     await submit('create', attempt, undefined, `/api/v1/portfolios/${encodeURIComponent(portfolioId)}/holdings`, 'POST', body)
   }
 
   const submit = async (operation: HoldingMutationOperation, attempt: Attempt, lotId: string | undefined, url: string, method: 'POST' | 'DELETE', body?: string) => {
-    const etag = etagRef.current
-    if (busyRef.current || !active || !etag) return
+    if (busyRef.current || !active || validatePortfolioETag(attempt.etag, portfolioId) === null) return
     const generation = generationRef.current
     const controller = new AbortController()
     controllerRef.current = controller
     busyRef.current = true; setBusy(true); setError(''); setStatus(operation === 'create' ? 'Creating holding…' : 'Archiving holding…')
+    const current = () => generation === generationRef.current && !controller.signal.aborted && active && scopeRef.current === scopeKey
     try {
-      const response = await apiFetch(url, { method, body, signal: controller.signal, csrfToken, headers: { ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}), 'If-Match': etag, 'Idempotency-Key': attempt.key } })
-      if (generation !== generationRef.current || controller.signal.aborted) return
+      const response = await apiFetch(url, { method, body: attempt.body, signal: controller.signal, csrfToken, headers: { ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}), 'If-Match': attempt.etag, 'Idempotency-Key': attempt.key } })
+      if (!current()) return
       if (!response.ok) {
         const code = await responseErrorCode(response)
-        if (response.status !== 401) {
-          if (operation === 'create') createAttempt.current = null
-          else removeAttempt.current = null
+        if (!current()) return
+        if (operation === 'create') createAttempt.current = null
+        else removeAttempt.current = null
+        if (response.status === 409 && code === 'stale_revision') {
+          await onRefresh()
+          if (!current()) return
         }
-        if (response.status === 409 && code === 'stale_revision') await onRefresh()
         throw new APIError(response.status, errorMessage(response.status, code))
       }
       const receipt = await response.json()
-      validateHoldingMutationReceipt(receipt, { operation, portfolioId, idempotencyKey: attempt.key, body: attempt.body, lotId })
+      if (!current()) return
+      validateHoldingMutationReceipt(receipt, { operation, portfolioId, idempotencyKey: attempt.key, body: attempt.body, lotId, responseETag: response.headers.get('ETag') || '' })
       const result = (receipt as { result: 'applied' | 'replayed' }).result
       const refreshedETag = await onRefresh()
-      if (generation !== generationRef.current || controller.signal.aborted) return
-      if (typeof refreshedETag === 'string') etagRef.current = refreshedETag
-      if (operation === 'create') { createAttempt.current = null; setDraft(emptyDraft()); setFormOpen(false) } else { removeAttempt.current = null; setArchiveLot(null) }
+      if (!current() || validatePortfolioETag(refreshedETag, portfolioId) !== (receipt as { portfolio_revision: number }).portfolio_revision) return
+      etagRef.current = refreshedETag as string
+      if (operation === 'create') { createAttempt.current = null; setDraft(emptyDraft()); setFormOpen(false); window.setTimeout(() => addButtonRef.current?.focus(), 0) } else { removeAttempt.current = null; archiveRestoreRef.current = { lotId: lotId || '', success: true }; setArchiveLot(null) }
       setStatus(`${operation === 'create' ? 'Holding creation' : 'Holding archive'} ${result === 'replayed' ? 'replayed' : 'applied'} successfully. Overview refreshed; snapshot state is ${receipt.snapshot_state === 'no_snapshot' ? 'no snapshot' : 'stale'}.`)
     } catch (reason) {
-      if (controller.signal.aborted || generation !== generationRef.current) return
+      if (!current()) return
       if (reason instanceof APIError && reason.status === 401) {
         createAttempt.current = null; removeAttempt.current = null; abortWork(); setDraft(emptyDraft()); setFormOpen(false); setArchiveLot(null); setErrors({}); setStatus(''); setError(''); onUnauthorized(); return
       }
@@ -264,38 +335,42 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   }
 
   const confirmArchive = async () => {
-    if (!archiveLot || busyRef.current || !etagRef.current) return
+    if (!archiveLot || busyRef.current) return
     const lotId = archiveLot.lot_id
     const etag = etagRef.current
-    if (!etag) return
-    const signature = `${portfolioId}|${etag}|${lotId}|remove`
-    const attempt = removeAttempt.current?.signature === signature ? removeAttempt.current : { signature, key: randomIdempotencyKey(), body: '' }
+    const targetSignature = `${portfolioId}|remove|${lotId}`
+    const existingAttempt = removeAttempt.current?.targetSignature === targetSignature ? removeAttempt.current : null
+    if (!existingAttempt && (typeof etag !== 'string' || validatePortfolioETag(etag, portfolioId) === null)) return
+    const attempt = existingAttempt || { operation: 'remove' as const, portfolioId, targetSignature, key: randomIdempotencyKey(), body: '', etag: etag as string, lotId }
     removeAttempt.current = attempt
     await submit('remove', attempt, lotId, `/api/v1/portfolios/${encodeURIComponent(portfolioId)}/holdings/${encodeURIComponent(lotId)}`, 'DELETE')
   }
 
   if (!active) return null
+  const mutationETagValid = validatePortfolioETag(overviewETag, portfolioId) !== null
   return <>
-    <section className="holding-mutation-card" aria-labelledby="holding-mutation-title">
+    <section ref={contentRef} className="holding-mutation-card" aria-labelledby="holding-mutation-title">
       <div className="section-heading"><div><span className="eyebrow">Authenticated portfolio control</span><h2 id="holding-mutation-title">Holding changes</h2></div><button ref={addButtonRef} type="button" onClick={() => { setFormOpen(true); setError(''); setStatus('') }} disabled={busy}>Add holding</button></div>
-      {status && <p className="notice success" role="status" aria-live="polite">{status}</p>}
+      {status && <p ref={statusRef} className="notice success" role="status" aria-live="polite" tabIndex={-1}>{status}</p>}
       {error && <p className="notice error" role="alert">{error}</p>}
       {formOpen && <form className="holding-form" onSubmit={create} aria-labelledby="holding-form-title">
         <h3 id="holding-form-title" ref={formHeadingRef} tabIndex={-1}>Add one holding</h3>
         <p className="muted">Use an existing portfolio instrument ID or define one new instrument. Financial values stay as exact text.</p>
-        <fieldset><legend>Instrument mode</legend><label><input type="radio" name="instrument-mode" checked={draft.mode === 'existing'} onChange={() => update('mode', 'existing')} /> Existing instrument ID</label><label><input type="radio" name="instrument-mode" checked={draft.mode === 'inline'} onChange={() => update('mode', 'inline')} /> New inline instrument</label></fieldset>
-        {draft.mode === 'existing' ? <Field id="instrument-id" label="Instrument ID" value={draft.instrumentId} error={errors.instrumentId} onChange={(value) => update('instrumentId', value)} /> : <div className="holding-fields"><Field id="symbol" label="Symbol" value={draft.symbol} error={errors.symbol} onChange={(value) => update('symbol', value)} /><Field id="instrument-currency" label="Instrument currency" value={draft.instrumentCurrency} error={errors.instrumentCurrency} onChange={(value) => update('instrumentCurrency', value)} /><Field id="description" label="Description (optional)" value={draft.description} error={errors.description} onChange={(value) => update('description', value)} /><Field id="asset-type" label="Asset type (optional)" value={draft.assetType} error={errors.assetType} onChange={(value) => update('assetType', value)} /><Field id="exchange" label="Exchange (optional)" value={draft.exchange} error={errors.exchange} onChange={(value) => update('exchange', value)} /></div>}
-        <div className="holding-fields"><Field id="quantity" label="Quantity" value={draft.quantity} error={errors.quantity} onChange={(value) => update('quantity', value)} inputMode="decimal" /><Field id="unit-cost" label="Unit cost" value={draft.unitCost} error={errors.unitCost} onChange={(value) => update('unitCost', value)} inputMode="decimal" /><Field id="cost-basis" label="Cost basis" value={draft.costBasis} error={errors.costBasis} onChange={(value) => update('costBasis', value)} inputMode="decimal" /><Field id="currency" label="Holding currency" value={draft.currency} error={errors.currency} onChange={(value) => update('currency', value)} /><Field id="account-id" label="Account ID (optional)" value={draft.accountId} error={errors.accountId} onChange={(value) => update('accountId', value)} /><Field id="acquisition-date" label="Acquisition date (optional)" value={draft.acquisitionDate} error={errors.acquisitionDate} onChange={(value) => update('acquisitionDate', value)} inputMode="numeric" /></div>
-        {errors.form && <p className="field-error" role="alert">{errors.form}</p>}
-        <div className="holding-form-actions"><button type="submit" disabled={busy || !etagRef.current} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</button><button type="button" onClick={() => { setFormOpen(false); setErrors({}); setError(''); addButtonRef.current?.focus() }} disabled={busy}>Cancel</button></div>
+        <fieldset aria-describedby="instrument-mode-help"><legend>Instrument mode</legend><p id="instrument-mode-help" className="muted">Existing mode uses an immutable instrument ID. Inline mode creates one new instrument identity; Symbol is display and market-data text, never the identity.</p><label><input type="radio" name="instrument-mode" checked={draft.mode === 'existing'} onChange={() => update('mode', 'existing')} /> Existing instrument ID</label><label><input type="radio" name="instrument-mode" checked={draft.mode === 'inline'} onChange={() => update('mode', 'inline')} /> New inline instrument</label></fieldset>
+        {draft.mode === 'existing' ? <Field id="instrument-id" label="Instrument ID" help="This immutable ID selects the existing instrument; it is not replaced by its symbol." value={draft.instrumentId} error={errors.instrumentId} onChange={(value) => update('instrumentId', value)} /> : <div className="holding-fields"><Field id="symbol" label="Symbol" help="Display and market-data symbol only; it does not identify the instrument." value={draft.symbol} error={errors.symbol} onChange={(value) => update('symbol', value)} /><Field id="instrument-currency" label="Instrument currency" value={draft.instrumentCurrency} error={errors.instrumentCurrency} onChange={(value) => update('instrumentCurrency', value)} /><Field id="description" label="Description (optional)" value={draft.description} error={errors.description} onChange={(value) => update('description', value)} /><Field id="asset-type" label="Asset type (optional)" value={draft.assetType} error={errors.assetType} onChange={(value) => update('assetType', value)} /><Field id="exchange" label="Exchange (optional)" value={draft.exchange} error={errors.exchange} onChange={(value) => update('exchange', value)} /></div>}
+        <div className="holding-fields"><Field id="quantity" label="Quantity" value={draft.quantity} error={errors.quantity} onChange={(value) => update('quantity', value)} inputMode="decimal" maxLength={40} /><Field id="unit-cost" label="Unit cost" value={draft.unitCost} error={errors.unitCost} onChange={(value) => update('unitCost', value)} inputMode="decimal" maxLength={40} /><Field id="cost-basis" label="Cost basis" value={draft.costBasis} error={errors.costBasis} onChange={(value) => update('costBasis', value)} inputMode="decimal" maxLength={40} /><Field id="currency" label="Holding currency" value={draft.currency} error={errors.currency} onChange={(value) => update('currency', value)} /><Field id="account-id" label="Account ID (optional)" value={draft.accountId} error={errors.accountId} onChange={(value) => update('accountId', value)} /><Field id="acquisition-date" label="Acquisition date (optional)" value={draft.acquisitionDate} error={errors.acquisitionDate} onChange={(value) => update('acquisitionDate', value)} inputMode="numeric" /></div>
+        {errors.form && <p className="field-error" role="alert" aria-live="assertive">{errors.form}</p>}
+        <div className="holding-form-actions"><button type="submit" disabled={busy || (!mutationETagValid && !createAttempt.current)} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</button><button type="button" onClick={() => { setFormOpen(false); setErrors({}); setError(''); addButtonRef.current?.focus() }} disabled={busy}>Cancel</button></div>
       </form>}
-      <div className="archive-controls"><h3>Archive an active lot</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p>{holdings.map((holding) => <div className="archive-row" key={holding.lot_id}><span><strong>Archive lot {holding.lot_id}</strong><span className="subline">Logical removal; history preserved</span></span><button type="button" onClick={() => setArchiveLot(holding)} disabled={busy || !etagRef.current} aria-label={`Archive lot ${holding.lot_id}`}>Archive lot</button></div>)}</div>
+      <div className="archive-controls"><h3>Archive an active lot</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p>{holdings.map((holding) => <div className="archive-row" key={holding.lot_id}><span><strong>Archive lot {holding.lot_id}</strong><span className="subline">Logical removal; history preserved</span></span><button type="button" ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} data-archive-lot-id={holding.lot_id} onClick={(event) => { archiveOriginRef.current = holding.lot_id; (event.currentTarget as HTMLButtonElement).focus(); setArchiveLot(holding) }} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-label={`Archive lot ${holding.lot_id}`}>Archive lot</button></div>)}</div>
     </section>
-    {archiveLot && <div className="confirmation-backdrop"><section className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title"><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive lot {archiveLot.lot_id}?</h2><p> This will logically archive the exact lot, not sell, trade, or permanently delete it. Its financial history, reviews, thesis and audit records remain preserved.</p><div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || !etagRef.current} aria-busy={busy}>{busy ? 'Archiving lot…' : `Confirm archive lot ${archiveLot.lot_id}`}</button><button type="button" onClick={() => { setArchiveLot(null); addButtonRef.current?.focus() }} disabled={busy}>Cancel archive</button></div></section></div>}
+    {archiveLot && <div className="confirmation-backdrop"><section ref={dialogRef} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title"><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive lot {archiveLot.lot_id}?</h2><p id="archive-dialog-description">This will logically archive the exact lot, not sell, trade, or permanently delete it. Its financial history, reviews, thesis and audit records remain preserved.</p><div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving lot…' : `Confirm archive lot ${archiveLot.lot_id}`}</button><button type="button" onClick={() => { archiveRestoreRef.current = { lotId: archiveOriginRef.current || archiveLot.lot_id, success: false }; setArchiveLot(null) }} disabled={busy}>Cancel archive</button></div></section></div>}
   </>
 }
 
-function Field({ id, label, value, error, onChange, inputMode }: { id: string; label: string; value: string; error?: string; onChange: (value: string) => void; inputMode?: 'decimal' | 'numeric' }) {
+function Field({ id, label, value, error, help, onChange, inputMode, maxLength }: { id: string; label: string; value: string; error?: string; help?: string; onChange: (value: string) => void; inputMode?: 'decimal' | 'numeric'; maxLength?: number }) {
   const errorId = `${id}-error`
-  return <div className="field"><label htmlFor={id}>{label}</label><input id={id} value={value} onChange={(event) => onChange(event.target.value)} inputMode={inputMode} aria-invalid={Boolean(error)} aria-describedby={error ? errorId : undefined} />{error && <p id={errorId} className="field-error">{error}</p>}</div>
+  const helpId = `${id}-help`
+  const describedBy = [help ? helpId : '', error ? errorId : ''].filter(Boolean).join(' ') || undefined
+  return <div className="field"><label htmlFor={id}>{label}</label>{help && <p id={helpId} className="muted">{help}</p>}<input id={id} value={value} onChange={(event) => onChange(event.target.value)} inputMode={inputMode} maxLength={maxLength} aria-invalid={Boolean(error)} aria-describedby={describedBy} />{error && <p id={errorId} className="field-error">{error}</p>}</div>
 }

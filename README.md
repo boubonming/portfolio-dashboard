@@ -1,8 +1,8 @@
 # Portfolio Dashboard
 
-Private, single-user portfolio dashboard scaffold. The canonical SQLite database is authoritative for calculations; fresh databases start empty and current holdings enter through authenticated UI/API workflows (mutation handlers are not shipped in this slice).
+Private, single-user portfolio dashboard. The canonical SQLite database is authoritative for calculations; fresh databases start empty and current holdings enter through authenticated UI/API workflows. Authenticated holding create/archive handlers and their frontend controls are shipped.
 
-The application currently serves a minimal React shell and a health endpoint. It does not expose state-changing portfolio HTTP endpoints, make market-data calls, access credentials, or deploy anything.
+The application serves the React dashboard, health endpoint, authenticated portfolio read APIs, and portfolio-scoped holding create/archive endpoints. It does not access brokerage credentials, place trades, or deploy anything.
 
 ## Prerequisites
 

@@ -65,7 +65,7 @@ Legacy `lots.created_at` is historical display/audit data and is preserved byte-
 
 A successful create returns 201; a successful removal returns 200. A replay returns the exact stored receipt and original status/headers for the same actor category, actor ID, portfolio, operation, idempotency key, and request fingerprint. The physical namespace is exactly `(actor_category, actor_id, portfolio_id, operation, idempotency_key)`; there is no separate route dimension. `remove` is the archive operation, so the same key is independent in create and archive namespaces. Same-operation replay has no side effects; same-operation reuse with a different canonical fingerprint is `409 idempotency_conflict` with zero side effects. A receipt contains the operation, `applied` or `replayed`, safe holding record, new integer `portfolio_revision`, `snapshot_state`, current snapshot ID if any, actor witness, audit event ID, Activity event ID, and idempotency key. It contains no credential or raw request material.
 
-`GET overview` supplies the witness as an opaque strong ETag, for example `"portfolio-demo-7"`. A mutation must send that exact value in `If-Match`. The operation compares and increments the portfolio revision in the same SQLite transaction. Any mismatch is 409 `stale_revision` and has no side effects.
+`GET overview` supplies the witness as the exact strong ETag `"<portfolioId>-<canonical nonnegative revision>"`, for example `"portfolio-demo-7"`; weak tags, leading-zero revisions, wrong-portfolio tags, and duplicate/missing header values are invalid. A mutation must send that exact value in `If-Match`. The operation compares and increments the portfolio revision in the same SQLite transaction. Any mismatch is 409 `stale_revision` and has no side effects.
 
 ## 5. Snapshot semantics
 
@@ -171,7 +171,7 @@ Migration 010 is loaded through `Store.Migrate`; runtime tests cover fresh initi
 
 ## 10. Implementation/removal ledger (named work items and proof obligations)
 
-The following are explicit downstream implementation/removal items. They are not part of the shipped mutation handlers, and every item must retain the no-document-import invariant. Baseline paths named below are known conflicting debt, not acceptable architecture or an alternative implementation.
+The following historical baseline/removal items document remaining cleanup around adjacent consumers. They are not an alternative to the shipped mutation handlers, and every item must retain the no-document-import invariant. Baseline paths named below are known conflicting debt, not acceptable architecture or an alternative implementation.
 
 1. `internal/store/readmodel.go`: select only `lots.lifecycle='active'`, remove `source_row` from the read-model query/scan/domain mapping, and add a populated/archived overview regression proving removed lots are absent without changing historical rows.
 2. `internal/httpserver/export.go`: export active lots only, remove the `source_row` column and renderer, and add CSV header/row regressions for duplicate instruments and archived lots.
