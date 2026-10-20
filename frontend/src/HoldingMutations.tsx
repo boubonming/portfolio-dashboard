@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { apiFetch, APIError } from './api'
 import type { Holding } from './App'
 
@@ -163,6 +164,7 @@ type Props = {
 }
 
 type Attempt = { operation: HoldingMutationOperation; portfolioId: string; targetSignature: string; key: string; body: string; etag: string; lotId?: string }
+type ArchiveBackground = { element: HTMLElement; inert: boolean; ariaHidden: string | null }
 
 export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, onRefresh, onUnauthorized }: Props) {
   const [formOpen, setFormOpen] = useState(false)
@@ -181,12 +183,14 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const formHeadingRef = useRef<HTMLHeadingElement>(null)
   const dialogHeadingRef = useRef<HTMLHeadingElement>(null)
   const dialogRef = useRef<HTMLElement>(null)
+  const archiveErrorRef = useRef<HTMLParagraphElement>(null)
   const addButtonRef = useRef<HTMLButtonElement>(null)
   const statusRef = useRef<HTMLParagraphElement>(null)
   const contentRef = useRef<HTMLElement>(null)
   const archiveTriggerRefs = useRef(new Map<string, HTMLButtonElement>())
-  const archiveOriginRef = useRef<string | null>(null)
+  const archiveOriginRef = useRef<HTMLButtonElement | null>(null)
   const archiveRestoreRef = useRef<{ lotId: string; success: boolean } | null>(null)
+  const archiveBackgroundRef = useRef<ArchiveBackground | null>(null)
   const scopeRef = useRef(scopeKey)
 
   const abortWork = () => {
@@ -205,38 +209,73 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   useEffect(() => { etagRef.current = overviewETag; scopeRef.current = scopeKey }, [overviewETag, scopeKey])
   useEffect(() => { if (formOpen) formHeadingRef.current?.focus() }, [formOpen])
   useLayoutEffect(() => { if (archiveLot) dialogHeadingRef.current?.focus() }, [archiveLot])
+  useLayoutEffect(() => {
+    if (!archiveLot) return
+    const element = document.getElementById('root') || contentRef.current?.parentElement
+    if (!element || archiveBackgroundRef.current) return
+    archiveBackgroundRef.current = { element, inert: element.inert === true, ariaHidden: element.getAttribute('aria-hidden') }
+    element.inert = true
+    element.setAttribute('aria-hidden', 'true')
+    return () => {
+      const previous = archiveBackgroundRef.current
+      if (!previous) return
+      previous.element.inert = previous.inert
+      if (previous.ariaHidden === null) previous.element.removeAttribute('aria-hidden')
+      else previous.element.setAttribute('aria-hidden', previous.ariaHidden)
+      archiveBackgroundRef.current = null
+    }
+  }, [archiveLot])
   useEffect(() => {
     if (!archiveLot) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        if (!busyRef.current) { event.preventDefault(); if (contentRef.current) contentRef.current.inert = false; setArchiveLot(null); archiveTriggerRefs.current.get(archiveOriginRef.current || '')?.focus() }
+        if (!busyRef.current) { event.preventDefault(); archiveRestoreRef.current = { lotId: archiveLot.lot_id, success: false }; setArchiveLot(null) }
         return
       }
       if (event.key !== 'Tab') return
-      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])
-      if (!focusable.length) return
+      const dialog = dialogRef.current
+      const focusable = Array.from(dialog?.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])
+      if (!focusable.length) {
+        event.preventDefault()
+        dialogHeadingRef.current?.focus()
+        return
+      }
       const first = focusable[0]
       const last = focusable[focusable.length - 1]
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+      const active = document.activeElement
+      if (active === dialogHeadingRef.current || !dialog?.contains(active)) {
+        event.preventDefault()
+        ;(event.shiftKey ? last : first).focus()
+      } else if (event.shiftKey && active === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus() }
+    }
+    const onFocusIn = (event: FocusEvent) => {
+      if (!dialogRef.current?.contains(event.target as Node)) dialogHeadingRef.current?.focus()
     }
     document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
+    document.addEventListener('focusin', onFocusIn)
+    return () => { document.removeEventListener('keydown', onKeyDown); document.removeEventListener('focusin', onFocusIn) }
   }, [archiveLot])
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (archiveLot || !archiveRestoreRef.current) return
     const restore = archiveRestoreRef.current
+    if (restore.success && holdings.some((holding) => holding.lot_id === restore.lotId)) return
     archiveRestoreRef.current = null
-    const exact = archiveTriggerRefs.current.get(restore.lotId)
-    const fallback = holdings.find((holding) => holding.lot_id !== restore.lotId)
-    window.setTimeout(() => (exact || (fallback && archiveTriggerRefs.current.get(fallback.lot_id)) || statusRef.current)?.focus(), 0)
+    const candidates = restore.success
+      ? [statusRef.current, ...holdings.filter((holding) => holding.lot_id !== restore.lotId).map((holding) => archiveTriggerRefs.current.get(holding.lot_id)), document.getElementById('holdings-title'), addButtonRef.current]
+      : [archiveOriginRef.current, addButtonRef.current]
+    const target = candidates.find((candidate): candidate is HTMLElement => Boolean(candidate?.isConnected))
+    target?.focus()
   }, [archiveLot, holdings, status])
+  useLayoutEffect(() => {
+    if (archiveLot && error && !busy) archiveErrorRef.current?.focus()
+  }, [archiveLot, error, busy])
   useEffect(() => {
-    if (!contentRef.current) return
-    contentRef.current.inert = Boolean(archiveLot)
-    if (archiveLot) contentRef.current.setAttribute('aria-hidden', 'true')
-    else contentRef.current.removeAttribute('aria-hidden')
-  }, [archiveLot])
+    if (!active && archiveLot) {
+      archiveRestoreRef.current = null
+      setArchiveLot(null)
+    }
+  }, [active, archiveLot])
 
   const update = (field: keyof Draft, value: string) => {
     setDraft((current) => ({ ...current, [field]: value }))
@@ -318,7 +357,8 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       validateHoldingMutationReceipt(receipt, { operation, portfolioId, idempotencyKey: attempt.key, body: attempt.body, lotId, responseETag: response.headers.get('ETag') || '' })
       const result = (receipt as { result: 'applied' | 'replayed' }).result
       const refreshedETag = await onRefresh()
-      if (!current() || validatePortfolioETag(refreshedETag, portfolioId) !== (receipt as { portfolio_revision: number }).portfolio_revision) return
+      if (!current()) return
+      if (validatePortfolioETag(refreshedETag, portfolioId) !== (receipt as { portfolio_revision: number }).portfolio_revision) throw new Error('The refreshed overview revision did not match the archive receipt. Reload the overview and try again.')
       etagRef.current = refreshedETag as string
       if (operation === 'create') { createAttempt.current = null; setDraft(emptyDraft()); setFormOpen(false); window.setTimeout(() => addButtonRef.current?.focus(), 0) } else { removeAttempt.current = null; archiveRestoreRef.current = { lotId: lotId || '', success: true }; setArchiveLot(null) }
       setStatus(`${operation === 'create' ? 'Holding creation' : 'Holding archive'} ${result === 'replayed' ? 'replayed' : 'applied'} successfully. Overview refreshed; snapshot state is ${receipt.snapshot_state === 'no_snapshot' ? 'no snapshot' : 'stale'}.`)
@@ -352,7 +392,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     <section ref={contentRef} className="holding-mutation-card" aria-labelledby="holding-mutation-title">
       <div className="section-heading"><div><span className="eyebrow">Authenticated portfolio control</span><h2 id="holding-mutation-title">Holding changes</h2></div><button ref={addButtonRef} type="button" onClick={() => { setFormOpen(true); setError(''); setStatus('') }} disabled={busy}>Add holding</button></div>
       {status && <p ref={statusRef} className="notice success" role="status" aria-live="polite" tabIndex={-1}>{status}</p>}
-      {error && <p className="notice error" role="alert">{error}</p>}
+      {error && !archiveLot && <p className="notice error" role="alert">{error}</p>}
       {formOpen && <form className="holding-form" onSubmit={create} aria-labelledby="holding-form-title">
         <h3 id="holding-form-title" ref={formHeadingRef} tabIndex={-1}>Add one holding</h3>
         <p className="muted">Use an existing portfolio instrument ID or define one new instrument. Financial values stay as exact text.</p>
@@ -362,9 +402,9 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
         {errors.form && <p className="field-error" role="alert" aria-live="assertive">{errors.form}</p>}
         <div className="holding-form-actions"><button type="submit" disabled={busy || (!mutationETagValid && !createAttempt.current)} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</button><button type="button" onClick={() => { setFormOpen(false); setErrors({}); setError(''); addButtonRef.current?.focus() }} disabled={busy}>Cancel</button></div>
       </form>}
-      <div className="archive-controls"><h3>Archive an active lot</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p>{holdings.map((holding) => <div className="archive-row" key={holding.lot_id}><span><strong>Archive lot {holding.lot_id}</strong><span className="subline">Logical removal; history preserved</span></span><button type="button" ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} data-archive-lot-id={holding.lot_id} onClick={(event) => { archiveOriginRef.current = holding.lot_id; (event.currentTarget as HTMLButtonElement).focus(); setArchiveLot(holding) }} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-label={`Archive lot ${holding.lot_id}`}>Archive lot</button></div>)}</div>
+      <div className="archive-controls"><h3>Archive an active lot</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p>{holdings.map((holding) => <div className="archive-row" key={holding.lot_id}><span><strong>Archive lot {holding.lot_id}</strong><span className="subline">Logical removal; history preserved</span></span><button type="button" ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} data-archive-lot-id={holding.lot_id} onClick={(event) => { archiveOriginRef.current = event.currentTarget as HTMLButtonElement; (event.currentTarget as HTMLButtonElement).focus(); setError(''); setStatus(''); setArchiveLot(holding) }} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-label={`Archive lot ${holding.lot_id}`}>Archive lot</button></div>)}</div>
     </section>
-    {archiveLot && <div className="confirmation-backdrop"><section ref={dialogRef} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title"><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive lot {archiveLot.lot_id}?</h2><p id="archive-dialog-description">This will logically archive the exact lot, not sell, trade, or permanently delete it. Its financial history, reviews, thesis and audit records remain preserved.</p><div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving lot…' : `Confirm archive lot ${archiveLot.lot_id}`}</button><button type="button" onClick={() => { archiveRestoreRef.current = { lotId: archiveOriginRef.current || archiveLot.lot_id, success: false }; setArchiveLot(null) }} disabled={busy}>Cancel archive</button></div></section></div>}
+    {archiveLot && createPortal(<div className="confirmation-backdrop"><section ref={dialogRef} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title" aria-describedby={error ? 'archive-dialog-description archive-dialog-error' : 'archive-dialog-description'}><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive lot {archiveLot.lot_id}?</h2><p id="archive-dialog-description">This will logically archive the exact lot, not sell, trade, or permanently delete it. Its financial history, reviews, thesis and audit records remain preserved.</p>{error && <p ref={archiveErrorRef} id="archive-dialog-error" className="notice error" role="alert" aria-live="assertive" tabIndex={-1}>{error}</p>}<div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving lot…' : `Confirm archive lot ${archiveLot.lot_id}`}</button><button type="button" onClick={() => { archiveRestoreRef.current = { lotId: archiveLot.lot_id, success: false }; setArchiveLot(null) }} disabled={busy}>Cancel archive</button></div></section></div>, document.body)}
   </>
 }
 
