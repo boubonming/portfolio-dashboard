@@ -21,7 +21,7 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 	defer s.Close()
 
 	now := time.Now().UTC()
-	nowText := now.Format(time.RFC3339Nano)
+	nowText := canonicalSnapshotTime(now)
 	if _, err = s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-semantic", "Semantic", "MYR", nowText, nowText); err != nil {
 		t.Fatal(err)
 	}

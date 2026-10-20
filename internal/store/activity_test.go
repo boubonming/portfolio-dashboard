@@ -30,7 +30,7 @@ func TestActivityIsPortfolioScopedAndPaginatesDeterministically(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalSnapshotTime(time.Now().UTC())
 	for _, id := range []string{"activity-a", "activity-b"} {
 		if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, id, id, "USD", now, now); err != nil {
 			t.Fatal(err)

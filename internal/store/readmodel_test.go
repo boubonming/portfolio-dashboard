@@ -16,7 +16,7 @@ func TestPortfolioOverviewDoesNotLeakCrossPortfolioAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalSnapshotTime(time.Now().UTC())
 	for _, portfolio := range [2]string{"portfolio-owner", "portfolio-broker"} {
 		if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, portfolio, portfolio, "MYR", now, now); err != nil {
 			t.Fatal(err)
@@ -54,7 +54,7 @@ func TestPortfolioOverviewExposesDerivedCostBasisAndSourceUnitCost(t *testing.T)
 	}
 	defer s.Close()
 	now := time.Now().UTC()
-	nowText := now.Format(time.RFC3339Nano)
+	nowText := canonicalSnapshotTime(now)
 	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-cost", "Cost fixture", "MYR", nowText, nowText); err != nil {
 		t.Fatal(err)
 	}

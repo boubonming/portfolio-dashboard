@@ -14,7 +14,7 @@ import (
 func TestReviewHTTPDuplicateInstrumentNormalizedCorruption(t *testing.T) {
 	handler, database, submission, snapshotID := reviewBoundaryFixture(t)
 	defer database.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
 	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-api-2", "FIX2", "Fixture instrument 2", "USD", now); err != nil {
 		t.Fatal(err)
 	}

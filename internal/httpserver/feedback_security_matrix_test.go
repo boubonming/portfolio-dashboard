@@ -105,7 +105,7 @@ func TestFeedbackHTTPRealForeignReviewIsNotVisibleThroughOwnedPortfolio(t *testi
 	fixture := newFeedbackHTTPFixture(t)
 	defer fixture.close()
 	now := time.Now().UTC()
-	nowText := now.Format(time.RFC3339Nano)
+	nowText := canonicalReviewFixtureTimestamp(now)
 	if _, err := fixture.database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-foreign", "Foreign", "MYR", nowText, nowText); err != nil {
 		t.Fatal(err)
 	}
