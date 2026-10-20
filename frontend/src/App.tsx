@@ -3,6 +3,7 @@ import type { FormEvent, RefObject } from 'react'
 import { apiFetch, APIError, jsonResponse } from './api'
 import ThesisEditor from './ThesisEditor'
 import Reviews, { type FeedbackAttemptStore } from './Reviews'
+import HoldingMutations from './HoldingMutations'
 
 export type Freshness = {
   status: 'fresh' | 'stale' | 'missing' | 'future' | 'invalid' | string
@@ -360,6 +361,7 @@ export default function App() {
   const [view, setView] = useState<'overview' | 'activity' | 'reviews'>('overview')
   const [reviewsHoldingId, setReviewsHoldingId] = useState<string | undefined>(undefined)
   const [data, setData] = useState<PortfolioOverview | null>(null)
+  const [overviewETag, setOverviewETag] = useState<string | undefined>(undefined)
   const [thesisHolding, setThesisHolding] = useState<Holding | null>(null)
   const [activity, setActivity] = useState<ActivityPage | null>(null)
   const [activityState, setActivityState] = useState<'loading' | 'ready' | 'error'>('loading')
@@ -416,7 +418,7 @@ export default function App() {
     feedbackAttemptsRef.current.clear()
     activityLoadingMoreRef.current = false
     activityItemsRef.current = []
-    setData(null); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
+    setData(null); setOverviewETag(undefined); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -434,8 +436,8 @@ export default function App() {
     return true
   }, [clearPrivateState])
 
-  const load = useCallback(() => {
-    if (authState !== 'authenticated') return
+  const load = useCallback((rethrow = false): Promise<string | void> => {
+    if (authState !== 'authenticated') return Promise.resolve(undefined)
     const authGenerationAtStart = authGeneration.current
     const generation = ++loadGeneration.current
     loadControllerRef.current?.abort()
@@ -444,19 +446,22 @@ export default function App() {
     setState('loading')
     setError('')
     const url = `/api/v1/portfolios/${activityPortfolioID}/overview?currency=${encodeURIComponent(currency)}`
-    apiFetch(url, { signal: controller.signal })
-      .then((response) => jsonResponse<PortfolioOverview>(response))
-      .then((overview) => {
+    return apiFetch(url, { signal: controller.signal })
+      .then(async (response) => ({ overview: await jsonResponse<PortfolioOverview>(response), etag: response.headers?.get?.('ETag') || undefined }))
+      .then(({ overview, etag }) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== loadGeneration.current) return
         if (!currentPortfolioID(overview)) throw new Error('Invalid portfolio overview')
         setData(overview)
+        setOverviewETag(etag)
         setState('ready')
+        return etag
       })
       .catch((reason: unknown) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== loadGeneration.current) return
-        if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+        if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); if (rethrow) throw reason; return }
         setError(reason instanceof Error ? reason.message : 'Unable to load the portfolio')
         setState('error')
+        if (rethrow) throw reason
       })
   }, [authState, clearPrivateState, currency])
 
@@ -781,7 +786,7 @@ export default function App() {
 
       {state === 'loading' && <section className="notice" role="status"><h2>Loading portfolio</h2><p>Reading the latest immutable snapshot…</p></section>}
       {authError && <section className="notice error" role="alert"><h2>Session error</h2><p>{authError}</p></section>}
-      {state === 'error' && <section className="notice error" role="alert"><h2>Unable to load portfolio</h2><p>{error}</p><button type="button" onClick={load}>Try again</button></section>}
+      {state === 'error' && <section className="notice error" role="alert"><h2>Unable to load portfolio</h2><p>{error}</p><button type="button" onClick={() => load()}>Try again</button></section>}
 
       {state === 'ready' && data && (
         <>
@@ -807,6 +812,8 @@ export default function App() {
           {data.snapshot.state === 'incomplete' && <section className="notice warning"><h2>Valuation is incomplete</h2><p>Reporting total is intentionally withheld. Missing, stale or invalid market dependencies must be resolved before this view can be complete.</p></section>}
 
           <AllocationSection data={data} />
+
+          <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active={view === 'overview'} scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={() => load(true)} onUnauthorized={handleThesisUnauthorized} />
 
           <section className="table-card" aria-labelledby="holdings-title">
             <div className="section-heading"><div><span className="eyebrow">Source-traceable lots</span><h2 id="holdings-title">Holdings</h2></div><span className="muted">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</span></div>

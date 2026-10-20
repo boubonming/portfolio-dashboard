@@ -143,6 +143,26 @@ tbody th { font-weight: 500; }
 .feedback-options { display: flex; flex-wrap: wrap; gap: .7rem 1.2rem; }
 .feedback-panel textarea { display: block; min-height: 6rem; resize: vertical; width: min(100%, 54rem); }
 .notice.success { border-color: #52c7b8; }
+.holding-mutation-card { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; margin-top: 1.5rem; min-width: 0; padding: 1.25rem; }
+.holding-form { border-top: 1px solid #41615d; display: grid; gap: .8rem; margin-top: 1rem; max-width: 68rem; padding-top: 1.25rem; }
+.holding-form h3, .archive-controls h3 { margin: 0; }
+.holding-form fieldset { border: 1px solid #41615d; border-radius: 8px; display: flex; flex-wrap: wrap; gap: .8rem 1.5rem; margin: 0; padding: .8rem 1rem; }
+.holding-form legend { color: #75d5c7; font-weight: 700; padding: 0 .35rem; }
+.holding-form fieldset label { align-items: center; display: flex; gap: .45rem; }
+.holding-fields { display: grid; gap: .8rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.field { display: grid; gap: .35rem; min-width: 0; }
+.field label { color: #b8cbc8; font-size: .9rem; font-weight: 700; }
+.field input { min-width: 0; width: 100%; }
+.field-error { color: #ffb9c1; font-size: .9rem; margin: 0; }
+.holding-form-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .4rem; }
+.holding-form-actions button:first-child { background: #164d43; font-weight: 700; }
+.archive-controls { border-top: 1px solid #41615d; display: grid; gap: .7rem; margin-top: 1.5rem; padding-top: 1.25rem; }
+.archive-row { align-items: center; border-bottom: 1px solid #2d4441; display: flex; gap: 1rem; justify-content: space-between; min-width: 0; padding: .7rem 0; }
+.archive-row:last-child { border-bottom: 0; }
+.archive-row > span { min-width: 0; overflow-wrap: anywhere; }
+.confirmation-backdrop { align-items: center; background: rgb(0 0 0 / 65%); display: flex; inset: 0; justify-content: center; padding: 1rem; position: fixed; z-index: 10; }
+.confirmation-dialog { background: #1a2524; border: 2px solid #52c7b8; border-radius: 12px; max-width: 38rem; padding: 1.5rem; width: 100%; }
+.confirmation-dialog h2:focus-visible, .holding-form h3:focus-visible { border-radius: 4px; outline: 2px solid #75d5c7; outline-offset: 4px; }
 @media (max-width: 780px) {
   .overview { grid-template-columns: 1fr; }
   .snapshot-meta { border-left: 0; border-top: 1px solid #41615d; padding-left: 0; padding-top: 1rem; }
@@ -155,4 +175,7 @@ tbody th { font-weight: 500; }
   .thesis-header > button { width: 100%; }
   .thesis-content-grid { grid-template-columns: 1fr; }
   .review-meta, .review-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .holding-fields { grid-template-columns: 1fr; }
+  .archive-row { align-items: stretch; flex-direction: column; }
+  .archive-row button { width: 100%; }
 }
