@@ -91,11 +91,14 @@ func TestSnapshotHoldingLimitBoundaryAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalSnapshotTime(time.Now().UTC())
 	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-limit", "Limit", "MYR", now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "instrument-limit", "LIMIT", "MYR", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-limit", "instrument-limit", now); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := database.DB.BeginTx(ctx, nil)

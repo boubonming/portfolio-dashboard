@@ -120,7 +120,7 @@ func TestPortfolioExportCSVEscapesFormulaTextAndKeepsCSVData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
 	for _, statement := range []struct {
 		query string
 		args  []any
@@ -132,6 +132,11 @@ func TestPortfolioExportCSVEscapesFormulaTextAndKeepsCSVData(t *testing.T) {
 	} {
 		if _, err := database.DB.Exec(statement.query, statement.args...); err != nil {
 			t.Fatal(err)
+		}
+		if strings.Contains(statement.query, "INSERT INTO instruments") {
+			if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-safe", "instrument-safe", now); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	response := httptest.NewRecorder()
@@ -267,10 +272,13 @@ func TestRenderPortfolioCSVReturnsNoPartialBytesWhenGenerationIsCanceled(t *test
 func TestPortfolioExportCSVKeepsThirtyThreeLotsAndDuplicateSymbols(t *testing.T) {
 	database := apiFixture(t)
 	defer database.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
 	for index := 1; index <= 30; index++ {
 		instrumentID := fmt.Sprintf("instrument-export-%02d", index)
 		if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, instrumentID, fmt.Sprintf("SYM%02d", index), "Fixture", "MYR", now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-api", instrumentID, now); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, fmt.Sprintf("lot-export-%02d", index), "portfolio-api", instrumentID, "1", "MYR", now, now); err != nil {

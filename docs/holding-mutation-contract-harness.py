@@ -28,7 +28,7 @@ def baseline_migrations() -> sqlite3.Connection:
     db = sqlite3.connect(":memory:")
     db.execute("PRAGMA foreign_keys=ON")
     for path in sorted(MIGRATIONS.glob("*.sql")):
-        if path.name.startswith("009_"):
+        if path.name.startswith(("009_", "010_")):
             continue
         db.executescript(path.read_text())
     return db
@@ -413,6 +413,14 @@ def check_future_no_document_import_regression() -> None:
         "docs/holding-mutation-contract.md",
         "docs/holding-mutation-contract.sql",
         "docs/holding-mutation-contract-harness.py",
+        "internal/store/migrations/001_initial.sql",
+        "internal/store/migrations/002_import_idempotency.sql",
+        "internal/store/migrations/010_holding_schema_convergence.sql",
+    }
+    historical_migration_files = {
+        "internal/store/migrations/001_initial.sql",
+        "internal/store/migrations/002_import_idempotency.sql",
+        "internal/store/migrations/010_holding_schema_convergence.sql",
     }
     tracked = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines()
     for relative in tracked:
@@ -430,6 +438,8 @@ def check_future_no_document_import_regression() -> None:
                 continue
             if relative not in allowed_contract_files:
                 raise AssertionError(f"active document-import identity remains: {relative}:{line_number}")
+            if relative in historical_migration_files:
+                continue
             context = line.lower()
             if not any(marker in context for marker in ("no ", "never", "remove", "removal", "historical", "baseline", "prohibit", "not runtime")):
                 raise AssertionError(f"unaccounted contract reference: {relative}:{line_number}")

@@ -18,6 +18,9 @@ func TestReviewHTTPDuplicateInstrumentNormalizedCorruption(t *testing.T) {
 	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-api-2", "FIX2", "Fixture instrument 2", "USD", now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-api", "instrument-api-2", now); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?,?)`, "lot-api-2", "portfolio-api", "instrument-api-2", "1", "2", "2", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}

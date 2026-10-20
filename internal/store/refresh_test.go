@@ -107,12 +107,16 @@ func openRefreshFixture(t *testing.T) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := "2026-01-02T12:00:00Z"
+	now := "2026-01-02T12:00:00.000000000Z"
 	_, err = s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES('refresh-portfolio','Refresh fixture','USD',?,?)`, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-instrument','LOCAL','USD',?)`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES('refresh-portfolio','refresh-instrument',?)`, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,8 +165,11 @@ func TestRefreshRejectsPreEpochScalarAndBatchObservationsWithoutAborting(t *test
 		t.Run(testCase.name, func(t *testing.T) {
 			s := openRefreshFixture(t)
 			defer s.Close()
-			now := "2026-01-02T12:00:00Z"
+			now := "2026-01-02T12:00:00.000000000Z"
 			if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-eur','EURREL','EUR',?)`, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES('refresh-portfolio','refresh-eur',?)`, now); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES('refresh-eur-lot','refresh-portfolio','refresh-eur','1','EUR',?,?)`, now, now); err != nil {
@@ -187,7 +194,7 @@ func TestRefreshQuoteCollisionDowngradesOnlyTheConflictingProviderAtomically(t *
 	ctx := context.Background()
 	s := openRefreshFixture(t)
 	defer s.Close()
-	now := "2026-01-02T12:00:00Z"
+	now := "2026-01-02T12:00:00.000000000Z"
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('unrelated-instrument','UNRELATED','USD',?)`, now); err != nil {
 		t.Fatal(err)
 	}
@@ -224,8 +231,11 @@ func TestRefreshFXCollisionDowngradesProviderAndExactReplayRemainsComplete(t *te
 	ctx := context.Background()
 	s := openRefreshFixture(t)
 	defer s.Close()
-	now := "2026-01-02T12:00:00Z"
+	now := "2026-01-02T12:00:00.000000000Z"
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-eur','EURREL','EUR',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES('refresh-portfolio','refresh-eur',?)`, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES('refresh-eur-lot','refresh-portfolio','refresh-eur','1','EUR',?,?)`, now, now); err != nil {
@@ -249,6 +259,9 @@ func TestRefreshFXCollisionDowngradesProviderAndExactReplayRemainsComplete(t *te
 	s = openRefreshFixture(t)
 	defer s.Close()
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-eur','EURREL','EUR',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES('refresh-portfolio','refresh-eur',?)`, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES('refresh-eur-lot','refresh-portfolio','refresh-eur','1','EUR',?,?)`, now, now); err != nil {
@@ -313,8 +326,11 @@ func TestRefreshPartialFailureKeepsSuccessfulObservation(t *testing.T) {
 	ctx := context.Background()
 	s := openRefreshFixture(t)
 	defer s.Close()
-	now := "2026-01-02T12:00:00Z"
+	now := "2026-01-02T12:00:00.000000000Z"
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-instrument-2','SECOND','USD',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES('refresh-portfolio','refresh-instrument-2',?)`, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES('refresh-lot-2','refresh-portfolio','refresh-instrument-2','1','USD',?,?)`, now, now); err != nil {
@@ -346,9 +362,12 @@ func TestRefreshDefaultProvidersAssignEachInstrumentOnce(t *testing.T) {
 	ctx := context.Background()
 	s := openRefreshFixture(t)
 	defer s.Close()
-	now := "2026-01-02T12:00:00Z"
+	now := "2026-01-02T12:00:00.000000000Z"
 	for _, id := range []string{"refresh-instrument-alpha", "refresh-instrument-coin"} {
 		if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, id, id, "USD", now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "refresh-portfolio", id, now); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, "lot-"+id, "refresh-portfolio", id, "1", "USD", now, now); err != nil {
@@ -473,8 +492,11 @@ func TestRefreshUnmappedInstrumentCountedOnceAndNotRequested(t *testing.T) {
 	ctx := context.Background()
 	s := openRefreshFixture(t)
 	defer s.Close()
-	now := "2026-01-02T12:00:00Z"
+	now := "2026-01-02T12:00:00.000000000Z"
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-unmapped','UNMAPPED','USD',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES('refresh-portfolio','refresh-unmapped',?)`, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES('lot-unmapped','refresh-portfolio','refresh-unmapped','1','USD',?,?)`, now, now); err != nil {

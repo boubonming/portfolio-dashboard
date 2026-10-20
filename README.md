@@ -1,6 +1,6 @@
 # Portfolio Dashboard
 
-Private, single-user portfolio dashboard scaffold. The Obsidian holdings note has completed reconciliation and its import has been explicitly approved; the resulting imported SQLite portfolio is authoritative for calculations.
+Private, single-user portfolio dashboard scaffold. The canonical SQLite database is authoritative for calculations; fresh databases start empty and current holdings enter through authenticated UI/API workflows (mutation handlers are not shipped in this slice).
 
 The application currently serves a minimal React shell and a health endpoint. It does not expose state-changing portfolio HTTP endpoints, make market-data calls, access credentials, or deploy anything.
 
@@ -100,7 +100,7 @@ The provider boundary now includes credential-safe fake-server-tested adapters
 for Finnhub, Alpha Vantage, CoinGecko and Open Exchange Rates. Credentials are
 optional process-start configuration and are never required by tests.
 
-Add a quote (the symbol/currency pair must already exist in the approved import):
+Add a quote for a symbol/currency pair already present in the canonical database:
 
 ```sh
 go run ./cmd/portfolio-dashboard quote-add -db /path/to/portfolio-dashboard.sqlite \

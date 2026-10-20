@@ -39,6 +39,11 @@ func TestActivityIsPortfolioScopedAndPaginatesDeterministically(t *testing.T) {
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "activity-instrument", "ACT", "USD", now); err != nil {
 		t.Fatal(err)
 	}
+	for _, portfolio := range []string{"activity-a", "activity-b"} {
+		if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, portfolio, "activity-instrument", now); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, "activity-lot-a", "activity-a", "activity-instrument", "1", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}

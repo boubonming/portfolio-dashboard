@@ -31,7 +31,26 @@ CREATE TABLE IF NOT EXISTS lots (
     cost_basis TEXT,
     currency TEXT NOT NULL,
     acquisition_date TEXT,
+    source_row INTEGER,
+    source_ref TEXT,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS import_runs (
+    id TEXT PRIMARY KEY,
+    portfolio_id TEXT REFERENCES portfolios(id),
+    source_path TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS import_items (
+    id TEXT PRIMARY KEY,
+    import_run_id TEXT NOT NULL REFERENCES import_runs(id),
+    source_row INTEGER NOT NULL,
+    symbol TEXT,
+    classification TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    issue TEXT
 );
 CREATE TABLE IF NOT EXISTS quotes (
     id TEXT PRIMARY KEY,

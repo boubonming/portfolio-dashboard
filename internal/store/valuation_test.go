@@ -24,7 +24,7 @@ type valuationFixture struct {
 
 func seedValuationFixture(t *testing.T, s *Store) valuationFixture {
 	t.Helper()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalSnapshotTime(time.Now().UTC())
 	fixture := valuationFixture{Lots: make([]valuationFixtureLot, 0, 33)}
 	for index := 1; index <= 33; index++ {
 		symbol := fmt.Sprintf("SYM%02d", index)
@@ -44,6 +44,9 @@ func seedValuationFixture(t *testing.T, s *Store) valuationFixture {
 		if index > 31 {
 			instrumentID = fmt.Sprintf("instrument-fixture-%02d", index-31)
 		} else if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, instrumentID, symbol, "USD", now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.Exec(`INSERT OR IGNORE INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, defaultPortfolioID, instrumentID, now); err != nil {
 			t.Fatal(err)
 		}
 		lotID := fmt.Sprintf("lot-fixture-%02d", index)
@@ -110,11 +113,14 @@ func TestSnapshotIsolatesPortfolioLotsAndProvenance(t *testing.T) {
 	}
 	defer s.Close()
 	seedValuationFixture(t, s)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := canonicalSnapshotTime(time.Now().UTC())
 	if _, err = s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-second", "Second Portfolio", "MYR", now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "instrument-second", "SECOND", "USD", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-second", "instrument-second", now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, "lot-second", "portfolio-second", "instrument-second", "7", "USD", now, now); err != nil {
