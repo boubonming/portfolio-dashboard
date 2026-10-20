@@ -134,6 +134,7 @@ func TestAuthHashTemplateAndDocumentationStayLiteralAndSecretFree(t *testing.T) 
 		if realBcrypt.MatchString(text) {
 			t.Errorf("%s contains a real-looking bcrypt hash", name)
 		}
+		normalizedText := strings.Join(strings.Fields(text), " ")
 		for _, phrase := range []string{
 			"interactively",
 			"after the first colon",
@@ -141,7 +142,8 @@ func TestAuthHashTemplateAndDocumentationStayLiteralAndSecretFree(t *testing.T) 
 			"single quotes",
 			"Never paste the hash or plaintext password into chat",
 		} {
-			if !strings.Contains(text, phrase) {
+			normalizedPhrase := strings.Join(strings.Fields(phrase), " ")
+			if !strings.Contains(normalizedText, normalizedPhrase) {
 				t.Errorf("%s is missing the credential-safety instruction %q", name, phrase)
 			}
 		}
