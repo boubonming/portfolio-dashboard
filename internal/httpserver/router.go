@@ -90,8 +90,8 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 }
 
 // privatePathGuard runs before ServeMux. ServeMux canonicalizes paths that
-// contain dot segments by issuing a redirect, which would bypass the
-// snapshot endpoint's generic-target validation and disclose a route shape.
+// contain dot segments by issuing a redirect, which would bypass endpoint
+// validation and disclose a route shape.
 func privatePathGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) || (holdingNamespacePath(r.URL.EscapedPath()) && unsafeHoldingPath(r.URL.EscapedPath())) {
@@ -128,34 +128,38 @@ func unsafeSnapshotPath(escapedPath string) bool {
 }
 
 func holdingNamespacePath(escapedPath string) bool {
-	parts := strings.Split(strings.TrimPrefix(escapedPath, "/"), "/")
-	if len(parts) >= 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[4] == "holdings" {
-		// The portfolio thesis API owns /holdings/{id}/thesis; leave that
-		// established namespace to its own route validation.
-		if len(parts) >= 7 && parts[6] == "thesis" {
-			return false
-		}
-		return true
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		decodedPath = escapedPath
 	}
-	return strings.Contains(strings.ToLower(escapedPath), "/holdings%")
+	for _, candidate := range []string{path.Clean(escapedPath), path.Clean(decodedPath)} {
+		parts := strings.Split(strings.TrimPrefix(candidate, "/"), "/")
+		if holdingMutationShape(parts) {
+			return true
+		}
+	}
+	return false
 }
 
 func unsafeHoldingPath(escapedPath string) bool {
-	if strings.Contains(escapedPath, "%") || strings.Contains(escapedPath, "//") {
+	if strings.Contains(escapedPath, "%") || escapedPath != path.Clean(escapedPath) {
+		return true
+	}
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil || decodedPath != escapedPath || strings.HasSuffix(escapedPath, "/") {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(escapedPath, "/"), "/")
-	for _, part := range parts {
-		if part == "." || part == ".." || part == "" {
-			return true
-		}
+	return holdingMutationShape(parts) && len(parts) != 5 && len(parts) != 6
+}
+
+func holdingMutationShape(parts []string) bool {
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "portfolios" || parts[3] == "" || parts[4] != "holdings" {
+		return false
 	}
-	for index, part := range parts {
-		if part == "holdings" && len(parts) != index+1 && len(parts) != index+2 {
-			return true
-		}
-	}
-	return strings.HasSuffix(escapedPath, "/")
+	// The portfolio thesis API owns /holdings/{id}/thesis; leave that
+	// established namespace to its own route validation.
+	return len(parts) < 7 || parts[6] != "thesis"
 }
 
 func portfolioCSRF(authenticator *auth.Authenticator, next http.Handler) http.Handler {
