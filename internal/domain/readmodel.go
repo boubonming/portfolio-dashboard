@@ -82,5 +82,4 @@ type HoldingView struct {
 	AcquisitionDate        *string   `json:"acquisition_date,omitempty"`
 	MissingBroker          bool      `json:"missing_broker"`
 	MissingAcquisitionDate bool      `json:"missing_acquisition_date"`
-	SourceRow              int       `json:"source_row,omitempty"`
 }

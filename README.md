@@ -70,57 +70,22 @@ in single quotes in `.env`, for example
 paste the hash or plaintext password into chat, and never commit either one.
 
 The optional least-privilege machine identity is an external Hermes bearer
-identity, not an embedded runtime. Configure all five settings together:
+identity, not an embedded runtime. Configure all six settings together:
 `PORTFOLIO_MACHINE_PRINCIPAL_ID` (stable non-secret audit identity),
 `PORTFOLIO_MACHINE_PORTFOLIO_ID` (bound portfolio),
 `PORTFOLIO_MACHINE_BEARER_SECRET` (independent random printable secret),
-`PORTFOLIO_MACHINE_PORTFOLIO_READ` (scoped snapshot/context/read grant), and
+`PORTFOLIO_MACHINE_PORTFOLIO_READ` (scoped snapshot/context/read grant),
 `PORTFOLIO_MACHINE_REVIEWS_WRITE` (immutable advisory review submission
-grant). The fail-closed disabled state has the three identity/secret values
-blank and both grants `false`; enabling normal Hermes review generation
-requires all three values plus both grants `true`. A partial configuration,
+ grant), and `PORTFOLIO_MACHINE_HOLDINGS_WRITE` (independent holding
+ create/archive grant). The fail-closed disabled state has the three
+ identity/secret values blank and all three grants `false`; enabling a
+ capability requires its explicit grant. A partial configuration,
 invalid grant, or bearer secret shorter than 32 printable random bytes fails
 closed. The bearer secret is never written to SQLite, logs, URLs, frontend
 assets, or diagnostics; only the non-secret principal binding is registered in
 the database. This identity can read the bound portfolio and submit immutable
 advisory reviews, but cannot edit holdings or trade. Market-provider settings
 are optional and independent of this machine identity.
-
-## Non-mutating import preview
-
-Preview the authoritative note without changing the note or SQLite:
-
-```sh
-go run ./cmd/portfolio-dashboard import-preview \
-  -input /path/to/Portfolio.md > preview.json
-```
-
-The command writes only JSON to stdout. It preserves source symbols, decimal strings, currencies, cost fields, raw source rows and provenance. Aggregate NVDA and INTC rows are classified and excluded from included lots; missing fields and unsupported rows are reported explicitly. Run it repeatedly to obtain the same deterministic output for an unchanged source. Do not commit a preview containing private holdings values.
-
-## Approved transactional import
-
-Applying an import is a separate, explicit operation. First inspect the preview and verify its `source_sha256` and reconciliation summary. Then pass that exact hash and the explicit approval flag:
-
-```sh
-go run ./cmd/portfolio-dashboard import-apply \
-  -input /path/to/Portfolio.md \
-  -db /path/to/portfolio-dashboard.sqlite \
-  -expected-sha256 941a742487ba9ec830192a4efea3b54435086af97844c0c1d00ab63a83aa9a27 \
-  -approve
-```
-
-Apply re-runs the parser and fails closed before any database write when approval is absent, the source hash differs, unsupported rows exist, the approved 35/33/2/31 reconciliation counts differ, or a required symbol, currency or decimal invariant is invalid. The initial import stores MYR as the reporting currency, retains original instrument currencies, keeps each of the 33 included source lots (including separate duplicate-symbol lots), and records the two aggregate rows as excluded import items. Missing broker and acquisition/opening dates remain anomalies; they are not silently invented.
-
-The import is one SQLite transaction. The source hash and source row are retained as provenance, schema uniqueness constraints prevent duplicate runs/items/lots/audit events, and re-applying the same approved hash returns `already_applied` without writing duplicates. A different already-applied hash is rejected; obtain and review a new preview before explicitly approving a replacement workflow. The Obsidian note is never rewritten by these commands.
-
-Use the read-only status command for aggregate inspection without dumping private lot values:
-
-```sh
-go run ./cmd/portfolio-dashboard import-status \
-  -db /path/to/portfolio-dashboard.sqlite
-```
-
-Status reports portfolio, instrument, lot, import-item and audit-event counts, currencies, source hash and import timestamp. It does not include quantities, cost values or source-row text.
 
 ## Phase B: dated observations and immutable snapshots
 
@@ -175,8 +140,7 @@ go run ./cmd/portfolio-dashboard snapshot-show -db /path/to/portfolio-dashboard.
   -snapshot SNAPSHOT_ID
 ```
 
-Use `-include-lots` on `snapshot-show` only when explicitly required. A snapshot
-binds the imported lot/source hashes, selected quote and FX IDs, reporting
+Use `-include-lots` on `snapshot-show` only when explicitly required. A snapshot binds the selected quote and FX IDs, canonical holding state,
 currency, calculation version, UTC creation/as-of timestamps and presentation
 timezone metadata (`Asia/Singapore`). Identical calculation inputs and version
 return the existing immutable snapshot; a new calculation version receives a

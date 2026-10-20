@@ -32,7 +32,7 @@ func apiFixture(t *testing.T) *store.Store {
 	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-api", "FIX", "Fixture instrument", "USD", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,source_row,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "lot-api", "portfolio-api", "instrument-api", "0.125", "1.20", "0.15", "USD", 1, "fixture#row=1", "fixture-hash", now); err != nil {
+	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?,?)`, "lot-api", "portfolio-api", "instrument-api", "0.125", "1.20", "0.15", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.AddQuote(context.Background(), store.QuoteInput{InstrumentID: "instrument-api", Price: "123.4500", Currency: "USD", Source: "fixture", MarketAt: now, Basis: "close", Provenance: "test"}); err != nil {
@@ -203,14 +203,12 @@ func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing
 			instrumentIndex = 2
 		}
 		accountID := any(nil)
-		if index == 1 {
-			accountID = "account-other"
-		}
-		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,source_row,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, fmt.Sprintf("lot-33-%02d", index), "portfolio-33", fmt.Sprintf("instrument-33-%02d", instrumentIndex), accountID, "1", "MYR", index, fmt.Sprintf("portfolio-33#row=%d", index), fmt.Sprintf("portfolio-33-hash-%02d", index), now); err != nil {
+
+		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, fmt.Sprintf("lot-33-%02d", index), "portfolio-33", fmt.Sprintf("instrument-33-%02d", instrumentIndex), accountID, "1", "MYR", now, now); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,source_row,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, "lot-other", "portfolio-other", "instrument-leak", "account-other", "99", "MYR", 1, "portfolio-other#row=1", "portfolio-other-hash", now); err != nil {
+	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-other", "portfolio-other", "instrument-leak", "account-other", "99", "MYR", now, now); err != nil {
 		t.Fatal(err)
 	}
 	for index := 1; index <= 31; index++ {

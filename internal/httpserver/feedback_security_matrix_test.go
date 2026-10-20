@@ -109,7 +109,7 @@ func TestFeedbackHTTPRealForeignReviewIsNotVisibleThroughOwnedPortfolio(t *testi
 	if _, err := fixture.database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-foreign", "Foreign", "MYR", nowText, nowText); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,source_row,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, "lot-foreign", "portfolio-foreign", "instrument-api", "1", "1", "1", "USD", 1, nowText); err != nil {
+	if _, err := fixture.database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?,?)`, "lot-foreign", "portfolio-foreign", "instrument-api", "1", "1", "1", "USD", nowText, nowText); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.database.AddQuote(context.Background(), store.QuoteInput{InstrumentID: "instrument-api", Price: "123.45", Currency: "USD", Source: "foreign-fixture", MarketAt: nowText, Basis: "close", Provenance: "foreign test"}); err != nil {

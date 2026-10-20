@@ -28,7 +28,7 @@ func TestPortfolioOverviewDoesNotLeakCrossPortfolioAccount(t *testing.T) {
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "instrument-owner", "OWNER", "MYR", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,created_at) VALUES(?,?,?,?,?,?,?)`, "lot-owner", "portfolio-owner", "instrument-owner", "account-broker", "1", "MYR", now); err != nil {
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,account_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-owner", "portfolio-owner", "instrument-owner", nil, "1", "MYR", now, now); err != nil {
 		t.Fatal(err)
 	}
 	view, err := s.PortfolioOverview(ctx, "portfolio-owner", "MYR")
@@ -55,7 +55,7 @@ func TestPortfolioOverviewExposesDerivedCostBasisAndSourceUnitCost(t *testing.T)
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-cost", "COST", "Cost instrument", "MYR", nowText); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,currency,created_at) VALUES(?,?,?,?,?,?,?)`, "lot-cost", "portfolio-cost", "instrument-cost", "2", "5", "MYR", nowText); err != nil {
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-cost", "portfolio-cost", "instrument-cost", "2", "5", "MYR", nowText, nowText); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AddQuote(ctx, QuoteInput{ID: "quote-cost", InstrumentID: "instrument-cost", Currency: "MYR", Price: "10", Source: "fixture", MarketAt: now.Add(-time.Hour).Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {

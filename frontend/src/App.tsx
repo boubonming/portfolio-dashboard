@@ -29,7 +29,6 @@ export type Holding = {
   acquisition_date?: string
   missing_broker: boolean
   missing_acquisition_date: boolean
-  source_row?: number
 }
 
 export type AllocationCoverage = {

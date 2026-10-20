@@ -103,7 +103,7 @@ func TestSnapshotHoldingLimitBoundaryAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	for index := 0; index < maxSnapshotHoldings; index++ {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at) VALUES(?,?,?,?,?,?)`, fmt.Sprintf("lot-%05d", index), "portfolio-limit", "instrument-limit", "1", "MYR", now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, fmt.Sprintf("lot-%05d", index), "portfolio-limit", "instrument-limit", "1", "MYR", now, now); err != nil {
 			tx.Rollback()
 			t.Fatal(err)
 		}
@@ -118,7 +118,7 @@ func TestSnapshotHoldingLimitBoundaryAndRollback(t *testing.T) {
 	if status.SnapshotID == "" {
 		t.Fatal("boundary snapshot has no ID")
 	}
-	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at) VALUES(?,?,?,?,?,?)`, "lot-10000", "portfolio-limit", "instrument-limit", "1", "MYR", now); err != nil {
+	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, "lot-10000", "portfolio-limit", "instrument-limit", "1", "MYR", now, now); err != nil {
 		t.Fatal(err)
 	}
 	_, err = database.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "portfolio-limit", ReportingCurrency: "MYR", CalculationVersion: "limit.v2", AsOf: time.Now().UTC(), MaxAge: time.Hour})

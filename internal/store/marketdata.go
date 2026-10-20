@@ -391,14 +391,17 @@ func (s *Store) persistFXTx(ctx context.Context, tx *sql.Tx, fx domain.FXRate, p
 
 func (s *Store) loadValuationInput(ctx context.Context, portfolioID, reportingCurrency string, asOf time.Time, maxAge time.Duration) (domain.ValuationInput, error) {
 	input := domain.ValuationInput{ReportingCurrency: reportingCurrency, AsOf: asOf, MaxAge: maxAge, Lots: []domain.ValuationLot{}}
+	if err := s.DB.QueryRowContext(ctx, "SELECT holdings_revision FROM portfolios WHERE id=?", portfolioID).Scan(&input.HoldingsRevision); err != nil {
+		return input, err
+	}
 	var lotCount int
-	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM lots WHERE portfolio_id=?", portfolioID).Scan(&lotCount); err != nil {
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM lots WHERE portfolio_id=? AND lifecycle='active'", portfolioID).Scan(&lotCount); err != nil {
 		return input, err
 	}
 	if lotCount > maxSnapshotHoldings {
 		return input, ErrSnapshotCorrupt
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT l.id,COALESCE((SELECT id FROM import_runs ir WHERE ir.source_sha256=l.source_sha256 AND ir.status='applied' ORDER BY ir.created_at DESC LIMIT 1),''),l.source_sha256,l.instrument_id,i.symbol,l.currency,l.quantity,l.unit_cost,l.cost_basis FROM lots l JOIN instruments i ON i.id=l.instrument_id WHERE l.portfolio_id = ? ORDER BY l.id`, portfolioID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT l.id,l.instrument_id,i.symbol,l.currency,l.quantity,l.unit_cost,l.cost_basis FROM lots l JOIN instruments i ON i.id=l.instrument_id WHERE l.portfolio_id = ? AND l.lifecycle='active' ORDER BY l.id`, portfolioID)
 	if err != nil {
 		return input, err
 	}
@@ -406,7 +409,7 @@ func (s *Store) loadValuationInput(ctx context.Context, portfolioID, reportingCu
 	for rows.Next() {
 		var lot domain.ValuationLot
 		var unit, cost sql.NullString
-		if err := rows.Scan(&lot.ID, &lot.ImportRunID, &lot.SourceSHA256, &lot.InstrumentID, &lot.Symbol, &lot.Currency, &lot.Quantity, &unit, &cost); err != nil {
+		if err := rows.Scan(&lot.ID, &lot.InstrumentID, &lot.Symbol, &lot.Currency, &lot.Quantity, &unit, &cost); err != nil {
 			return input, err
 		}
 		if unit.Valid {

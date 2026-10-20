@@ -29,7 +29,7 @@ var exportHeaders = []string{
 	"snapshot_state", "snapshot_id", "calculation_version", "snapshot_as_of", "snapshot_created_at", "snapshot_complete",
 	"lot_id", "symbol", "name", "description", "quantity", "source_currency", "unit_cost", "cost_basis",
 	"latest_price", "latest_value", "reporting_value", "quote_source", "market_timestamp", "freshness_state", "freshness_age",
-	"broker", "acquisition_date", "source_row", "missing_broker", "missing_acquisition_date", "data_quality_flags",
+	"broker", "acquisition_date", "missing_broker", "missing_acquisition_date", "data_quality_flags",
 }
 
 func portfolioExport(database *store.Store) http.HandlerFunc {
@@ -133,16 +133,9 @@ func exportHoldingRow(view domain.PortfolioOverview, holding domain.HoldingView)
 		holding.Quantity, exportText(holding.Currency), optionalDecimal(holding.UnitCost), optionalDecimal(holding.CostBasis),
 		optionalDecimal(holding.LatestPrice), optionalDecimal(holding.LatestValue), optionalDecimal(holding.ReportingValue),
 		exportText(holding.QuoteSource), exportTimestamp(holding.Freshness.MarketAt), exportText(holding.Freshness.Status), exportText(holding.Freshness.Age),
-		optionalText(holding.Broker), optionalDate(holding.AcquisitionDate), optionalSourceRow(holding.SourceRow),
+		optionalText(holding.Broker), optionalDate(holding.AcquisitionDate),
 		fmt.Sprintf("%t", holding.MissingBroker), fmt.Sprintf("%t", holding.MissingAcquisitionDate), exportText(strings.Join(holding.DataQuality, "|")),
 	}
-}
-
-func optionalSourceRow(value int) string {
-	if value <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("%d", value)
 }
 
 func optionalDecimal(value *string) string {

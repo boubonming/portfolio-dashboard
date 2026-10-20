@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -63,6 +62,14 @@ CREATE UNIQUE INDEX idx_activity_source_portfolio ON activity_events(source_audi
 CREATE INDEX idx_activity_portfolio_order ON activity_events(portfolio_id, sort_time DESC, id DESC);`
 }
 
+func seedObservationInstrument(t *testing.T, s *Store) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "instrument-observation", "SYMA", "USD", now); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMigrateRejectsLedgeredActivitySchemaCorruption(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -107,9 +114,7 @@ func TestObservationIDCollisionRequiresExactImmutableReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err = s.Apply(ctx, approvedPreview(strings.Repeat("c", 64)), "collision.md", strings.Repeat("c", 64), "MYR"); err != nil {
-		t.Fatal(err)
-	}
+	seedObservationInstrument(t, s)
 	var instrumentID string
 	if err = s.DB.QueryRow(`SELECT id FROM instruments WHERE symbol='SYMA' AND currency='USD'`).Scan(&instrumentID); err != nil {
 		t.Fatal(err)
@@ -145,9 +150,7 @@ func TestObservationTimestampsShareEpochBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err = s.Apply(ctx, approvedPreview(strings.Repeat("t", 64)), "timestamps.md", strings.Repeat("t", 64), "MYR"); err != nil {
-		t.Fatal(err)
-	}
+	seedObservationInstrument(t, s)
 	var instrumentID string
 	if err = s.DB.QueryRow(`SELECT id FROM instruments WHERE symbol='SYMA' AND currency='USD'`).Scan(&instrumentID); err != nil {
 		t.Fatal(err)

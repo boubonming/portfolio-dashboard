@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,49 @@ import (
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 )
 
+type valuationFixtureLot struct {
+	Symbol   string
+	Currency string
+	Included bool
+}
+
+type valuationFixture struct {
+	Lots []valuationFixtureLot
+}
+
+func seedValuationFixture(t *testing.T, s *Store) valuationFixture {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	fixture := valuationFixture{Lots: make([]valuationFixtureLot, 0, 33)}
+	for index := 1; index <= 33; index++ {
+		symbol := fmt.Sprintf("SYM%02d", index)
+		if index == 1 {
+			symbol = "SYMA"
+		}
+		if index == 2 {
+			symbol = "SYMB"
+		}
+		if index == 32 {
+			symbol = "SYMA"
+		}
+		if index == 33 {
+			symbol = "SYMB"
+		}
+		instrumentID := fmt.Sprintf("instrument-fixture-%02d", index)
+		if index > 31 {
+			instrumentID = fmt.Sprintf("instrument-fixture-%02d", index-31)
+		} else if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, instrumentID, symbol, "USD", now); err != nil {
+			t.Fatal(err)
+		}
+		lotID := fmt.Sprintf("lot-fixture-%02d", index)
+		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, lotID, defaultPortfolioID, instrumentID, "1", "USD", now, now); err != nil {
+			t.Fatal(err)
+		}
+		fixture.Lots = append(fixture.Lots, valuationFixtureLot{Symbol: symbol, Currency: "USD", Included: true})
+	}
+	return fixture
+}
+
 func TestManualObservationsValidateAppendAndAudit(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "portfolio.sqlite"))
@@ -18,10 +62,7 @@ func TestManualObservationsValidateAppendAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	preview := approvedPreview(strings.Repeat("e", 64))
-	if _, err = s.Apply(ctx, preview, "fixture.md", preview.SourceSHA256, "MYR"); err != nil {
-		t.Fatal(err)
-	}
+	seedValuationFixture(t, s)
 	at := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
 	first, err := s.AddQuote(ctx, QuoteInput{Symbol: "SYMA", Currency: "USD", Price: "1.25", Source: "manual", MarketAt: at, Basis: "close", Provenance: "synthetic fixture"})
 	if err != nil {
@@ -68,12 +109,7 @@ func TestSnapshotIsolatesPortfolioLotsAndProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	firstHash := strings.Repeat("h", 64)
-	preview := approvedPreview(firstHash)
-	if _, err = s.Apply(ctx, preview, "first.md", firstHash, "MYR"); err != nil {
-		t.Fatal(err)
-	}
-	secondHash := strings.Repeat("i", 64)
+	seedValuationFixture(t, s)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err = s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-second", "Second Portfolio", "MYR", now, now); err != nil {
 		t.Fatal(err)
@@ -81,7 +117,7 @@ func TestSnapshotIsolatesPortfolioLotsAndProvenance(t *testing.T) {
 	if _, err = s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "instrument-second", "SECOND", "USD", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,source_ref,source_sha256,created_at) VALUES(?,?,?,?,?,?,?,?)`, "lot-second", "portfolio-second", "instrument-second", "7", "USD", "second.md#row=1", secondHash, now); err != nil {
+	if _, err = s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, "lot-second", "portfolio-second", "instrument-second", "7", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}
 	secondQuote, err := s.AddQuote(ctx, QuoteInput{InstrumentID: "instrument-second", Currency: "USD", Price: "3.25", Source: "manual", MarketAt: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano), Basis: "close", Provenance: "second-only fixture"})
@@ -119,11 +155,11 @@ func TestSnapshotIsolatesPortfolioLotsAndProvenance(t *testing.T) {
 	if len(firstSymbols) != 31 || firstSymbolCounts["SYMA"] != 2 || firstSymbolCounts["SYMB"] != 2 {
 		t.Fatalf("first portfolio symbol fixture = %d symbols, counts=%v", len(firstSymbols), firstSymbolCounts)
 	}
-	if firstPayload.Input.Lots[0].SourceSHA256 != firstHash || secondPayload.Input.Lots[0].ID != "lot-second" || secondPayload.Input.Lots[0].SourceSHA256 != secondHash {
-		t.Fatalf("portfolio payloads leaked or lost provenance: first=%+v second=%+v", firstPayload.Input.Lots[0], secondPayload.Input.Lots[0])
+	if secondPayload.Input.Lots[0].ID != "lot-second" {
+		t.Fatalf("portfolio payloads leaked: first=%+v second=%+v", firstPayload.Input.Lots[0], secondPayload.Input.Lots[0])
 	}
 	for _, lot := range firstPayload.Input.Lots {
-		if lot.ID == "lot-second" || lot.SourceSHA256 == secondHash {
+		if lot.ID == "lot-second" {
 			t.Fatalf("second portfolio lot leaked into first snapshot: %+v", lot)
 		}
 	}
@@ -152,10 +188,7 @@ func TestSnapshotCompleteAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	preview := approvedPreview(strings.Repeat("f", 64))
-	if _, err = s.Apply(ctx, preview, "fixture.md", preview.SourceSHA256, "MYR"); err != nil {
-		t.Fatal(err)
-	}
+	preview := seedValuationFixture(t, s)
 	at := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
 	seen := map[string]bool{}
 	for _, lot := range preview.Lots {
@@ -218,10 +251,7 @@ func TestSnapshotMissingDependencyIsIncomplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	preview := approvedPreview(strings.Repeat("g", 64))
-	if _, err = s.Apply(ctx, preview, "fixture.md", preview.SourceSHA256, "MYR"); err != nil {
-		t.Fatal(err)
-	}
+	seedValuationFixture(t, s)
 	at := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
 	if _, err = s.AddQuote(ctx, QuoteInput{Symbol: "SYMA", Currency: "USD", Price: "2", Source: "manual", MarketAt: at, Basis: "close", Provenance: "synthetic"}); err != nil {
 		t.Fatal(err)

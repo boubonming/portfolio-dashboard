@@ -28,7 +28,7 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 	if _, err = s.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-semantic", "SEM", "Semantic", "MYR", nowText); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,cost_basis,created_at) VALUES(?,?,?,?,?,?,?)`, "lot-semantic", "portfolio-semantic", "instrument-semantic", "1", "MYR", "1", nowText); err != nil {
+	if _, err = s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,cost_basis,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-semantic", "portfolio-semantic", "instrument-semantic", "1", "MYR", "1", nowText, nowText); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.AddQuote(ctx, QuoteInput{InstrumentID: "instrument-semantic", Currency: "MYR", Price: "2", Source: "fixture", MarketAt: now.Add(-10 * time.Minute).Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {

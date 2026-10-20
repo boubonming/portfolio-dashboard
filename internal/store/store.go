@@ -18,6 +18,8 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
+const defaultPortfolioID = "portfolio-default"
+
 type Store struct {
 	DB              *sql.DB
 	cursorKey       []byte

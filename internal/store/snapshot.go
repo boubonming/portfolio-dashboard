@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
+
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
@@ -28,7 +28,6 @@ type snapshotPayload struct {
 	CreatedAt          string                `json:"created_at"`
 	AsOf               string                `json:"as_of"`
 	MaxAge             time.Duration         `json:"max_age"`
-	SourceHashes       []string              `json:"source_hashes"`
 	Input              domain.ValuationInput `json:"input"`
 	Valuation          domain.Valuation      `json:"valuation"`
 }
@@ -82,16 +81,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 	inputHash := hex.EncodeToString(digest[:])
 	snapshotID := deterministicID("snapshot", request.PortfolioID, request.CalculationVersion, inputHash)
 	createdAt := canonicalSnapshotTime(time.Now().UTC())
-	sourceHashes := []string{}
-	seenSource := map[string]bool{}
-	for _, lot := range input.Lots {
-		if lot.SourceSHA256 != "" && !seenSource[lot.SourceSHA256] {
-			sourceHashes = append(sourceHashes, lot.SourceSHA256)
-			seenSource[lot.SourceSHA256] = true
-		}
-	}
-	sort.Strings(sourceHashes)
-	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: canonicalSnapshotTime(request.AsOf), MaxAge: request.MaxAge, SourceHashes: sourceHashes, Input: input, Valuation: valuation}
+	payload := snapshotPayload{SnapshotID: snapshotID, PortfolioID: request.PortfolioID, CalculationVersion: request.CalculationVersion, CreatedAt: createdAt, AsOf: canonicalSnapshotTime(request.AsOf), MaxAge: request.MaxAge, Input: input, Valuation: valuation}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return domain.SnapshotStatus{}, err

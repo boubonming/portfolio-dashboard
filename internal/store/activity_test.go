@@ -39,10 +39,10 @@ func TestActivityIsPortfolioScopedAndPaginatesDeterministically(t *testing.T) {
 	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "activity-instrument", "ACT", "USD", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at) VALUES(?,?,?,?,?,?)`, "activity-lot-a", "activity-a", "activity-instrument", "1", "USD", now); err != nil {
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, "activity-lot-a", "activity-a", "activity-instrument", "1", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at) VALUES(?,?,?,?,?,?)`, "activity-lot-b", "activity-b", "activity-instrument", "1", "USD", now); err != nil {
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, "activity-lot-b", "activity-b", "activity-instrument", "1", "USD", now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AddQuote(ctx, QuoteInput{ID: "activity-quote", InstrumentID: "activity-instrument", Currency: "USD", Price: "1", Source: "fixture", MarketAt: now, Basis: "close", Provenance: "fixture"}); err != nil {
