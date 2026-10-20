@@ -424,7 +424,7 @@ func TestNamedVolumeBackupRestoreBlocksAreSelfContained(t *testing.T) {
 			"docker compose start portfolio-dashboard",
 			"--user 65532:65532",
 		} {
-			if ! strings.Contains(normalized, phrase) {
+			if !strings.Contains(normalized, phrase) {
 				t.Errorf("%s block is missing %q", name, phrase)
 			}
 		}
