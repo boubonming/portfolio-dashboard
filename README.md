@@ -55,6 +55,20 @@ set `PORTFOLIO_ENV=development PORTFOLIO_COOKIE_SECURE=false`; there are no
 default credentials or secrets. CSRF tokens are returned by session bootstrap,
 kept in frontend memory, and required on unsafe same-origin API requests.
 
+Generate the bcrypt password hash interactively; never put the plaintext
+password on the command line:
+
+```sh
+htpasswd -nBC 12 portfolio-admin
+```
+
+Enter and confirm the password at the prompts. The output includes
+`portfolio-admin:` followed by the bcrypt value. Copy only the bcrypt portion
+after the first colon, not `portfolio-admin:`. Store the complete bcrypt value
+in single quotes in `.env`, for example
+`PORTFOLIO_AUTH_PASSWORD_HASH='REPLACE_WITH_COMPLETE_BCRYPT_VALUE'`. Never
+paste the hash or plaintext password into chat, and never commit either one.
+
 The optional least-privilege machine identity is an external Hermes bearer
 identity, not an embedded runtime. Configure all five settings together:
 `PORTFOLIO_MACHINE_PRINCIPAL_ID` (stable non-secret audit identity),
@@ -239,4 +253,4 @@ rate missing/stale; it never presents a partial total as complete.
 
 ## Private OCI deployment package
 
-The production packaging source is documented in [`docs/private-deployment.md`](docs/private-deployment.md). It includes a digest-pinned multi-stage `Dockerfile`, non-root/read-only runtime settings, the restricted `/healthz` healthcheck command, and the root [`compose.yaml`](compose.yaml) plus [`.env.example`](.env.example) deployment samples. Copy `.env.example` to `.env`, set mode `0600`, and run `docker compose -f compose.yaml ...`; Compose reads the root `.env` automatically. Compose uses the repository-owned `ghcr.io/boubonming/portfolio-dashboard:main` image literally. Ordinary `docker compose up -d` uses the locally cached `:main` image when present; updates are deliberate, with `docker compose pull` followed by `docker compose up -d`. The `main` tag is mutable. The GitHub Actions workflow builds both Linux amd64 and arm64 on pull requests without publishing, and merged-main publication updates `main` and also publishes the full-SHA tag for the same OCI index with provenance and SBOM attestations. The deploy template [`deploy/compose.private.example.yml`](deploy/compose.private.example.yml) and compatibility env template remain available for existing links.
+The production packaging source is documented in [`docs/private-deployment.md`](docs/private-deployment.md). It includes a digest-pinned multi-stage `Dockerfile`, non-root/read-only runtime settings, the restricted `/healthz` healthcheck command, and the root [`compose.yaml`](compose.yaml) plus [`.env.example`](.env.example) deployment samples. Compose creates and manages the named `portfolio-data` volume automatically, so no host data directory or ownership setup is required; the database is `/data/portfolio-dashboard.sqlite` inside the service. Copy `.env.example` to `.env`, set mode `0600`, and run `docker compose -f compose.yaml ...`; Compose reads the root `.env` automatically. Compose uses the repository-owned `ghcr.io/boubonming/portfolio-dashboard:main` image literally. Ordinary `docker compose up -d` uses the locally cached `:main` image when present; updates are deliberate, with `docker compose pull` followed by `docker compose up -d`. The `main` tag is mutable. The GitHub Actions workflow builds both Linux amd64 and arm64 on pull requests without publishing, and merged-main publication updates `main` and also publishes the full-SHA tag for the same OCI index with provenance and SBOM attestations. The deploy template [`deploy/compose.private.example.yml`](deploy/compose.private.example.yml) and compatibility env template remain available for existing links.

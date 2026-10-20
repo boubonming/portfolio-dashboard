@@ -1,7 +1,7 @@
 services:
   portfolio-dashboard:
     image: ghcr.io/boubonming/portfolio-dashboard:main
-    user: "${PORTFOLIO_CONTAINER_UID:-65532}:${PORTFOLIO_CONTAINER_GID:-65532}"
+    user: "65532:65532"
     restart: unless-stopped
     read_only: true
     security_opt:
@@ -13,7 +13,7 @@ services:
     ports:
       - "127.0.0.1:${PORTFOLIO_HOST_PORT:-8080}:8080"
     volumes:
-      - "${PORTFOLIO_DATA_DIR:?set PORTFOLIO_DATA_DIR to an operator-owned directory}:/data"
+      - "portfolio-data:/data"
     env_file:
       - "../.env"
     environment:
@@ -36,3 +36,6 @@ services:
       timeout: 3s
       start_period: 10s
       retries: 3
+
+volumes:
+  portfolio-data:

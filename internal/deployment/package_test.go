@@ -156,6 +156,9 @@ func TestDockerfileProductionInvariants(t *testing.T) {
 		"ENV CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}",
 		"RUN go mod download",
 		"RUN go build -trimpath -buildvcs=false -ldflags='-s -w' -o /out/portfolio-dashboard ./cmd/portfolio-dashboard",
+		"RUN install -d -m 0700 /out/data",
+		"COPY --from=server-build --chown=65532:65532 /out/data /data",
+		"VOLUME [\"/data\"]",
 		"USER 65532:65532",
 		"EXPOSE 8080",
 		"HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD [\"/app/portfolio-dashboard\", \"healthcheck\"]",
@@ -223,8 +226,8 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 	if _, ok := service["pull_policy"]; ok {
 		t.Error("service.pull_policy must be absent so ordinary up can use a cached image")
 	}
-	if yamlString(t, service["user"], "service.user") != "${PORTFOLIO_CONTAINER_UID:-65532}:${PORTFOLIO_CONTAINER_GID:-65532}" {
-		t.Error("service user does not use the documented numeric UID/GID interpolation")
+	if yamlString(t, service["user"], "service.user") != "65532:65532" {
+		t.Error("service user does not use the fixed least-privilege UID/GID")
 	}
 	if !yamlBool(t, service["read_only"], "service.read_only") {
 		t.Error("service is not read-only")
@@ -234,7 +237,14 @@ func TestComposeOperatorInvariantsAreStructured(t *testing.T) {
 	requireStrings(t, stringList(t, service["cap_drop"], "service.cap_drop"), "ALL")
 	requireStrings(t, stringList(t, service["tmpfs"], "service.tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=16m")
 	requireStrings(t, stringList(t, service["ports"], "service.ports"), "127.0.0.1:${PORTFOLIO_HOST_PORT:-8080}:8080")
-	requireStrings(t, stringList(t, service["volumes"], "service.volumes"), "${PORTFOLIO_DATA_DIR:?set PORTFOLIO_DATA_DIR to an operator-owned directory}:/data")
+	requireStrings(t, stringList(t, service["volumes"], "service.volumes"), "portfolio-data:/data")
+	volumes := yamlMap(t, document["volumes"], "volumes")
+	if len(volumes) != 1 {
+		t.Fatalf("top-level volumes = %#v, want exactly portfolio-data", volumes)
+	}
+	if _, ok := volumes["portfolio-data"]; !ok {
+		t.Fatal("top-level volumes is missing portfolio-data")
+	}
 	requireStrings(t, stringList(t, service["env_file"], "service.env_file"), ".env")
 	environment := yamlMap(t, service["environment"], "service.environment")
 	expectedEnvironment := map[string]string{
@@ -276,6 +286,18 @@ func TestTrackedComposeImagesHaveRunnableDefaults(t *testing.T) {
 		}
 		if _, ok := service["pull_policy"]; ok {
 			t.Errorf("%s defines pull_policy; ordinary up must not force a pull", name)
+		}
+		if yamlString(t, service["user"], name+".user") != "65532:65532" {
+			t.Errorf("%s does not pin the service to UID/GID 65532:65532", name)
+		}
+		if !reflect.DeepEqual(stringList(t, service["volumes"], name+".volumes"), []string{"portfolio-data:/data"}) {
+			t.Errorf("%s service.volumes is not the named portfolio-data volume", name)
+		}
+		volumes := yamlMap(t, document["volumes"], name+".volumes")
+		if len(volumes) != 1 {
+			t.Errorf("%s top-level volumes = %#v, want exactly portfolio-data", name, volumes)
+		} else if _, ok := volumes["portfolio-data"]; !ok {
+			t.Errorf("%s top-level volumes is missing portfolio-data", name)
 		}
 	}
 }
@@ -326,6 +348,116 @@ func TestImageOverrideIsAbsentFromDeploymentSurface(t *testing.T) {
 	}
 }
 
+func TestBindMountSettingsAreAbsentFromDeploymentSurface(t *testing.T) {
+	for _, name := range []string{
+		"compose.yaml",
+		"deploy/compose.private.example.yml",
+		".env.example",
+		"deploy/private.env.example",
+		"README.md",
+		"docs/private-deployment.md",
+	} {
+		content := repoFile(t, name)
+		for _, removed := range []string{"PORTFOLIO_DATA_DIR", "PORTFOLIO_CONTAINER_UID", "PORTFOLIO_CONTAINER_GID"} {
+			if strings.Contains(content, removed) {
+				t.Errorf("%s exposes removed bind-mount setting %s", name, removed)
+			}
+		}
+	}
+}
+
+func TestNamedVolumeDocumentationIsComplete(t *testing.T) {
+	for _, name := range []string{"README.md", "docs/private-deployment.md"} {
+		text := strings.Join(strings.Fields(repoFile(t, name)), " ")
+		for _, phrase := range []string{
+			"Compose creates and manages",
+			"no host data directory or ownership setup is required",
+			"/data/portfolio-dashboard.sqlite",
+			"docker compose pull",
+			"docker compose up -d",
+		} {
+			if !strings.Contains(text, phrase) {
+				t.Errorf("%s is missing deployment documentation phrase %q", name, phrase)
+			}
+		}
+	}
+	text := strings.Join(strings.Fields(repoFile(t, "docs/private-deployment.md")), " ")
+	for _, phrase := range []string{"docker inspect", "offline backup", "Restore offline"} {
+		if !strings.Contains(text, phrase) {
+			t.Errorf("docs/private-deployment.md is missing deployment documentation phrase %q", phrase)
+		}
+	}
+}
+
+func TestNamedVolumeBackupRestoreBlocksAreSelfContained(t *testing.T) {
+	documentation := repoFile(t, "docs/private-deployment.md")
+	blocks := regexp.MustCompile("(?ms)```sh\\s+(.*?)\\s+```").FindAllStringSubmatch(documentation, -1)
+	if len(blocks) == 0 {
+		t.Fatal("docs/private-deployment.md has no shell command blocks")
+	}
+
+	var backup, restore string
+	for _, match := range blocks {
+		block := match[1]
+		switch {
+		case strings.Contains(block, "BACKUP_FILE") && strings.Contains(block, "tar czf"):
+			backup = block
+		case strings.Contains(block, "BACKUP_FILE") && strings.Contains(block, "tar xzf"):
+			restore = block
+		}
+	}
+	if backup == "" || restore == "" {
+		t.Fatalf("could not identify independent backup and restore blocks")
+	}
+
+	for name, block := range map[string]string{"backup": backup, "restore": restore} {
+		normalized := strings.Join(strings.Fields(block), " ")
+		for _, phrase := range []string{
+			"set -eu",
+			"docker compose ps --all --quiet portfolio-dashboard",
+			"docker inspect \"${CONTAINER_ID}\"",
+			"eq .Destination \"/data\"",
+			"if [ -z \"${CONTAINER_ID}\" ]; then",
+			"if [ -z \"${VOLUME_NAME}\" ]; then",
+			"docker compose stop portfolio-dashboard",
+			"trap cleanup EXIT",
+			"docker compose start portfolio-dashboard",
+			"--user 65532:65532",
+		} {
+			if !strings.Contains(normalized, phrase) {
+				t.Errorf("%s block is missing %q", name, phrase)
+			}
+		}
+		volumeAssignment := strings.Index(block, "VOLUME_NAME=\"$(docker inspect")
+		volumeUse := strings.Index(block, "${VOLUME_NAME}")
+		if volumeAssignment < 0 || volumeUse < 0 || volumeAssignment > volumeUse {
+			t.Errorf("%s block uses VOLUME_NAME without defining it first", name)
+		}
+	}
+
+	backupText := strings.Join(strings.Fields(backup), " ")
+	for _, phrase := range []string{
+		"umask 077",
+		"chmod 700 \"${BACKUP_DIR}\"",
+		"tar czf - -C /data .",
+		"chmod 600 \"${TEMP_FILE}\"",
+	} {
+		if !strings.Contains(backupText, phrase) {
+			t.Errorf("backup block is missing %q", phrase)
+		}
+	}
+
+	restoreText := strings.Join(strings.Fields(restore), " ")
+	for _, phrase := range []string{
+		"rm -f /data/portfolio-dashboard.sqlite /data/portfolio-dashboard.sqlite-*",
+		"tar xzf - -C /data",
+	} {
+		if !strings.Contains(restoreText, phrase) {
+			t.Errorf("restore block is missing %q", phrase)
+		}
+	}
+}
+
 func TestRootEnvExampleIsTrackedAllowedAndMatchesCompatibilityTemplate(t *testing.T) {
 	root := repoFile(t, ".env.example")
 	compatibility := repoFile(t, "deploy/private.env.example")
@@ -333,9 +465,14 @@ func TestRootEnvExampleIsTrackedAllowedAndMatchesCompatibilityTemplate(t *testin
 		t.Fatal(".env.example diverges from deploy/private.env.example")
 	}
 
-	for _, name := range []string{"PORTFOLIO_PUBLIC_ORIGIN", "PORTFOLIO_AUTH_USERNAME", "PORTFOLIO_AUTH_PASSWORD_HASH", "PORTFOLIO_SESSION_SECRET", "PORTFOLIO_DATA_DIR"} {
+	for _, name := range []string{"PORTFOLIO_PUBLIC_ORIGIN", "PORTFOLIO_AUTH_USERNAME", "PORTFOLIO_AUTH_PASSWORD_HASH", "PORTFOLIO_SESSION_SECRET"} {
 		if !strings.Contains(root, name+"=") {
 			t.Errorf(".env.example is missing %s", name)
+		}
+	}
+	for _, removed := range []string{"PORTFOLIO_DATA_DIR", "PORTFOLIO_CONTAINER_UID", "PORTFOLIO_CONTAINER_GID"} {
+		if strings.Contains(root, removed) {
+			t.Errorf(".env.example contains removed setting %s", removed)
 		}
 	}
 	values := map[string]string{}
@@ -486,7 +623,7 @@ func TestPrivateEnvTemplateOptionalConfigurationIsDisabled(t *testing.T) {
 		}
 		values[name] = value
 	}
-	for _, name := range []string{"PORTFOLIO_DATA_DIR", "PORTFOLIO_CONTAINER_UID", "PORTFOLIO_CONTAINER_GID", "PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
+	for _, name := range []string{"PORTFOLIO_HOST_PORT", "PORTFOLIO_REPORTING_CURRENCY"} {
 		if _, ok := values[name]; !ok {
 			t.Errorf("missing Compose interpolation setting %s", name)
 		}
