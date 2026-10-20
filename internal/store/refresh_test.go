@@ -520,3 +520,38 @@ func TestRefreshUnmappedInstrumentCountedOnceAndNotRequested(t *testing.T) {
 		t.Fatalf("missing=%d calls=%v statuses=%+v", missing, client.calls, result.Providers)
 	}
 }
+
+func TestRefreshTargetsExcludeRemovedOnlyInstruments(t *testing.T) {
+	s := openRefreshFixture(t)
+	defer s.Close()
+	now := "2026-01-02T12:00:00.000000000Z"
+	for _, instrument := range []struct {
+		id, symbol string
+	}{
+		{"archived-only", "ARCHIVED"},
+		{"shared-instrument", "SHARED"},
+	} {
+		if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, instrument.id, instrument.symbol, "USD", now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES('refresh-portfolio',?,?)`, instrument.id, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key,lifecycle,removed_at,removed_by_category,removed_by_id) VALUES('archived-only-lot','refresh-portfolio','archived-only','1','USD',?,?, 'removed',?,'browser_user','local-owner')`, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key,lifecycle,removed_at,removed_by_category,removed_by_id) VALUES('shared-removed-lot','refresh-portfolio','shared-instrument','1','USD',?,?, 'removed',?,'browser_user','local-owner')`, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES('shared-active-lot','refresh-portfolio','shared-instrument','1','USD',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := s.refreshTargets(context.Background(), "refresh-portfolio")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 || targets[0].InstrumentID != "refresh-instrument" || targets[1].InstrumentID != "shared-instrument" {
+		t.Fatalf("targets=%+v", targets)
+	}
+}

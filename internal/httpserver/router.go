@@ -73,6 +73,9 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 		reviews := noStorePrivate(reviewRoutes(database, authenticator))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/reviews", reviews)
 		mux.Handle("/api/v1/portfolios/{portfolioId}/reviews/", reviews)
+		mutations := noStorePrivate(holdingMutationRoutes(database, authenticator))
+		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings", mutations)
+		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings/{holdingId}", mutations)
 	}
 	portfolio := http.Handler(portfolioRoutes(database))
 	if authenticator != nil {
@@ -87,11 +90,11 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 }
 
 // privatePathGuard runs before ServeMux. ServeMux canonicalizes paths that
-// contain dot segments by issuing a redirect, which would bypass the
-// snapshot endpoint's generic-target validation and disclose a route shape.
+// contain dot segments by issuing a redirect, which would bypass endpoint
+// validation and disclose a route shape.
 func privatePathGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) {
+		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) || (holdingNamespacePath(r.URL.EscapedPath()) && unsafeHoldingPath(r.URL.EscapedPath())) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Vary", "Cookie")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -122,6 +125,41 @@ func unsafeSnapshotPath(escapedPath string) bool {
 		}
 	}
 	return strings.HasSuffix(escapedPath, "/")
+}
+
+func holdingNamespacePath(escapedPath string) bool {
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		decodedPath = escapedPath
+	}
+	for _, candidate := range []string{path.Clean(escapedPath), path.Clean(decodedPath)} {
+		parts := strings.Split(strings.TrimPrefix(candidate, "/"), "/")
+		if holdingMutationShape(parts) {
+			return true
+		}
+	}
+	return false
+}
+
+func unsafeHoldingPath(escapedPath string) bool {
+	if strings.Contains(escapedPath, "%") || escapedPath != path.Clean(escapedPath) {
+		return true
+	}
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil || decodedPath != escapedPath || strings.HasSuffix(escapedPath, "/") {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(escapedPath, "/"), "/")
+	return holdingMutationShape(parts) && len(parts) != 5 && len(parts) != 6
+}
+
+func holdingMutationShape(parts []string) bool {
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "portfolios" || parts[3] == "" || parts[4] != "holdings" {
+		return false
+	}
+	// The portfolio thesis API owns /holdings/{id}/thesis; leave that
+	// established namespace to its own route validation.
+	return len(parts) < 7 || parts[6] != "thesis"
 }
 
 func portfolioCSRF(authenticator *auth.Authenticator, next http.Handler) http.Handler {
@@ -262,6 +300,12 @@ func portfolioOverview(database *store.Store) http.HandlerFunc {
 			}
 			return
 		}
+		var revision int
+		if err := database.DB.QueryRowContext(r.Context(), `SELECT holdings_revision FROM portfolios WHERE id=?`, parts[3]).Scan(&revision); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+			return
+		}
+		w.Header().Set("ETag", holdingETag(parts[3], revision))
 		writeJSON(w, http.StatusOK, view)
 	}
 }

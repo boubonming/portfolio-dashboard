@@ -1,10 +1,10 @@
 # Portfolio holding mutation contract
 
-Status: reviewed target-state contract on an unmerged contract branch; no runtime handler, numbered migration, startup initialization, or UI behavior is introduced by this change.
+Status: runtime holding create/archive handlers and the existing numbered migration are shipped. Frontend holding controls remain explicitly pending; this document does not add an import, brokerage, trading, or quote-refresh workflow.
 
-This document defines the intended release contract, not the behavior currently shipped by the baseline runtime. The SQL artifact and harness are executable scratch-database feasibility evidence after baseline SQL migrations 001-008; they do not prove Store.Migrate versioning/rollback, authenticated handlers, or runtime mutation wiring. A completed implementation will initialize one empty canonical portfolio, after which an authenticated browser session or an explicitly authorized Hermes machine may create a lot or logically archive a lot.
+This document defines the release contract implemented by the runtime. The SQL artifact and harness remain executable scratch-database feasibility evidence after baseline SQL migrations 001-008; runtime verification is provided by the Store and HTTP acceptance tests. The runtime initializes one empty canonical portfolio, after which an authenticated browser session or an explicitly authorized Hermes machine may create a lot or logically archive a lot.
 
-The no-import-surface invariant is absolute for the target release: portfolio state is authoritative only in the canonical database, and holdings enter it through the authenticated UI or the portfolio-scoped holding API below. No external document, parser, import preview/apply/status operation, source hash, source row, or source reference is required or accepted by this contract. The baseline runtime still contains importer commands, Markdown/source identity, read/export/frontend consumers, and no runtime `holdings:write` grant; those are known implementation/removal work, not acceptable target architecture, and must be removed or replaced atomically before publication.
+The no-import-surface invariant is absolute for the target release: portfolio state is authoritative only in the canonical database, and holdings enter it through the authenticated UI or the portfolio-scoped holding API below. No external document, parser, import preview/apply/status operation, source hash, source row, or source reference is required or accepted by this contract. Legacy importer commands, source identity, and frontend/export consumers remain explicitly tracked removal work; they are not part of the shipped holding mutation authority.
 
 ## 1. Canonical API surface
 
@@ -148,18 +148,18 @@ The executable scratch harness directly applies baseline SQL files 001-008 and t
 
 ## 9. Phased implementation and acceptance ledger
 
-### Next-milestone runtime acceptance (not proven by this branch)
+### Shipped runtime acceptance
 
-Before publication, the implementation milestone must add and verify a real numbered migration through `Store.Migrate`, including transaction/version failure injection and rollback; fresh initialization; populated upgrade preservation; authenticated empty overview; canonical browser/machine handlers; and runtime holding mutation, authorization, idempotency, audit/Activity, and rollback behavior. Those checks belong to the runtime milestone and must not be represented as evidence from this contract artifact or harness.
+Migration 010 is loaded through `Store.Migrate`; runtime tests cover fresh initialization, authenticated empty overview, canonical browser/machine handlers, mutation authorization, idempotency, audit/Activity ownership, and transactional rollback. The scratch harness remains complementary evidence for schema feasibility and historical preservation.
 
 ### Backend persistence and API
 
-1. Add the real numbered migration based on the contract artifact; verify the physical schema and fixture compatibility.
-2. Add exact decimal/date canonical parsers and request-size/unknown-field validation.
-3. Add one shared store mutation operation for browser and machine actors, with `BEGIN IMMEDIATE`, revision witness, idempotency, inline instrument association, logical removal, audit ownership, Activity, redaction, and rollback tests.
-4. Add machine configuration and persisted-grant intersection for `holdings:write`; keep `reviews:write` independent and default false.
-5. Add canonical handlers, security middleware, no-store headers, ETag, status/error mapping, and route/method/path tests.
-6. Acceptance: all OpenAPI examples validate; every matrix row has a test; `go test ./...`, strict OpenAPI validation, scratch migration/foreign-key/rollback verification, and `git diff --check` pass; no runtime migration/handler/UI is part of this contract commit.
+1. Migration 010 and its physical schema guards are shipped and verified against existing fixtures.
+2. Exact decimal/date canonical parsers and request-size/unknown-field validation are shipped.
+3. One shared Store mutation operation handles browser and machine actors, revision witnesses, idempotency, inline instrument association, logical removal, audit ownership, Activity, redaction, and rollback.
+4. Machine configuration and persisted-grant intersection for `holdings:write` are shipped; `reviews:write` remains independent and default false.
+5. Canonical handlers, security middleware, no-store headers, ETag, status/error mapping, and route/method/path tests are shipped.
+6. Runtime acceptance is recorded by the Go suite, focused concurrency tests, OpenAPI validation, scratch migration/foreign-key/rollback verification, and `git diff --check`.
 
 ### Frontend UI
 
@@ -171,7 +171,7 @@ Before publication, the implementation milestone must add and verify a real numb
 
 ## 10. Implementation/removal ledger (named work items and proof obligations)
 
-The following are explicit downstream implementation/removal items. They are not runtime changes in this contract-only commit, and every item must retain the no-document-import invariant. Baseline paths named below are known conflicting debt, not acceptable architecture or an alternative implementation.
+The following are explicit downstream implementation/removal items. They are not part of the shipped mutation handlers, and every item must retain the no-document-import invariant. Baseline paths named below are known conflicting debt, not acceptable architecture or an alternative implementation.
 
 1. `internal/store/readmodel.go`: select only `lots.lifecycle='active'`, remove `source_row` from the read-model query/scan/domain mapping, and add a populated/archived overview regression proving removed lots are absent without changing historical rows.
 2. `internal/httpserver/export.go`: export active lots only, remove the `source_row` column and renderer, and add CSV header/row regressions for duplicate instruments and archived lots.
@@ -186,4 +186,4 @@ Acceptance evidence for this ledger is named rather than implied: `go test ./...
 
 ## 11. Explicit non-goals and preserved behavior
 
-This slice does not implement handlers, persistence runtime changes, migration loading, frontend controls, edit/update, sell transactions, brokerage connectivity, trade execution, price refresh, account creation, or the baseline-surface removals listed in the ledger. The target contract guarantees the initialized empty default portfolio and advertises its machine-capable read alternative and revision ETag for the future mutation implementation; those guarantees are not claims about the current baseline runtime until the next milestone lands atomically.
+This slice implements holding create/archive handlers, persistence runtime changes, migration loading, authentication, idempotency, and revision ETags. It does not add frontend controls, edit/update, sell transactions, brokerage connectivity, trade execution, price refresh, account creation, or the baseline-surface removals listed in the ledger. Frontend controls remain pending and the API does not imply brokerage/trading/quote-refresh authority.

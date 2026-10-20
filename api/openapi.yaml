@@ -4,16 +4,16 @@ info:
   version: 1.1.0-phase-d-contract
   license: { name: MIT, url: 'https://opensource.org/license/mit/' }
   description: >-
-    Target release contract for authenticated portfolio-scoped holdings,
+    Shipped runtime contract for authenticated portfolio-scoped holdings,
     immutable valuation snapshots, editable investment theses, and the Phase D
-    scoped advisory review contract. This OpenAPI document is contract-only on
-    the current unmerged branch; runtime handlers, numbered migration loading,
-    startup initialization, and UI wiring are not shipped by this change. The
-    completed implementation will have no portfolio-document import, bootstrap
-    import, or import preview/apply/status surface and will start with an empty
+    scoped advisory review contract. Holding create/archive handlers, runtime
+    migration loading, and authenticated startup initialization are shipped;
+    frontend holding controls remain explicitly pending. The
+    Runtime behavior has no portfolio-document import, bootstrap import, or
+    import preview/apply/status surface and starts with an empty
     portfolio-default. The baseline runtime's importer, source identity,
-    readmodel/export/frontend consumers, and missing holdings:write wiring are
-    known removal/replacement work, not acceptable target architecture.
+    readmodel/export/frontend consumers are known removal/replacement work, not
+    acceptable target architecture for future UI slices.
 servers:
   - url: /
 paths:
@@ -54,7 +54,7 @@ paths:
   /api/v1/portfolios/{portfolioId}/overview:
     get:
       summary: Read one portfolio overview
-      description: Returns canonical database holdings and the latest immutable snapshot in the target runtime. Reporting currency changes only this read view. After the next-milestone initialization is implemented, portfolio-default returns 200 with an empty holdings list and explicit no_snapshot state before the first holding is created; this contract-only branch does not claim that runtime behavior is shipped.
+      description: Returns canonical database holdings and the latest immutable snapshot in the target runtime. Reporting currency changes only this read view. The initialized portfolio-default returns 200 with an empty holdings list and explicit no_snapshot state before the first holding is created.
       operationId: getPortfolioOverview
       security:
         - sessionCookie: []
