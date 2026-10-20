@@ -40,7 +40,7 @@ A successful receipt and append-only audit witness record only actor category, a
 
 ## 3. Create request and exact values
 
-`HoldingCreateRequest` is an object with no unknown fields. Required fields are `instrument`, `quantity`, `unit_cost`, `cost_basis`, `currency`, and `provenance`. Optional fields are `account_id` and `acquisition_date`.
+`HoldingCreateRequest` is an object with no unknown fields. Required fields are `instrument`, `quantity`, `unit_cost`, `cost_basis`, and `currency`. Optional fields are `account_id` and `acquisition_date`.
 
 `instrument` is exactly one of:
 
@@ -51,13 +51,13 @@ Sending both forms, neither form, unknown instrument fields, or an inline defini
 
 `quantity` is a positive canonical decimal string with at most 18 fractional digits. `unit_cost` and `cost_basis` are non-negative canonical decimal strings with at most 18 fractional digits. Canonical strings have no plus sign, exponent, leading zero in the integer part, or trailing decimal point; fractional trailing zeroes are permitted and preserved as the declared scale (so `10.00` is not rewritten to `10`). JSON numbers, `float64`, JavaScript `Number`, and SQLite REAL are forbidden. The server parses decimal text into an exact integer-plus-scale representation, verifies `quantity * unit_cost == cost_basis` by integer arithmetic after scale alignment, and stores the original canonical decimal strings. A product requiring more than the supported scale is rejected rather than silently rounded. `currency` is uppercase ISO-like three-letter text and must equal the instrument currency.
 
-`acquisition_date` is either null/omitted or exactly `YYYY-MM-DD`; timestamps, timezone suffixes, invalid calendar dates, and non-canonical dates are rejected. `provenance.kind` is `manual`, `statement`, or `other`; its optional reference is a bounded safe label. Credentials, bearer values, CSRF values, account secrets, and raw request bodies are never accepted as provenance.
+`acquisition_date` is either null/omitted or exactly `YYYY-MM-DD`; timestamps, timezone suffixes, invalid calendar dates, and non-canonical dates are rejected. This contract selects the response-simplification provenance design: the public holding contract does not accept or expose client-supplied provenance. Source documents, import references, credentials, bearer values, CSRF values, account secrets, and raw request bodies are never holding fields. New mutations are attributed by their immutable actor/permission witness and append-only audit/Activity receipt.
 
 An account, when supplied, must exist and have the requested portfolio as owner. A null account is valid. No account is created by this operation.
 
 ## 4. Removal and response receipts
 
-Removal is an archive state transition, never `DELETE FROM lots`. The lot remains addressable by its ID with `lifecycle=removed` and its original immutable quantity, unit cost, cost basis, currency, account, acquisition date, instrument, and provenance. `removed_at`, actor category, and actor ID are appended as removal metadata. A removed lot is excluded from default current holdings reads. Its old snapshots, review targets, reviews, theses and thesis revisions, Activity events, and audit records remain unchanged and addressable.
+Removal is an archive state transition, never `DELETE FROM lots`. The lot remains addressable by its ID with `lifecycle=removed` and its original immutable quantity, unit cost, cost basis, currency, account, acquisition date, and instrument. `removed_at`, actor category, and actor ID are appended as removal metadata. A removed lot is excluded from default current holdings reads. Its old snapshots, review targets, reviews, theses and thesis revisions, Activity events, and audit records remain unchanged and addressable.
 
 A successful create returns 201; a successful removal returns 200. A replay returns the exact stored receipt and original status/headers for the same actor, portfolio, route, operation, idempotency key, and request fingerprint. A receipt contains the operation, `applied` or `replayed`, safe holding record, new integer `portfolio_revision`, `snapshot_state`, current snapshot ID if any, actor witness, audit event ID, Activity event ID, and idempotency key. It contains no credential or raw request material.
 
@@ -128,17 +128,17 @@ The idempotency primary key is `(actor_category, actor_id, portfolio_id, idempot
 
 It is designed to be executable in one transaction and contains:
 
-- `portfolios.holdings_revision INTEGER NOT NULL DEFAULT 0 CHECK (>=0)`, with a trigger that permits only the mutation operation's single-step increment;
+- `portfolios.holdings_revision INTEGER NOT NULL DEFAULT 0 CHECK (>=0)`, with a trigger that permits only a physical single-step increment. Raw SQLite file access is trusted and outside HTTP authorization; the shared transactional store operation is the sole supported application path that increments it, and failed or unauthorized HTTP requests never reach that update.
 - `lots.lifecycle`, `removed_at`, `removed_by_category`, and `removed_by_id`, with insert/update guards allowing only active-to-removed archival;
 - `machine_principals.permission_holdings_write INTEGER NOT NULL DEFAULT 0 CHECK (0/1)`;
-- `portfolio_instruments(portfolio_id,instrument_id)` with backfill from existing lots, foreign keys, and lookup indexes;
+- `portfolio_instruments(portfolio_id,instrument_id)` with one deterministic `MIN(created_at)` backfill row per portfolio/instrument, foreign keys, lookup indexes, and insert/update scope guards for lots;
 - active/removal/instrument indexes on lots;
 - `holding_mutation_idempotency` with actor category/id, portfolio scope, operation, key, SHA-256 fingerprint, lot, audit and Activity ownership, permission witness, safe response JSON, retention timestamps, foreign keys, and uniqueness constraints; and
 - guards ensuring browser `local-owner` or an active machine principal owns a mutation, holding audit payload scope matches its portfolio, Activity points to the owned audit event, and archived lot fields/audit/idempotency rows remain immutable.
 
-A future numbered migration/startup change must execute 001-008 compatibility checks first, preserve current production writes and fixtures, backfill existing rows, verify `PRAGMA foreign_key_check`, inspect `PRAGMA table_info`, `PRAGMA index_list`, `PRAGMA foreign_key_list`, and trigger definitions, then commit the schema. Migration failure rolls back its schema and version record. Rollback is by restoring the pre-migration backup/transaction, not by deleting immutable data or running a destructive down migration. The ordinary initialization invariant inserts `portfolio-default` exactly once with name `Portfolio`, reporting currency `MYR`, holdings revision `0`, and no holdings, instruments, accounts, or snapshot rows. New runtime writers must insert `portfolio_instruments` and use the revision/idempotency/event sequence described above; downstream valuation and read writers must derive identity from those canonical rows.
+A future numbered migration/startup change must execute 001-008 compatibility checks first, preserve current production writes and fixtures, backfill existing rows, verify `PRAGMA foreign_key_check`, inspect `PRAGMA table_info`, `PRAGMA index_list`, `PRAGMA foreign_key_list`, and trigger definitions, then commit the schema. Migration failure rolls back its schema and version record. Rollback is by restoring the pre-migration backup/transaction, not by deleting immutable data or running a destructive down migration. Fresh initialization inserts `portfolio-default` exactly once with name `Portfolio`, reporting currency `MYR`, holdings revision `0`, and no holdings, instruments, accounts, or snapshot rows; an existing default portfolio is never renamed, emptied, or rejected, regardless of its current name or historical rows. New runtime writers must insert `portfolio_instruments` and use the revision/idempotency/event sequence described above; downstream valuation and read writers must derive identity from those canonical rows.
 
-The scratch verification must seed two portfolios, accounts, instruments, lots, a snapshot, review/review target, thesis/revision, audit, and Activity. It must prove: active default and removed-state checks; cross-portfolio account/instrument/holding rejection; unique idempotency; actor/grant guards; foreign-key check; append-only historical rows; and rollback after each side-effect boundary. It must also prove that removal leaves old snapshot/review/thesis rows and payloads byte-identical.
+The executable scratch harness must run real migrations 001-008 and this artifact against both a fresh database and an ordinary populated database. It seeds two portfolios, accounts, instruments, two same-portfolio lots sharing one instrument, a snapshot, review/review target, thesis/revision, audit, and Activity; it proves fresh empty initialization, populated identity/name preservation, one association for duplicate lots, cross-portfolio account/instrument/holding rejection, unique idempotency, actor/grant guards, canonical removal metadata, foreign-key check, append-only historical rows, and rollback after each side-effect boundary. It also compares historical rows and payloads byte-for-byte before and after the artifact.
 
 ## 9. Phased implementation and acceptance ledger
 
@@ -153,7 +153,7 @@ The scratch verification must seed two portfolios, accounts, instruments, lots, 
 
 ### Frontend UI
 
-1. Add authenticated form state for existing or inline instrument, exact decimal strings, account, date, and provenance.
+1. Add authenticated form state for existing or inline instrument, exact decimal strings, account, and date; mutation attribution comes from the session/machine actor witness, not client provenance.
 2. Obtain overview ETag and CSRF from the session bootstrap; send exact Origin, `If-Match`, and idempotency key; never use JavaScript Number for money/quantity.
 3. Render validation, 401/403/404/409/413/415 states without leaking scope or credentials; allow retry with a refreshed overview witness.
 4. Show unvalued additions, archived removals, stale/no-snapshot state, and a refresh-snapshot affordance; never present an old snapshot as current.
@@ -167,7 +167,7 @@ The following shipped surfaces are recorded only so the backend removal slice ca
 - The importer CLI commands `import-preview`, `import-apply`, and `import-status`, including their parser, preview/apply/status handlers, and import-only tests.
 - Import-only operator documentation, README instructions, deployment/operator commands, and tests that require a document import.
 - Production `import_runs` and `import_items` tables, import indexes, and the `source_row`, `source_ref`, and `source_sha256` columns or constraints where removal is safe; preserve historical decision records only as history.
-- Downstream valuation, snapshot, overview, export, tests, README, and deployment documentation that reads source fields, import hashes, reconciliation counts, or the approved fixed 33-lot/31-instrument inventory. Replace those dependencies with canonical database holding/instrument/account/revision state and mutation provenance.
+- Downstream valuation, snapshot, overview, export, tests, README, and deployment documentation that reads source fields, import hashes, reconciliation counts, or the approved fixed 33-lot/31-instrument inventory. Replace those dependencies with canonical database holding/instrument/account/revision state and append-only actor/audit/Activity attribution.
 
 This ledger is an implementation handoff, not an API, database-authority, operator, or initialization requirement. The active contract above has no document import route, CLI, table, source identity, or fixed imported-count assumption.
 

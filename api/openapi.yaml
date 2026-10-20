@@ -154,7 +154,6 @@ paths:
               currency: USD
               account_id: account-demo-001
               acquisition_date: '2026-01-15'
-              provenance: { kind: manual, reference: broker-statement-2026-01-15 }
       responses:
         '201':
           description: Holding committed atomically and is active.
@@ -170,7 +169,7 @@ paths:
               example:
                 operation: create
                 result: applied
-                holding: { portfolio_id: demo-portfolio, holding_id: lot-demo-002, instrument_id: instrument-demo-001, symbol: DEMO, quantity: '12.5000', unit_cost: '10.00', cost_basis: '125.0000', currency: USD, account_id: account-demo-001, acquisition_date: '2026-01-15', lifecycle: active, created_at: '2026-01-15T08:00:00.000000000Z', removed_at: null, provenance: { kind: manual, reference: broker-statement-2026-01-15 } }
+                holding: { portfolio_id: demo-portfolio, holding_id: lot-demo-002, instrument_id: instrument-demo-001, symbol: DEMO, quantity: '12.5000', unit_cost: '10.00', cost_basis: '125.0000', currency: USD, account_id: account-demo-001, acquisition_date: '2026-01-15', lifecycle: active, created_at: '2026-01-15T08:00:00.000000000Z', removed_at: null }
                 portfolio_revision: 8
                 snapshot_state: stale
                 current_snapshot_id: snap-2026-01-15
@@ -220,7 +219,7 @@ paths:
               example:
                 operation: remove
                 result: applied
-                holding: { portfolio_id: demo-portfolio, holding_id: lot-demo-001, instrument_id: instrument-demo-001, symbol: DEMO, quantity: '12.5000', unit_cost: '10.00', cost_basis: '125.0000', currency: USD, account_id: null, acquisition_date: '2026-01-15', lifecycle: removed, created_at: '2026-01-15T08:00:00.000000000Z', removed_at: '2026-01-16T08:00:00.000000000Z', provenance: { kind: manual, reference: broker-statement-2026-01-15 } }
+                holding: { portfolio_id: demo-portfolio, holding_id: lot-demo-001, instrument_id: instrument-demo-001, symbol: DEMO, quantity: '12.5000', unit_cost: '10.00', cost_basis: '125.0000', currency: USD, account_id: null, acquisition_date: '2026-01-15', lifecycle: removed, created_at: '2026-01-15T08:00:00.000000000Z', removed_at: '2026-01-16T08:00:00.000000000Z' }
                 portfolio_revision: 9
                 snapshot_state: stale
                 current_snapshot_id: snap-2026-01-15
@@ -650,7 +649,7 @@ components:
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
       content: { application/json: { schema: { $ref: '#/components/schemas/MutationConflictError' } } }
     PayloadTooLarge:
-      description: Request exceeds the 256 KiB review or feedback body limit.
+      description: Request body exceeds the shared 256 KiB limit for holding mutations, reviews, or feedback.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
       content: { application/json: { schema: { $ref: '#/components/schemas/PayloadTooLargeError' } } }
     UnsupportedMediaType:
@@ -954,18 +953,10 @@ components:
         - $ref: '#/components/schemas/InstrumentReference'
         - $ref: '#/components/schemas/InlineInstrument'
       description: Exactly one of instrument_id or the inline definition is accepted; sending both is invalid.
-    HoldingProvenance:
-      type: object
-      additionalProperties: false
-      required: [kind]
-      properties:
-        kind: { type: string, enum: [manual, statement, other] }
-        reference: { type: string, minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9][A-Za-z0-9._:/ -]*$' }
-      description: Safe mutation provenance label only; credentials, bearer values, CSRF values, and raw request bodies are forbidden.
     HoldingCreateRequest:
       type: object
       additionalProperties: false
-      required: [instrument, quantity, unit_cost, cost_basis, currency, provenance]
+      required: [instrument, quantity, unit_cost, cost_basis, currency]
       properties:
         instrument: { $ref: '#/components/schemas/HoldingInstrumentInput' }
         quantity: { $ref: '#/components/schemas/HoldingQuantity' }
@@ -974,7 +965,6 @@ components:
         currency: { type: string, pattern: '^[A-Z]{3}$', description: Must equal the instrument currency. }
         account_id: { type: string, nullable: true, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
         acquisition_date: { type: string, format: date, nullable: true, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' }
-        provenance: { $ref: '#/components/schemas/HoldingProvenance' }
       description: >-
         The server verifies exact quantity x unit_cost equals cost_basis at
         the declared decimal scale and rejects any non-canonical representation,
@@ -982,7 +972,8 @@ components:
     HoldingRecord:
       type: object
       additionalProperties: false
-      required: [portfolio_id, holding_id, instrument_id, symbol, quantity, unit_cost, cost_basis, currency, account_id, acquisition_date, lifecycle, created_at, removed_at, provenance]
+      description: Public holding state intentionally excludes client or document provenance; mutation attribution is carried by the receipt actor and append-only audit/Activity identifiers.
+      required: [portfolio_id, holding_id, instrument_id, symbol, quantity, unit_cost, cost_basis, currency, account_id, acquisition_date, lifecycle, created_at, removed_at]
       properties:
         portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
         holding_id: { $ref: '#/components/schemas/HoldingId' }
@@ -998,7 +989,6 @@ components:
         lifecycle: { type: string, enum: [active, removed] }
         created_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         removed_at: { type: string, format: date-time, nullable: true, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$' }
-        provenance: { $ref: '#/components/schemas/HoldingProvenance' }
     MutationActor:
       type: object
       additionalProperties: false

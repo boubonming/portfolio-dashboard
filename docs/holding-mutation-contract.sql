@@ -3,9 +3,14 @@
 -- The future runtime migration must preserve the operation/trigger ordering in
 -- docs/holding-mutation-contract.md and verify every object listed there.
 -- NO IMPORT SURFACE INVARIANT: this artifact initializes only canonical
--- database state and constrains mutation-only holding provenance.
+-- database state and constrains authenticated application mutations. Direct
+-- SQLite file access is trusted/outside HTTP authorization; the application
+-- store operation remains the sole supported revision-changing path.
 PRAGMA foreign_keys = ON;
 
+CREATE TEMP TABLE _holding_contract_default_state (was_absent INTEGER NOT NULL);
+INSERT INTO _holding_contract_default_state
+SELECT CASE WHEN EXISTS (SELECT 1 FROM portfolios WHERE id = 'portfolio-default') THEN 0 ELSE 1 END;
 INSERT INTO portfolios(id, name, reporting_currency, created_at, updated_at)
 SELECT 'portfolio-default', 'Portfolio', 'MYR',
        '1970-01-01T00:00:00.000000000Z',
@@ -26,7 +31,9 @@ CREATE TABLE portfolio_instruments (
     PRIMARY KEY (portfolio_id, instrument_id)
 );
 INSERT INTO portfolio_instruments(portfolio_id, instrument_id, created_at)
-SELECT DISTINCT portfolio_id, instrument_id, created_at FROM lots;
+SELECT portfolio_id, instrument_id, MIN(created_at)
+FROM lots
+GROUP BY portfolio_id, instrument_id;
 CREATE INDEX idx_portfolio_instruments_instrument
     ON portfolio_instruments(instrument_id, portfolio_id);
 
@@ -36,6 +43,25 @@ CREATE INDEX idx_lots_active_instrument
     ON lots(portfolio_id, instrument_id, lifecycle);
 CREATE INDEX idx_lots_removed_at
     ON lots(portfolio_id, removed_at, id);
+
+CREATE TRIGGER holding_instrument_scope_guard_insert
+BEFORE INSERT ON lots
+BEGIN
+    SELECT RAISE(ABORT, 'holding instrument is outside portfolio')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM portfolio_instruments
+        WHERE portfolio_id = NEW.portfolio_id AND instrument_id = NEW.instrument_id
+    );
+END;
+CREATE TRIGGER holding_instrument_scope_guard_update
+BEFORE UPDATE OF portfolio_id, instrument_id ON lots
+BEGIN
+    SELECT RAISE(ABORT, 'holding instrument is outside portfolio')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM portfolio_instruments
+        WHERE portfolio_id = NEW.portfolio_id AND instrument_id = NEW.instrument_id
+    );
+END;
 
 CREATE TRIGGER holding_revision_guard
 BEFORE UPDATE OF holdings_revision ON portfolios
@@ -114,6 +140,15 @@ END;
 CREATE TRIGGER holding_lifecycle_guard_insert
 BEFORE INSERT ON lots
 BEGIN
+    SELECT RAISE(ABORT, 'invalid holding created_at')
+    WHERE length(NEW.created_at) <> 30
+       OR NEW.created_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'
+       OR substr(NEW.created_at, 20, 1) <> '.'
+       OR strftime('%Y-%m-%d', julianday(substr(NEW.created_at, 1, 10))) <> substr(NEW.created_at, 1, 10)
+       OR substr(NEW.created_at, 12, 2) NOT BETWEEN '00' AND '23'
+       OR substr(NEW.created_at, 15, 2) NOT BETWEEN '00' AND '59'
+       OR substr(NEW.created_at, 18, 2) NOT BETWEEN '00' AND '59'
+       OR NEW.created_at < '1970-01-01T00:00:00.000000000Z';
     SELECT RAISE(ABORT, 'invalid active holding removal fields')
     WHERE NEW.lifecycle = 'active'
       AND (NEW.removed_at IS NOT NULL OR NEW.removed_by_category IS NOT NULL OR NEW.removed_by_id IS NOT NULL);
@@ -125,7 +160,19 @@ BEGIN
       AND NEW.removed_by_category NOT IN ('browser_user', 'machine');
     SELECT RAISE(ABORT, 'invalid holding removal actor id')
     WHERE NEW.removed_by_id IS NOT NULL
-      AND length(NEW.removed_by_id) NOT BETWEEN 1 AND 128;
+      AND (length(NEW.removed_by_id) NOT BETWEEN 1 AND 128
+           OR NEW.removed_by_id GLOB '*[^A-Za-z0-9._~-]*'
+           OR substr(NEW.removed_by_id, 1, 1) NOT GLOB '[A-Za-z0-9]');
+    SELECT RAISE(ABORT, 'invalid holding removal timestamp')
+    WHERE NEW.removed_at IS NOT NULL
+      AND (length(NEW.removed_at) <> 30
+           OR NEW.removed_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'
+           OR substr(NEW.removed_at, 20, 1) <> '.'
+           OR strftime('%Y-%m-%d', julianday(substr(NEW.removed_at, 1, 10))) <> substr(NEW.removed_at, 1, 10)
+           OR substr(NEW.removed_at, 12, 2) NOT BETWEEN '00' AND '23'
+           OR substr(NEW.removed_at, 15, 2) NOT BETWEEN '00' AND '59'
+           OR substr(NEW.removed_at, 18, 2) NOT BETWEEN '00' AND '59'
+           OR NEW.removed_at < NEW.created_at);
 END;
 CREATE TRIGGER holding_lifecycle_guard_update
 BEFORE UPDATE OF lifecycle, removed_at, removed_by_category, removed_by_id ON lots
@@ -137,7 +184,18 @@ BEGIN
     SELECT RAISE(ABORT, 'invalid holding removal actor')
     WHERE NEW.removed_by_category NOT IN ('browser_user', 'machine');
     SELECT RAISE(ABORT, 'invalid holding removal actor id')
-    WHERE length(NEW.removed_by_id) NOT BETWEEN 1 AND 128;
+    WHERE length(NEW.removed_by_id) NOT BETWEEN 1 AND 128
+       OR NEW.removed_by_id GLOB '*[^A-Za-z0-9._~-]*'
+       OR substr(NEW.removed_by_id, 1, 1) NOT GLOB '[A-Za-z0-9]';
+    SELECT RAISE(ABORT, 'invalid holding removal timestamp')
+    WHERE length(NEW.removed_at) <> 30
+       OR NEW.removed_at NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'
+       OR substr(NEW.removed_at, 20, 1) <> '.'
+       OR strftime('%Y-%m-%d', julianday(substr(NEW.removed_at, 1, 10))) <> substr(NEW.removed_at, 1, 10)
+       OR substr(NEW.removed_at, 12, 2) NOT BETWEEN '00' AND '23'
+       OR substr(NEW.removed_at, 15, 2) NOT BETWEEN '00' AND '59'
+       OR substr(NEW.removed_at, 18, 2) NOT BETWEEN '00' AND '59'
+       OR NEW.removed_at < NEW.created_at;
 END;
 
 CREATE TRIGGER holding_archival_immutable_guard
@@ -153,6 +211,9 @@ WHEN OLD.lifecycle = 'removed'
       NEW.cost_basis IS NOT OLD.cost_basis OR
       NEW.currency IS NOT OLD.currency OR
       NEW.acquisition_date IS NOT OLD.acquisition_date OR
+      NEW.source_row IS NOT OLD.source_row OR
+      NEW.source_ref IS NOT OLD.source_ref OR
+      NEW.source_sha256 IS NOT OLD.source_sha256 OR
       NEW.created_at IS NOT OLD.created_at
   ))
 BEGIN
@@ -195,6 +256,11 @@ BEGIN
         WHERE e.id = NEW.audit_event_id
           AND json_valid(e.payload) = 1
           AND json_extract(e.payload, '$.portfolio_id') = NEW.portfolio_id
+          AND e.entity_type = 'holding'
+          AND json_extract(e.payload, '$.holding_id') = e.entity_id
+          AND json_extract(e.payload, '$.operation') = CASE e.action WHEN 'holding_created' THEN 'create' WHEN 'holding_removed' THEN 'remove' END
+          AND json_extract(e.payload, '$.occurred_at') = e.created_at
+          AND NEW.retain_until = e.retain_until
     );
 END;
 
@@ -204,11 +270,57 @@ WHEN NEW.action IN ('holding_created', 'holding_removed')
 BEGIN
     SELECT RAISE(ABORT, 'holding Activity must reference its audit')
     WHERE NEW.source_audit_event_id IS NULL
+       OR NEW.category <> 'holding'
+       OR NEW.entity_type <> 'holding'
+       OR NEW.entity_id IS NULL
        OR NOT EXISTS (
            SELECT 1 FROM audit_event_portfolios p
+           JOIN audit_events a ON a.id = p.audit_event_id
            WHERE p.audit_event_id = NEW.source_audit_event_id
              AND p.portfolio_id = NEW.portfolio_id
+             AND p.retain_until = NEW.retain_until
+             AND a.action = NEW.action
+             AND a.entity_type = NEW.entity_type
+             AND a.entity_id = NEW.entity_id
+             AND a.created_at = NEW.occurred_at
+             AND json_extract(a.payload, '$.portfolio_id') = NEW.portfolio_id
+             AND json_extract(a.payload, '$.holding_id') = NEW.entity_id
+             AND json_extract(a.payload, '$.occurred_at') = NEW.occurred_at
        );
+END;
+
+CREATE TRIGGER holding_mutation_idempotency_ownership_guard
+BEFORE INSERT ON holding_mutation_idempotency
+BEGIN
+    SELECT RAISE(ABORT, 'holding idempotency audit ownership mismatch')
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM audit_events a
+        JOIN audit_event_portfolios p ON p.audit_event_id = a.id AND p.portfolio_id = NEW.portfolio_id
+        WHERE a.id = NEW.audit_event_id
+          AND a.action = CASE NEW.operation WHEN 'create' THEN 'holding_created' WHEN 'remove' THEN 'holding_removed' END
+          AND a.entity_type = 'holding'
+          AND a.entity_id = NEW.holding_id
+          AND a.created_at = NEW.created_at
+          AND p.retain_until = NEW.retain_until
+          AND json_extract(a.payload, '$.portfolio_id') = NEW.portfolio_id
+          AND json_extract(a.payload, '$.holding_id') = NEW.holding_id
+          AND json_extract(a.payload, '$.operation') = NEW.operation
+          AND json_extract(a.payload, '$.occurred_at') = NEW.created_at
+    );
+    SELECT RAISE(ABORT, 'holding idempotency Activity ownership mismatch')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM activity_events e
+        WHERE e.id = NEW.activity_event_id
+          AND e.portfolio_id = NEW.portfolio_id
+          AND e.action = CASE NEW.operation WHEN 'create' THEN 'holding_created' WHEN 'remove' THEN 'holding_removed' END
+          AND e.category = 'holding'
+          AND e.entity_type = 'holding'
+          AND e.entity_id = NEW.holding_id
+          AND e.occurred_at = NEW.created_at
+          AND e.source_audit_event_id = NEW.audit_event_id
+          AND e.retain_until = NEW.retain_until
+    );
 END;
 
 -- Executable contract checks. A failed check aborts the artifact through the
@@ -219,20 +331,27 @@ CREATE TEMP TABLE _holding_contract_assertion (
     ok INTEGER NOT NULL CHECK(ok = 1)
 );
 INSERT INTO _holding_contract_assertion(check_name, ok)
-SELECT 'empty_default_initialization', CASE WHEN
-    (SELECT name FROM portfolios WHERE id = 'portfolio-default') = 'Portfolio'
-    AND (SELECT reporting_currency FROM portfolios WHERE id = 'portfolio-default') = 'MYR'
-    AND (SELECT holdings_revision FROM portfolios WHERE id = 'portfolio-default') = 0
-    AND NOT EXISTS (SELECT 1 FROM lots WHERE portfolio_id = 'portfolio-default')
-    AND NOT EXISTS (SELECT 1 FROM portfolio_instruments WHERE portfolio_id = 'portfolio-default')
-    AND NOT EXISTS (SELECT 1 FROM accounts WHERE portfolio_id = 'portfolio-default')
-    AND NOT EXISTS (SELECT 1 FROM snapshots WHERE portfolio_id = 'portfolio-default')
+SELECT 'fresh_empty_default_initialization', CASE WHEN
+    (SELECT was_absent FROM _holding_contract_default_state) = 0
+    OR ((SELECT name FROM portfolios WHERE id = 'portfolio-default') = 'Portfolio'
+        AND (SELECT reporting_currency FROM portfolios WHERE id = 'portfolio-default') = 'MYR'
+        AND (SELECT holdings_revision FROM portfolios WHERE id = 'portfolio-default') = 0
+        AND NOT EXISTS (SELECT 1 FROM lots WHERE portfolio_id = 'portfolio-default')
+        AND NOT EXISTS (SELECT 1 FROM portfolio_instruments WHERE portfolio_id = 'portfolio-default')
+        AND NOT EXISTS (SELECT 1 FROM accounts WHERE portfolio_id = 'portfolio-default')
+        AND NOT EXISTS (SELECT 1 FROM snapshots WHERE portfolio_id = 'portfolio-default'))
+    THEN 1 ELSE 0 END;
+INSERT INTO _holding_contract_assertion(check_name, ok)
+SELECT 'existing_default_preserved', CASE WHEN
+    (SELECT was_absent FROM _holding_contract_default_state) = 1
+    OR EXISTS (SELECT 1 FROM portfolios WHERE id = 'portfolio-default')
     THEN 1 ELSE 0 END;
 INSERT INTO _holding_contract_assertion(check_name, ok)
 SELECT 'authenticated_empty_overview_preconditions', CASE WHEN
     EXISTS (SELECT 1 FROM browser_principals WHERE id = 'local-owner')
     AND EXISTS (SELECT 1 FROM portfolios WHERE id = 'portfolio-default')
-    AND NOT EXISTS (SELECT 1 FROM lots WHERE portfolio_id = 'portfolio-default')
+    AND ((SELECT was_absent FROM _holding_contract_default_state) = 0
+         OR NOT EXISTS (SELECT 1 FROM lots WHERE portfolio_id = 'portfolio-default'))
     THEN 1 ELSE 0 END;
 
 SAVEPOINT first_api_holding_probe;
@@ -256,6 +375,7 @@ DELETE FROM lots WHERE id = '__holding_contract_probe_lot';
 DELETE FROM portfolio_instruments WHERE portfolio_id = 'portfolio-default' AND instrument_id = '__holding_contract_probe_instrument';
 DELETE FROM instruments WHERE id = '__holding_contract_probe_instrument';
 DROP TABLE _holding_contract_assertion;
+DROP TABLE _holding_contract_default_state;
 
 -- The runtime operation must perform these statements in one transaction:
 --
