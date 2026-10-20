@@ -2,7 +2,15 @@
 -- Execute once, inside one transaction, after runtime migrations 001-008.
 -- The future runtime migration must preserve the operation/trigger ordering in
 -- docs/holding-mutation-contract.md and verify every object listed there.
+-- NO IMPORT SURFACE INVARIANT: this artifact initializes only canonical
+-- database state and constrains mutation-only holding provenance.
 PRAGMA foreign_keys = ON;
+
+INSERT INTO portfolios(id, name, reporting_currency, created_at, updated_at)
+SELECT 'portfolio-default', 'Portfolio', 'MYR',
+       '1970-01-01T00:00:00.000000000Z',
+       '1970-01-01T00:00:00.000000000Z'
+WHERE NOT EXISTS (SELECT 1 FROM portfolios WHERE id = 'portfolio-default');
 
 ALTER TABLE portfolios ADD COLUMN holdings_revision INTEGER NOT NULL DEFAULT 0 CHECK (holdings_revision >= 0);
 ALTER TABLE machine_principals ADD COLUMN permission_holdings_write INTEGER NOT NULL DEFAULT 0 CHECK (permission_holdings_write IN (0, 1));
@@ -145,10 +153,7 @@ WHEN OLD.lifecycle = 'removed'
       NEW.cost_basis IS NOT OLD.cost_basis OR
       NEW.currency IS NOT OLD.currency OR
       NEW.acquisition_date IS NOT OLD.acquisition_date OR
-      NEW.source_row IS NOT OLD.source_row OR
-      NEW.source_ref IS NOT OLD.source_ref OR
-      NEW.created_at IS NOT OLD.created_at OR
-      NEW.source_sha256 IS NOT OLD.source_sha256
+      NEW.created_at IS NOT OLD.created_at
   ))
 BEGIN
     SELECT RAISE(ABORT, 'holding fields are immutable');
@@ -205,6 +210,52 @@ BEGIN
              AND p.portfolio_id = NEW.portfolio_id
        );
 END;
+
+-- Executable contract checks. A failed check aborts the artifact through the
+-- CHECK(ok=1) constraint. The probe holding intentionally omits all historical
+-- external-document fields: this is the first API-created holding shape.
+CREATE TEMP TABLE _holding_contract_assertion (
+    check_name TEXT PRIMARY KEY,
+    ok INTEGER NOT NULL CHECK(ok = 1)
+);
+INSERT INTO _holding_contract_assertion(check_name, ok)
+SELECT 'empty_default_initialization', CASE WHEN
+    (SELECT name FROM portfolios WHERE id = 'portfolio-default') = 'Portfolio'
+    AND (SELECT reporting_currency FROM portfolios WHERE id = 'portfolio-default') = 'MYR'
+    AND (SELECT holdings_revision FROM portfolios WHERE id = 'portfolio-default') = 0
+    AND NOT EXISTS (SELECT 1 FROM lots WHERE portfolio_id = 'portfolio-default')
+    AND NOT EXISTS (SELECT 1 FROM portfolio_instruments WHERE portfolio_id = 'portfolio-default')
+    AND NOT EXISTS (SELECT 1 FROM accounts WHERE portfolio_id = 'portfolio-default')
+    AND NOT EXISTS (SELECT 1 FROM snapshots WHERE portfolio_id = 'portfolio-default')
+    THEN 1 ELSE 0 END;
+INSERT INTO _holding_contract_assertion(check_name, ok)
+SELECT 'authenticated_empty_overview_preconditions', CASE WHEN
+    EXISTS (SELECT 1 FROM browser_principals WHERE id = 'local-owner')
+    AND EXISTS (SELECT 1 FROM portfolios WHERE id = 'portfolio-default')
+    AND NOT EXISTS (SELECT 1 FROM lots WHERE portfolio_id = 'portfolio-default')
+    THEN 1 ELSE 0 END;
+
+SAVEPOINT first_api_holding_probe;
+INSERT INTO instruments(id, symbol, description, currency, asset_type, exchange, created_at)
+VALUES ('__holding_contract_probe_instrument', 'CONTRACT-PROBE', 'Contract probe', 'MYR', 'equity', 'TEST', '1970-01-01T00:00:00.000000000Z');
+INSERT INTO portfolio_instruments(portfolio_id, instrument_id, created_at)
+VALUES ('portfolio-default', '__holding_contract_probe_instrument', '1970-01-01T00:00:00.000000000Z');
+INSERT INTO lots(id, portfolio_id, instrument_id, account_id, quantity, unit_cost, cost_basis, currency, acquisition_date, created_at)
+VALUES ('__holding_contract_probe_lot', 'portfolio-default', '__holding_contract_probe_instrument', NULL, '1', '1', '1', 'MYR', NULL, '1970-01-01T00:00:00.000000000Z');
+INSERT INTO _holding_contract_assertion(check_name, ok)
+SELECT 'first_api_created_holding', CASE WHEN
+    EXISTS (SELECT 1 FROM lots WHERE id = '__holding_contract_probe_lot' AND portfolio_id = 'portfolio-default' AND lifecycle = 'active')
+    AND NOT EXISTS (SELECT 1 FROM holding_mutation_idempotency WHERE holding_id = '__holding_contract_probe_lot')
+    THEN 1 ELSE 0 END;
+INSERT INTO _holding_contract_assertion(check_name, ok)
+SELECT 'no_external_provenance_required', CASE WHEN
+    EXISTS (SELECT 1 FROM lots WHERE id = '__holding_contract_probe_lot' AND portfolio_id = 'portfolio-default')
+    THEN 1 ELSE 0 END;
+RELEASE SAVEPOINT first_api_holding_probe;
+DELETE FROM lots WHERE id = '__holding_contract_probe_lot';
+DELETE FROM portfolio_instruments WHERE portfolio_id = 'portfolio-default' AND instrument_id = '__holding_contract_probe_instrument';
+DELETE FROM instruments WHERE id = '__holding_contract_probe_instrument';
+DROP TABLE _holding_contract_assertion;
 
 -- The runtime operation must perform these statements in one transaction:
 --

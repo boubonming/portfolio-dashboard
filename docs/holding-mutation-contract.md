@@ -2,7 +2,9 @@
 
 Status: reviewed contract slice; no runtime handler, migration, or UI behavior is introduced by this change.
 
-This contract supersedes the bootstrap-only interpretation of Portfolio.md. Import remains a bootstrap path. After import, an authorized browser session or an explicitly authorized Hermes machine may create a lot or logically archive a lot. Neither actor may access a brokerage, execute a trade, sell a position, edit an existing lot, refresh prices, create an account, or bulk import.
+The product has no import surface. A fresh database creates one empty canonical portfolio through the ordinary migration/startup invariant; an authenticated browser session or an explicitly authorized Hermes machine may then create a lot or logically archive a lot. Neither actor may access a brokerage, execute a trade, sell a position, edit an existing lot, refresh prices, create an account, or use an import workflow.
+
+The no-import-surface invariant is absolute: portfolio state is authoritative only in the canonical database, and holdings enter it through the authenticated UI or the portfolio-scoped holding API below. No external document, parser, import preview/apply/status operation, source hash, source row, or source reference is required or accepted by this contract.
 
 ## 1. Canonical API surface
 
@@ -10,7 +12,7 @@ The canonical paths are:
 
 - `POST /api/v1/portfolios/{portfolioId}/holdings` creates one active lot.
 - `DELETE /api/v1/portfolios/{portfolioId}/holdings/{holdingId}` archives one active lot.
-- `GET /api/v1/portfolios/{portfolioId}/overview` returns the current read model and the exact `ETag` holdings revision witness used by both mutations.
+- `GET /api/v1/portfolios/{portfolioId}/overview` returns the current read model and the exact `ETag` holdings revision witness used by both mutations. The canonical `portfolio-default` portfolio is always present after initialization, even when it has no holdings or snapshot.
 
 There are no query variants, trailing-slash variants, encoded-slash identifiers, or alternate verbs. `portfolioId` and `holdingId` use the existing identifier grammar. A canonical path with an unsupported method returns 405 and its exact `Allow` value; an encoded or non-canonical path is not normalized into a mutation route.
 
@@ -47,7 +49,7 @@ A successful receipt and append-only audit witness record only actor category, a
 
 Sending both forms, neither form, unknown instrument fields, or an inline definition that collides with an existing global identity is invalid. An instrument is not portfolio-valid merely because its ID exists in another portfolio. Existing global instruments become valid for this portfolio only through the association. Existing 001-008 lots are backfilled into that association.
 
-`quantity` is a positive canonical decimal string with at most 18 fractional digits. `unit_cost` and `cost_basis` are non-negative canonical decimal strings with at most 18 fractional digits. Canonical strings have no plus sign, exponent, leading zero in the integer part, or trailing decimal point; fractional trailing zeroes are permitted and preserved as the declared source scale (so `10.00` is not rewritten to `10`). JSON numbers, `float64`, JavaScript `Number`, and SQLite REAL are forbidden. The server parses decimal text into an exact integer-plus-scale representation, verifies `quantity * unit_cost == cost_basis` by integer arithmetic after scale alignment, and stores the original canonical decimal strings. A product requiring more than the supported scale is rejected rather than silently rounded. `currency` is uppercase ISO-like three-letter text and must equal the instrument currency.
+`quantity` is a positive canonical decimal string with at most 18 fractional digits. `unit_cost` and `cost_basis` are non-negative canonical decimal strings with at most 18 fractional digits. Canonical strings have no plus sign, exponent, leading zero in the integer part, or trailing decimal point; fractional trailing zeroes are permitted and preserved as the declared scale (so `10.00` is not rewritten to `10`). JSON numbers, `float64`, JavaScript `Number`, and SQLite REAL are forbidden. The server parses decimal text into an exact integer-plus-scale representation, verifies `quantity * unit_cost == cost_basis` by integer arithmetic after scale alignment, and stores the original canonical decimal strings. A product requiring more than the supported scale is rejected rather than silently rounded. `currency` is uppercase ISO-like three-letter text and must equal the instrument currency.
 
 `acquisition_date` is either null/omitted or exactly `YYYY-MM-DD`; timestamps, timezone suffixes, invalid calendar dates, and non-canonical dates are rejected. `provenance.kind` is `manual`, `statement`, or `other`; its optional reference is a bounded safe label. Credentials, bearer values, CSRF values, account secrets, and raw request bodies are never accepted as provenance.
 
@@ -64,6 +66,8 @@ A successful create returns 201; a successful removal returns 200. A replay retu
 ## 5. Snapshot semantics
 
 A holding mutation never edits or replaces a snapshot. If a current immutable snapshot exists, the receipt reports `snapshot_state=stale` and its ID; if none exists, it reports `snapshot_state=no_snapshot` and a null ID. The overview/UI must show an explicit stale or no-snapshot state, the newly added lot as `unvalued`, and a removed lot as archived/hidden from the current active list. It must not show the prior snapshot as current and must not fabricate a portfolio total.
+
+Snapshot input identity is derived from canonical database portfolio, holding, instrument, account, and holdings-revision state. It never depends on an external document identity or an imported-source hash.
 
 Old snapshots and reviews retain their original holdings and values. A review whose snapshot predates a mutation remains historical; the existing lifecycle comparison marks it outdated once a later snapshot is produced. Theses and thesis history remain addressable for their holding ID, including after archival. A future valuation process produces a new snapshot; it is the only operation that can make the post-mutation overview current.
 
@@ -132,7 +136,7 @@ It is designed to be executable in one transaction and contains:
 - `holding_mutation_idempotency` with actor category/id, portfolio scope, operation, key, SHA-256 fingerprint, lot, audit and Activity ownership, permission witness, safe response JSON, retention timestamps, foreign keys, and uniqueness constraints; and
 - guards ensuring browser `local-owner` or an active machine principal owns a mutation, holding audit payload scope matches its portfolio, Activity points to the owned audit event, and archived lot fields/audit/idempotency rows remain immutable.
 
-A future numbered migration must execute 001-008 compatibility checks first, preserve current production writes and fixtures, backfill existing rows, verify `PRAGMA foreign_key_check`, inspect `PRAGMA table_info`, `PRAGMA index_list`, `PRAGMA foreign_key_list`, and trigger definitions, then commit the schema. Migration failure rolls back its schema and version record. Rollback is by restoring the pre-migration backup/transaction, not by deleting immutable data or running a destructive down migration. New runtime writers must insert `portfolio_instruments` and use the revision/idempotency/event sequence described above; existing import and valuation writers continue to work with active-default lots and zero-default revisions.
+A future numbered migration/startup change must execute 001-008 compatibility checks first, preserve current production writes and fixtures, backfill existing rows, verify `PRAGMA foreign_key_check`, inspect `PRAGMA table_info`, `PRAGMA index_list`, `PRAGMA foreign_key_list`, and trigger definitions, then commit the schema. Migration failure rolls back its schema and version record. Rollback is by restoring the pre-migration backup/transaction, not by deleting immutable data or running a destructive down migration. The ordinary initialization invariant inserts `portfolio-default` exactly once with name `Portfolio`, reporting currency `MYR`, holdings revision `0`, and no holdings, instruments, accounts, or snapshot rows. New runtime writers must insert `portfolio_instruments` and use the revision/idempotency/event sequence described above; downstream valuation and read writers must derive identity from those canonical rows.
 
 The scratch verification must seed two portfolios, accounts, instruments, lots, a snapshot, review/review target, thesis/revision, audit, and Activity. It must prove: active default and removed-state checks; cross-portfolio account/instrument/holding rejection; unique idempotency; actor/grant guards; foreign-key check; append-only historical rows; and rollback after each side-effect boundary. It must also prove that removal leaves old snapshot/review/thesis rows and payloads byte-identical.
 
@@ -153,8 +157,20 @@ The scratch verification must seed two portfolios, accounts, instruments, lots, 
 2. Obtain overview ETag and CSRF from the session bootstrap; send exact Origin, `If-Match`, and idempotency key; never use JavaScript Number for money/quantity.
 3. Render validation, 401/403/404/409/413/415 states without leaking scope or credentials; allow retry with a refreshed overview witness.
 4. Show unvalued additions, archived removals, stale/no-snapshot state, and a refresh-snapshot affordance; never present an old snapshot as current.
-5. Acceptance: browser tests cover duplicate-submit/reload, stale tabs, CSRF/origin failures, inline/existing instrument branches, archive visibility, and historical links; UI remains unable to edit, sell, import, or access brokerages.
+5. Acceptance: browser tests cover duplicate-submit/reload, stale tabs, CSRF/origin failures, inline/existing instrument branches, archive visibility, and historical links; UI remains unable to edit, sell, use an import surface, or access brokerages.
 
-## 10. Explicit non-goals and preserved behavior
+## 10. Implementation-removal ledger (historical inventory, not active contract)
 
-This slice does not implement handlers, persistence runtime changes, migration loading, frontend controls, edit/update, sell transactions, brokerage connectivity, trade execution, price refresh, account creation, or bulk import. Existing API routes and still-valid review, feedback, thesis, snapshot, export, and read scenarios remain unchanged except that the overview contract now advertises its machine-capable read alternative and revision ETag needed by the future mutation implementation.
+The following shipped surfaces are recorded only so the backend removal slice can remove them; none is a supported bootstrap path or acceptance criterion:
+
+- The historical `Portfolio.md`/Obsidian reader, Markdown parser/package, and any portfolio-document bootstrap importer.
+- The importer CLI commands `import-preview`, `import-apply`, and `import-status`, including their parser, preview/apply/status handlers, and import-only tests.
+- Import-only operator documentation, README instructions, deployment/operator commands, and tests that require a document import.
+- Production `import_runs` and `import_items` tables, import indexes, and the `source_row`, `source_ref`, and `source_sha256` columns or constraints where removal is safe; preserve historical decision records only as history.
+- Downstream valuation, snapshot, overview, export, tests, README, and deployment documentation that reads source fields, import hashes, reconciliation counts, or the approved fixed 33-lot/31-instrument inventory. Replace those dependencies with canonical database holding/instrument/account/revision state and mutation provenance.
+
+This ledger is an implementation handoff, not an API, database-authority, operator, or initialization requirement. The active contract above has no document import route, CLI, table, source identity, or fixed imported-count assumption.
+
+## 11. Explicit non-goals and preserved behavior
+
+This slice does not implement handlers, persistence runtime changes, migration loading, frontend controls, edit/update, sell transactions, brokerage connectivity, trade execution, price refresh, account creation, or removal of the historical surfaces listed in the ledger. Existing API routes and still-valid review, feedback, thesis, snapshot, export, and read scenarios remain unchanged except that the overview contract now guarantees the initialized empty default portfolio and advertises its machine-capable read alternative and revision ETag needed by the future mutation implementation.

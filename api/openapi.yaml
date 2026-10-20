@@ -7,7 +7,9 @@ info:
     Authenticated portfolio-scoped holdings, immutable valuation snapshots,
     editable investment theses, and the Phase D scoped advisory review contract.
     Phase D endpoints are contract-only in this change; runtime handlers will
-    follow the implementation pipeline in docs/review-api-contract.md.
+    follow the implementation pipeline in docs/review-api-contract.md. There
+    is no portfolio-document import, bootstrap import, or import preview/apply/
+    status surface: a fresh database starts with an empty portfolio-default.
 servers:
   - url: /
 paths:
@@ -48,7 +50,7 @@ paths:
   /api/v1/portfolios/{portfolioId}/overview:
     get:
       summary: Read one portfolio overview
-      description: Returns source-traceable lots and the latest immutable snapshot. Reporting currency changes only this read view.
+      description: Returns canonical database holdings and the latest immutable snapshot. Reporting currency changes only this read view. The initialized portfolio-default returns 200 with an empty holdings list and explicit no_snapshot state before the first holding is created.
       operationId: getPortfolioOverview
       security:
         - sessionCookie: []
@@ -74,6 +76,12 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PortfolioOverview' }
+              example:
+                portfolio: { id: portfolio-default, name: Portfolio, default_reporting_currency: MYR }
+                reporting_currency: MYR
+                snapshot: { state: no_snapshot, complete: false, missing_dependencies: [], stale_dependencies: [], invalid_dependencies: [], subtotals: [] }
+                allocation: { state: unavailable, coverage: { total_lots: 0, valued_lots: 0, missing_dependencies: 0, stale_dependencies: 0, invalid_dependencies: 0 }, by_instrument: [], by_source_currency: [] }
+                holdings: []
         '400':
           description: Invalid reporting currency.
         '401':
@@ -81,7 +89,7 @@ paths:
         '403':
           description: Cross-origin or CSRF validation failed.
         '404':
-          description: Portfolio or API route not found.
+          description: A non-default portfolio or API route was not found. The initialized portfolio-default does not return 404.
         '405':
           description: Read-only endpoint does not accept mutation methods.
         '500':
@@ -231,7 +239,7 @@ paths:
     get:
       summary: Download a portfolio-scoped CSV overview
       description: >-
-        Returns the same immutable, source-traceable overview read model as the
+        Returns the same immutable, canonical holding overview read model as the
         authenticated overview endpoint, encoded as deterministic RFC 4180 CSV.
         Each lot is one row, including duplicate symbols. Decimal fields are
         copied as exact strings and blank optional values remain blank. Text
@@ -244,7 +252,7 @@ paths:
         description, quantity, source_currency, unit_cost, cost_basis,
         latest_price, latest_value, reporting_value, quote_source,
         market_timestamp, freshness_state, freshness_age, broker,
-        acquisition_date, source_row, missing_broker,
+        acquisition_date, missing_broker,
         missing_acquisition_date, and data_quality_flags. The response is
         private and never cacheable; it contains no thesis, credentials,
         account secrets, session/CSRF values, or raw audit metadata.
@@ -953,7 +961,7 @@ components:
       properties:
         kind: { type: string, enum: [manual, statement, other] }
         reference: { type: string, minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9][A-Za-z0-9._:/ -]*$' }
-      description: Safe source label only; credentials, bearer values, CSRF values, and raw request bodies are forbidden.
+      description: Safe mutation provenance label only; credentials, bearer values, CSRF values, and raw request bodies are forbidden.
     HoldingCreateRequest:
       type: object
       additionalProperties: false
@@ -1053,7 +1061,6 @@ components:
         acquisition_date: { type: string }
         missing_broker: { type: boolean }
         missing_acquisition_date: { type: boolean }
-        source_row: { type: integer }
     Freshness:
       type: object
       required: [status]
