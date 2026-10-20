@@ -157,7 +157,7 @@ func TestDockerfileProductionInvariants(t *testing.T) {
 		"RUN go mod download",
 		"RUN go build -trimpath -buildvcs=false -ldflags='-s -w' -o /out/portfolio-dashboard ./cmd/portfolio-dashboard",
 		"RUN install -d -m 0700 /out/data",
-		"COPY --from=server-build --chown=65532:65532 /out/data /data",
+		"COPY --from=server-build --chown=65532:65532 --chmod=0700 /out/data /data",
 		"VOLUME [\"/data\"]",
 		"USER 65532:65532",
 		"EXPOSE 8080",

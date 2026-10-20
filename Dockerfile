@@ -29,7 +29,7 @@ RUN install -d -m 0700 /out/data
 FROM ${RUNTIME_IMAGE} AS runtime
 WORKDIR /app
 COPY --from=server-build /out/portfolio-dashboard /app/portfolio-dashboard
-COPY --from=server-build --chown=65532:65532 /out/data /data
+COPY --from=server-build --chown=65532:65532 --chmod=0700 /out/data /data
 VOLUME ["/data"]
 EXPOSE 8080
 USER 65532:65532
