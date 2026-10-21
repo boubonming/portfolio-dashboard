@@ -7,7 +7,7 @@ import type { Holding } from './App'
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/
 const symbolPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
 const currencyPattern = /^[A-Z]{3}$/
-const quantityPattern = /^[1-9][0-9]*(?:\.[0-9]{1,18})?$/
+const quantityPattern = /^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,18})?$/
 const moneyPattern = /^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,18})?$/
 const costBasisPattern = /^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,36})?$/
 const datePattern = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/
@@ -50,6 +50,7 @@ const boundedText = (value: unknown, max: number) => typeof value === 'string' &
 const nullableText = (value: unknown, max: number) => value === null || (typeof value === 'string' && value.length >= 1 && value.length <= max)
 const nullableIdentifier = (value: unknown) => value === null || boundedIdentifier(value)
 const optionalText = (value: unknown, max: number) => typeof value === 'string' && value.length >= 1 && value.length <= max
+const positiveQuantity = (value: unknown): value is string => typeof value === 'string' && quantityPattern.test(value) && /[1-9]/.test(value)
 const canonicalDate = (value: unknown) => {
   if (typeof value !== 'string' || !datePattern.test(value)) return false
   try { return new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value } catch { return false }
@@ -106,7 +107,7 @@ export function validateHoldingMutationReceipt(value: unknown, expected: Receipt
 
   if (!isRecord(receipt.holding) || !exactKeys(receipt.holding, holdingKeys, ['description'])) throw new Error('The server returned an invalid holding receipt.')
   const holding = receipt.holding as Record<string, unknown>
-  if (holding.portfolio_id !== expected.portfolioId || !boundedIdentifier(holding.holding_id) || !boundedIdentifier(holding.instrument_id) || !boundedText(holding.symbol, 64) || !symbolPattern.test(holding.symbol as string) || !boundedText(holding.quantity, 40) || !quantityPattern.test(holding.quantity as string) || !boundedText(holding.unit_cost, 40) || !moneyPattern.test(holding.unit_cost as string) || !boundedText(holding.cost_basis, 80) || !costBasisPattern.test(holding.cost_basis as string) || typeof holding.currency !== 'string' || !currencyPattern.test(holding.currency) || (holding.description !== undefined && !optionalText(holding.description, 256)) || !nullableIdentifier(holding.account_id) || !nullableText(holding.acquisition_date, 10) || (holding.acquisition_date !== null && !canonicalDate(holding.acquisition_date)) || (holding.removed_at !== null && !canonicalTimestamp(holding.removed_at)) || !canonicalTimestamp(holding.created_at)) throw new Error('The server returned an invalid holding receipt.')
+  if (holding.portfolio_id !== expected.portfolioId || !boundedIdentifier(holding.holding_id) || !boundedIdentifier(holding.instrument_id) || !boundedText(holding.symbol, 64) || !symbolPattern.test(holding.symbol as string) || !boundedText(holding.quantity, 40) || !positiveQuantity(holding.quantity) || !boundedText(holding.unit_cost, 40) || !moneyPattern.test(holding.unit_cost as string) || !boundedText(holding.cost_basis, 80) || !costBasisPattern.test(holding.cost_basis as string) || typeof holding.currency !== 'string' || !currencyPattern.test(holding.currency) || (holding.description !== undefined && !optionalText(holding.description, 256)) || !nullableIdentifier(holding.account_id) || !nullableText(holding.acquisition_date, 10) || (holding.acquisition_date !== null && !canonicalDate(holding.acquisition_date)) || (holding.removed_at !== null && !canonicalTimestamp(holding.removed_at)) || !canonicalTimestamp(holding.created_at)) throw new Error('The server returned an invalid holding receipt.')
   if (expected.operation === 'create' && (holding.lifecycle !== 'active' || holding.removed_at !== null)) throw new Error('The server returned an invalid holding receipt.')
   if (expected.operation === 'remove' && (holding.holding_id !== expected.lotId || holding.lifecycle !== 'removed' || holding.removed_at === null)) throw new Error('The server returned an invalid holding receipt.')
 
@@ -115,7 +116,7 @@ export function validateHoldingMutationReceipt(value: unknown, expected: Receipt
   try { body = JSON.parse(expected.body) as Record<string, unknown> } catch { body = null }
   if (expected.operation === 'create') {
     if (!body || !isRecord(body) || !exactKeys(body, ['instrument', 'quantity', 'unit_cost', 'cost_basis', 'currency'], ['account_id', 'acquisition_date'])) throw new Error('The server returned an invalid holding receipt.')
-    if (typeof body.quantity !== 'string' || body.quantity.length > 40 || !quantityPattern.test(body.quantity) || typeof body.unit_cost !== 'string' || body.unit_cost.length > 40 || !moneyPattern.test(body.unit_cost) || typeof body.cost_basis !== 'string' || body.cost_basis.length > 80 || !costBasisPattern.test(body.cost_basis) || !exactProductMatches(body.quantity, body.unit_cost, body.cost_basis) || typeof body.currency !== 'string' || !currencyPattern.test(body.currency) || (Object.prototype.hasOwnProperty.call(body, 'account_id') && !nullableIdentifier(body.account_id)) || (Object.prototype.hasOwnProperty.call(body, 'acquisition_date') && body.acquisition_date !== null && !canonicalDate(body.acquisition_date))) throw new Error('The server returned an invalid holding receipt.')
+    if (!positiveQuantity(body.quantity) || body.quantity.length > 40 || typeof body.unit_cost !== 'string' || body.unit_cost.length > 40 || !moneyPattern.test(body.unit_cost) || typeof body.cost_basis !== 'string' || body.cost_basis.length > 80 || !costBasisPattern.test(body.cost_basis) || !exactProductMatches(body.quantity, body.unit_cost, body.cost_basis) || typeof body.currency !== 'string' || !currencyPattern.test(body.currency) || (Object.prototype.hasOwnProperty.call(body, 'account_id') && !nullableIdentifier(body.account_id)) || (Object.prototype.hasOwnProperty.call(body, 'acquisition_date') && body.acquisition_date !== null && !canonicalDate(body.acquisition_date))) throw new Error('The server returned an invalid holding receipt.')
     if (holding.quantity !== body.quantity || holding.unit_cost !== body.unit_cost || holding.cost_basis !== body.cost_basis || holding.currency !== body.currency) throw new Error('The server returned an invalid holding receipt.')
     const bodyAccount = Object.prototype.hasOwnProperty.call(body, 'account_id') ? body.account_id : null
     const bodyDate = Object.prototype.hasOwnProperty.call(body, 'acquisition_date') ? body.acquisition_date : null
@@ -333,10 +334,10 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       if (draft.assetType && !/^[A-Za-z0-9._-]+$/.test(draft.assetType)) next.assetType = 'Use letters, numbers, dot, underscore or hyphen.'
       if (draft.exchange && !/^[A-Za-z0-9._-]+$/.test(draft.exchange)) next.exchange = 'Use letters, numbers, dot, underscore or hyphen.'
     }
-    if (draft.quantity.length > 40 || !quantityPattern.test(draft.quantity)) next.quantity = 'Use a positive canonical decimal of at most 40 characters.'
+    if (draft.quantity.length > 40 || !positiveQuantity(draft.quantity)) next.quantity = 'Use a positive canonical decimal of at most 40 characters.'
     if (draft.unitCost.length > 40 || !moneyPattern.test(draft.unitCost)) next.unitCost = 'Use a non-negative canonical decimal of at most 40 characters.'
     if (draft.costBasis.length > 80 || !costBasisPattern.test(draft.costBasis)) next.costBasis = 'Use a non-negative canonical decimal of at most 80 characters and 36 fractional digits.'
-    if (quantityPattern.test(draft.quantity) && moneyPattern.test(draft.unitCost) && costBasisPattern.test(draft.costBasis) && !exactProductMatches(draft.quantity, draft.unitCost, draft.costBasis)) next.costBasis = 'Quantity × unit cost must equal cost basis exactly.'
+    if (positiveQuantity(draft.quantity) && moneyPattern.test(draft.unitCost) && costBasisPattern.test(draft.costBasis) && !exactProductMatches(draft.quantity, draft.unitCost, draft.costBasis)) next.costBasis = 'Quantity × unit cost must equal cost basis exactly.'
     if (!currencyPattern.test(draft.currency)) next.currency = 'Use three uppercase currency letters.'
     if (draft.mode === 'inline' && currencyPattern.test(draft.instrumentCurrency) && draft.currency !== draft.instrumentCurrency) next.currency = 'Holding currency must match instrument currency.'
     if (draft.accountId && !identifierPattern.test(draft.accountId)) next.accountId = 'Enter a valid account ID.'
