@@ -238,7 +238,7 @@ func TestCalculateFutureQuoteBeyondToleranceIsIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Complete || result.ReportingTotal != "" || len(result.InvalidDependencies) != 1 || result.InvalidDependencies[0] != "quote:future-quote" {
+	if result.Complete || result.ReportingTotal != "" || len(result.FutureDependencies) != 1 || result.FutureDependencies[0] != "quote:future-quote" || len(result.InvalidDependencies) != 0 {
 		t.Fatalf("future quote result = %+v", result)
 	}
 }

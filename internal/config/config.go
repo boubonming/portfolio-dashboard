@@ -17,6 +17,7 @@ type Config struct {
 	DataPath          string
 	ReportingCurrency string
 	ProviderKeys      ProviderKeys
+	ProviderURLs      ProviderURLs
 	Auth              auth.Config
 }
 
@@ -25,6 +26,15 @@ type Config struct {
 type ProviderKeys struct {
 	Finnhub           string
 	AlphaVantage      string
+	OpenExchangeRates string
+}
+
+// ProviderURLs are server-side transport settings. They are injectable for
+// deterministic HTTP tests and never contain credentials.
+type ProviderURLs struct {
+	Finnhub           string
+	AlphaVantage      string
+	CoinGecko         string
 	OpenExchangeRates string
 }
 
@@ -41,6 +51,10 @@ func FromEnv() Config {
 			Finnhub:           os.Getenv("FINNHUB_API_KEY"),
 			AlphaVantage:      os.Getenv("ALPHA_VANTAGE_API_KEY"),
 			OpenExchangeRates: os.Getenv("OPEN_EXCHANGE_RATES_APP_ID"),
+		},
+		ProviderURLs: ProviderURLs{
+			Finnhub: envFirst("PORTFOLIO_FINNHUB_BASE_URL", "FINNHUB_BASE_URL"), AlphaVantage: envFirst("PORTFOLIO_ALPHA_VANTAGE_BASE_URL", "ALPHA_VANTAGE_BASE_URL"),
+			CoinGecko: envFirst("PORTFOLIO_COINGECKO_BASE_URL", "COINGECKO_BASE_URL"), OpenExchangeRates: envFirst("PORTFOLIO_OPEN_EXCHANGE_RATES_BASE_URL", "OPEN_EXCHANGE_RATES_BASE_URL"),
 		},
 		Auth: auth.Config{
 			Username: os.Getenv("PORTFOLIO_AUTH_USERNAME"), PasswordHash: os.Getenv("PORTFOLIO_AUTH_PASSWORD_HASH"),
@@ -153,4 +167,13 @@ func envOr(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envFirst(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }

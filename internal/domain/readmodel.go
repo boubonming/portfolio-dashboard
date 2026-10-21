@@ -26,6 +26,7 @@ type SnapshotView struct {
 	ReportingTotal      string             `json:"reporting_total,omitempty"`
 	MissingDependencies []string           `json:"missing_dependencies,omitempty"`
 	StaleDependencies   []string           `json:"stale_dependencies,omitempty"`
+	FutureDependencies  []string           `json:"future_dependencies,omitempty"`
 	InvalidDependencies []string           `json:"invalid_dependencies,omitempty"`
 	SourceTimestamps    []string           `json:"source_timestamps,omitempty"`
 	Subtotals           []CurrencySubtotal `json:"subtotals"`
@@ -46,6 +47,7 @@ type AllocationCoverage struct {
 	ValuedLots          int `json:"valued_lots"`
 	MissingDependencies int `json:"missing_dependencies"`
 	StaleDependencies   int `json:"stale_dependencies"`
+	FutureDependencies  int `json:"future_dependencies"`
 	InvalidDependencies int `json:"invalid_dependencies"`
 }
 

@@ -14,6 +14,7 @@ func BuildAllocation(input ValuationInput, valuation Valuation) AllocationView {
 		TotalLots:           len(input.Lots),
 		MissingDependencies: len(valuation.MissingDependencies),
 		StaleDependencies:   len(valuation.StaleDependencies),
+		FutureDependencies:  len(valuation.FutureDependencies),
 		InvalidDependencies: len(valuation.InvalidDependencies),
 	}
 	for _, lot := range valuation.Lots {
@@ -31,7 +32,7 @@ func BuildAllocation(input ValuationInput, valuation Valuation) AllocationView {
 		}
 		return allocation
 	}
-	if len(valuation.MissingDependencies) != 0 || len(valuation.StaleDependencies) != 0 || len(valuation.InvalidDependencies) != 0 {
+	if len(valuation.MissingDependencies) != 0 || len(valuation.StaleDependencies) != 0 || len(valuation.FutureDependencies) != 0 || len(valuation.InvalidDependencies) != 0 {
 		return allocation
 	}
 

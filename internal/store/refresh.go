@@ -19,6 +19,10 @@ type RefreshOptions struct {
 	Providers         []marketdata.Provider
 	Clients           map[marketdata.Provider]marketdata.ProviderClient
 	AsOf              time.Time
+	// receipt binds refresh persistence to the durable idempotency operation.
+	// It is intentionally private: only the idempotent workflow can provide it.
+	receipt   *marketRefreshReceiptBinding
+	RefreshID string
 }
 
 type refreshTarget struct {
@@ -67,7 +71,37 @@ func markRefreshObservationConflict(result *domain.RefreshResult, provider, obse
 			break
 		}
 	}
+	for index, observation := range result.QuoteObservations {
+		if observation.ID == observationID {
+			result.QuoteObservations = append(result.QuoteObservations[:index], result.QuoteObservations[index+1:]...)
+			break
+		}
+	}
+	for index, observation := range result.FXObservations {
+		if observation.ID == observationID {
+			result.FXObservations = append(result.FXObservations[:index], result.FXObservations[index+1:]...)
+			break
+		}
+	}
 	result.Status = "incomplete"
+}
+
+func quoteObservationSeen(values []domain.Quote, id string) bool {
+	for _, value := range values {
+		if value.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func fxObservationSeen(values []domain.FXRate, id string) bool {
+	for _, value := range values {
+		if value.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.RefreshResult, error) {
@@ -107,7 +141,11 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 		return domain.RefreshResult{}, err
 	}
 	started := time.Now().UTC()
-	result := domain.RefreshResult{RefreshID: deterministicID("refresh", options.PortfolioID, started.Format(time.RFC3339Nano)), PortfolioID: options.PortfolioID, Status: "complete", StartedAt: started.Format(time.RFC3339Nano)}
+	refreshID := options.RefreshID
+	if refreshID == "" {
+		refreshID = deterministicID("refresh", options.PortfolioID, started.Format(time.RFC3339Nano))
+	}
+	result := domain.RefreshResult{RefreshID: refreshID, PortfolioID: options.PortfolioID, Status: "complete", StartedAt: started.Format(time.RFC3339Nano)}
 	observations := refreshObservations{}
 	for _, provider := range providers {
 		status := s.refreshProvider(ctx, provider, options, targets, plan, &observations)
@@ -117,7 +155,16 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 			result.Status = "incomplete"
 		}
 	}
+	for _, quote := range observations.quotes {
+		result.QuoteObservations = append(result.QuoteObservations, domain.QuoteObservation{ID: quote.ID, InstrumentID: quote.InstrumentID, Symbol: quote.Symbol, Currency: quote.Currency, Source: quote.Source})
+	}
+	for _, fx := range observations.fx {
+		result.FXObservations = append(result.FXObservations, domain.FXObservation{ID: fx.ID, BaseCurrency: fx.BaseCurrency, QuoteCurrency: fx.QuoteCurrency, Source: fx.Source})
+	}
 	result.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if hookErr := s.marketRefreshFailure("before_observation_commit"); hookErr != nil {
+		return domain.RefreshResult{}, hookErr
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.RefreshResult{}, err
@@ -158,8 +205,21 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 	if err := recordActivity(ctx, tx, options.PortfolioID, "administrative", "market.refresh.completed", "market", "refresh_run", result.RefreshID, "Market refresh completed", "A market-data refresh completed.", result.EndedAt, auditID); err != nil {
 		return domain.RefreshResult{}, err
 	}
+	if options.receipt != nil {
+		encoded, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return domain.RefreshResult{}, marshalErr
+		}
+		if err := updateMarketRefreshObservedTx(ctx, tx, *options.receipt, result.RefreshID, encoded); err != nil {
+			return domain.RefreshResult{}, err
+		}
+	}
+	s.marketRefreshCommitFailure("before_observation_tx_commit")
 	if err := tx.Commit(); err != nil {
 		return domain.RefreshResult{}, err
+	}
+	if hookErr := s.marketRefreshFailure("after_observation_commit"); hookErr != nil {
+		return domain.RefreshResult{}, hookErr
 	}
 	return result, nil
 }
@@ -323,6 +383,10 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 		if batch, ok := client.(marketdata.BatchFXClient); ok {
 			status.RequestCount = 1
 			rates, failures := batch.FXBatch(ctx, fxRequests)
+			expectedFX := make(map[string]bool, len(fxRequests))
+			for _, request := range fxRequests {
+				expectedFX[strings.ToUpper(request.BaseCurrency)+"/"+strings.ToUpper(request.QuoteCurrency)] = true
+			}
 			for _, request := range fxRequests {
 				key := strings.ToUpper(request.BaseCurrency) + "/" + strings.ToUpper(request.QuoteCurrency)
 				if failure, exists := failures[key]; exists {
@@ -343,9 +407,23 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 					status.Status = "incomplete"
 					status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 				} else {
+					if fxObservationSeen(observations.fx, rate.ID) {
+						status.FailedCount++
+						status.Status = "incomplete"
+						status.Errors = append(status.Errors, "duplicate_observation")
+						continue
+					}
 					status.SucceededCount++
 					status.ObservationIDs = append(status.ObservationIDs, rate.ID)
+					status.FXObservations = append(status.FXObservations, domain.FXObservation{ID: rate.ID, BaseCurrency: rate.BaseCurrency, QuoteCurrency: rate.QuoteCurrency, Source: rate.Source})
 					observations.fx = append(observations.fx, rate)
+				}
+			}
+			for key := range rates {
+				if !expectedFX[key] {
+					status.FailedCount++
+					status.Status = "incomplete"
+					status.Errors = append(status.Errors, "extra_observation")
 				}
 			}
 			return status
@@ -364,8 +442,15 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 				status.Status = "incomplete"
 				status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 			} else {
+				if fxObservationSeen(observations.fx, rate.ID) {
+					status.FailedCount++
+					status.Status = "incomplete"
+					status.Errors = append(status.Errors, "duplicate_observation")
+					continue
+				}
 				status.SucceededCount++
 				status.ObservationIDs = append(status.ObservationIDs, rate.ID)
+				status.FXObservations = append(status.FXObservations, domain.FXObservation{ID: rate.ID, BaseCurrency: rate.BaseCurrency, QuoteCurrency: rate.QuoteCurrency, Source: rate.Source})
 				observations.fx = append(observations.fx, rate)
 			}
 		}
@@ -380,6 +465,10 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 			status.RequestCount = counter.QuoteBatchRequestCount(quoteRequests)
 		}
 		quotes, failures := batch.QuoteBatch(ctx, quoteRequests)
+		expectedQuotes := make(map[string]bool, len(quoteRequests))
+		for _, request := range quoteRequests {
+			expectedQuotes[request.InstrumentID] = true
+		}
 		for _, request := range quoteRequests {
 			if failure, exists := failures[request.InstrumentID]; exists {
 				status.FailedCount++
@@ -399,9 +488,23 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 				status.Status = "incomplete"
 				status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 			} else {
+				if quoteObservationSeen(observations.quotes, quote.ID) {
+					status.FailedCount++
+					status.Status = "incomplete"
+					status.Errors = append(status.Errors, "duplicate_observation")
+					continue
+				}
 				status.SucceededCount++
 				status.ObservationIDs = append(status.ObservationIDs, quote.ID)
+				status.QuoteObservations = append(status.QuoteObservations, domain.QuoteObservation{ID: quote.ID, InstrumentID: quote.InstrumentID, Symbol: quote.Symbol, Currency: quote.Currency, Source: quote.Source})
 				observations.quotes = append(observations.quotes, quote)
+			}
+		}
+		for key := range quotes {
+			if !expectedQuotes[key] {
+				status.FailedCount++
+				status.Status = "incomplete"
+				status.Errors = append(status.Errors, "extra_observation")
 			}
 		}
 		return status
@@ -420,8 +523,15 @@ func (s *Store) refreshProvider(ctx context.Context, provider marketdata.Provide
 			status.Status = "incomplete"
 			status.Errors = append(status.Errors, refreshValidationErrorClass(storeErr))
 		} else {
+			if quoteObservationSeen(observations.quotes, quote.ID) {
+				status.FailedCount++
+				status.Status = "incomplete"
+				status.Errors = append(status.Errors, "duplicate_observation")
+				continue
+			}
 			status.SucceededCount++
 			status.ObservationIDs = append(status.ObservationIDs, quote.ID)
+			status.QuoteObservations = append(status.QuoteObservations, domain.QuoteObservation{ID: quote.ID, InstrumentID: quote.InstrumentID, Symbol: quote.Symbol, Currency: quote.Currency, Source: quote.Source})
 			observations.quotes = append(observations.quotes, quote)
 		}
 	}
@@ -454,7 +564,14 @@ func validateRefreshQuote(s *Store, request marketdata.QuoteRequest, provider ma
 	if err != nil || price.Sign() <= 0 || strings.TrimSpace(quote.ID) == "" || strings.TrimSpace(quote.InstrumentID) == "" {
 		return errors.New("invalid provider quote")
 	}
-	return validateObservationTimes(s.now(), quote.MarketAt, quote.FetchedAt)
+	if err := validateObservationTimes(s.now(), quote.MarketAt, quote.FetchedAt); err != nil {
+		return err
+	}
+	marketAt, _ := domain.ValidateObservationTimestamp(quote.MarketAt)
+	if !request.AsOf.IsZero() && marketAt.After(request.AsOf.UTC().Add(domain.DefaultFutureTolerance)) {
+		return errors.New("market timestamp is after refresh as-of")
+	}
+	return nil
 }
 
 func validateRefreshFX(s *Store, request marketdata.FXRequest, provider marketdata.Provider, fx domain.FXRate) error {
@@ -465,12 +582,29 @@ func validateRefreshFX(s *Store, request marketdata.FXRequest, provider marketda
 	if err != nil || rate.Sign() <= 0 || strings.TrimSpace(fx.ID) == "" || fx.BaseCurrency == "" || fx.QuoteCurrency == "" {
 		return errors.New("invalid provider FX rate")
 	}
-	return validateObservationTimes(s.now(), fx.MarketAt, fx.FetchedAt)
+	if err := validateObservationTimes(s.now(), fx.MarketAt, fx.FetchedAt); err != nil {
+		return err
+	}
+	marketAt, _ := domain.ValidateObservationTimestamp(fx.MarketAt)
+	if !request.AsOf.IsZero() && marketAt.After(request.AsOf.UTC().Add(domain.DefaultFutureTolerance)) {
+		return errors.New("market timestamp is after refresh as-of")
+	}
+	return nil
 }
 
 func refreshValidationErrorClass(err error) string {
 	if errors.Is(err, errRefreshProviderContract) {
 		return "provider_error"
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "future") || strings.Contains(message, "timestamp") {
+		return "invalid_timestamp"
+	}
+	if strings.Contains(message, "currency") {
+		return "currency_mismatch"
+	}
+	if strings.Contains(message, "invalid provider") {
+		return "invalid_value"
 	}
 	return "persistence"
 }

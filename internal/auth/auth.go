@@ -151,6 +151,35 @@ func (a *Authenticator) MachineTokenValid(token string) bool {
 	return a.config.Machine.MachineTokenValid(token)
 }
 
+// BrowserActorID returns the bounded, non-secret identity attached to the
+// authenticated browser session. Durable operation namespaces must use this
+// identity rather than a handler-wide literal so receipts cannot be replayed
+// by another authenticated actor.
+func (a *Authenticator) BrowserActorID(r *http.Request) (string, bool) {
+	if _, err := a.Session(r); err != nil {
+		return "", false
+	}
+	actor := a.config.Username
+	if len(actor) >= 1 && len(actor) <= 128 {
+		valid := true
+		for index, character := range actor {
+			if (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '~' || character == '-' {
+				if index == 0 && character == '-' {
+					valid = false
+				}
+				continue
+			}
+			valid = false
+			break
+		}
+		if valid {
+			return actor, true
+		}
+	}
+	digest := sha256.Sum256([]byte(actor))
+	return "user-" + hex.EncodeToString(digest[:]), true
+}
+
 func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request, request LoginRequest) (SessionResponse, bool) {
 	if !a.reserveAttempt() {
 		return SessionResponse{}, false

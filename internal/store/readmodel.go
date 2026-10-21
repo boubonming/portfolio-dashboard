@@ -185,7 +185,7 @@ func snapshotView(payload snapshotPayload, valuation domain.Valuation) domain.Sn
 	if valuation.Complete {
 		state = "complete"
 	}
-	return domain.SnapshotView{State: state, SnapshotID: payload.SnapshotID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: valuation.Complete, ReportingTotal: valuation.ReportingTotal, MissingDependencies: valuation.MissingDependencies, StaleDependencies: valuation.StaleDependencies, InvalidDependencies: valuation.InvalidDependencies, SourceTimestamps: valuation.SourceTimestamps, Subtotals: valuation.Subtotals}
+	return domain.SnapshotView{State: state, SnapshotID: payload.SnapshotID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: valuation.Complete, ReportingTotal: valuation.ReportingTotal, MissingDependencies: valuation.MissingDependencies, StaleDependencies: valuation.StaleDependencies, FutureDependencies: valuation.FutureDependencies, InvalidDependencies: valuation.InvalidDependencies, SourceTimestamps: valuation.SourceTimestamps, Subtotals: valuation.Subtotals}
 }
 
 func latestQuoteByInstrument(quotes []domain.Quote) map[string]domain.Quote {
@@ -213,6 +213,11 @@ func appendDependencyFlags(holding *domain.HoldingView, valuation domain.Valuati
 	for _, dependency := range valuation.InvalidDependencies {
 		if dependencyAppliesToLot(dependency, lot, input, reportingCurrency) {
 			holding.DataQuality = appendUnique(holding.DataQuality, "invalid_dependency")
+		}
+	}
+	for _, dependency := range valuation.FutureDependencies {
+		if dependencyAppliesToLot(dependency, lot, input, reportingCurrency) {
+			holding.DataQuality = appendUnique(holding.DataQuality, "future_dependency")
 		}
 	}
 }

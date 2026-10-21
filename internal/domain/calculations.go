@@ -65,7 +65,7 @@ func Calculate(input ValuationInput) (Valuation, error) {
 	if input.AsOf.IsZero() {
 		input.AsOf = time.Now().UTC()
 	}
-	out := Valuation{Complete: true, ReportingCurrency: input.ReportingCurrency, Lots: []LotValuation{}, Subtotals: []CurrencySubtotal{}, QuoteIDs: []string{}, FXIDs: []string{}, MissingDependencies: []string{}, StaleDependencies: []string{}, InvalidDependencies: []string{}, SourceTimestamps: []string{}, PresentationTimezone: "Asia/Singapore"}
+	out := Valuation{Complete: true, ReportingCurrency: input.ReportingCurrency, Lots: []LotValuation{}, Subtotals: []CurrencySubtotal{}, MissingDependencies: []string{}, StaleDependencies: []string{}, FutureDependencies: []string{}, InvalidDependencies: []string{}, SourceTimestamps: []string{}, PresentationTimezone: "Asia/Singapore"}
 	quotes := latestQuotes(input.Quotes)
 	seenQuote, seenFX := map[string]bool{}, map[string]bool{}
 	type subtotal struct{ market, cost, pnl Decimal }
@@ -95,7 +95,9 @@ func Calculate(input ValuationInput) (Valuation, error) {
 			switch fresh.Status {
 			case Stale:
 				out.StaleDependencies = append(out.StaleDependencies, "quote:"+quote.ID)
-			case Future, Invalid:
+			case Future:
+				out.FutureDependencies = append(out.FutureDependencies, "quote:"+quote.ID)
+			case Invalid:
 				out.InvalidDependencies = append(out.InvalidDependencies, "quote:"+quote.ID)
 			}
 			out.Lots = append(out.Lots, lv)

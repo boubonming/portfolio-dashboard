@@ -21,10 +21,12 @@ var migrationFiles embed.FS
 const defaultPortfolioID = "portfolio-default"
 
 type Store struct {
-	DB              *sql.DB
-	cursorKey       []byte
-	reviewCursorKey []byte
-	clock           func() time.Time
+	DB                       *sql.DB
+	cursorKey                []byte
+	reviewCursorKey          []byte
+	clock                    func() time.Time
+	marketRefreshFailureHook func(string) error
+	marketRefreshCommitHook  func(string)
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -114,6 +116,33 @@ func (s *Store) now() time.Time {
 		return time.Now().UTC()
 	}
 	return s.clock().UTC()
+}
+
+// SetMarketRefreshFailureHook is a narrow test seam for exercising recovery at
+// durable workflow boundaries. Production callers leave it nil; ownership
+// never depends on this process-local hook.
+func (s *Store) SetMarketRefreshFailureHook(hook func(string) error) {
+	s.marketRefreshFailureHook = hook
+}
+
+// SetMarketRefreshCommitHook is a test-only seam that runs immediately before
+// a market-refresh transaction commits. Tests use it to cancel the transaction
+// context and exercise the database driver's real commit error path.
+func (s *Store) SetMarketRefreshCommitHook(hook func(string)) {
+	s.marketRefreshCommitHook = hook
+}
+
+func (s *Store) marketRefreshCommitFailure(point string) {
+	if s.marketRefreshCommitHook != nil {
+		s.marketRefreshCommitHook(point)
+	}
+}
+
+func (s *Store) marketRefreshFailure(point string) error {
+	if s.marketRefreshFailureHook == nil {
+		return nil
+	}
+	return s.marketRefreshFailureHook(point)
 }
 
 // SetActivityCursorSecret is used by the authenticated HTTP constructor. It
