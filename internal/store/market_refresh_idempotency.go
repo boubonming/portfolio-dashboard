@@ -2,11 +2,14 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
@@ -15,6 +18,12 @@ import (
 var (
 	ErrMarketRefreshIdempotencyConflict = errors.New("market refresh idempotency conflict")
 	ErrMarketRefreshInProgress          = errors.New("market refresh is already in progress")
+	ErrMarketRefreshCorrupt             = errors.New("market refresh receipt is corrupt")
+)
+
+const (
+	marketRefreshLeaseDuration = 30 * time.Second
+	marketRefreshWaitDuration  = 15 * time.Second
 )
 
 type MarketRefreshIdempotencyOptions struct {
@@ -26,6 +35,7 @@ type MarketRefreshIdempotencyOptions struct {
 	Refresh            RefreshOptions
 	Snapshot           SnapshotRequest
 	Missing            []string
+	ownerToken         string
 }
 
 type marketRefreshReceipt struct {
@@ -36,6 +46,8 @@ type marketRefreshReceipt struct {
 	snapshotID      string
 	refreshPayload  []byte
 	snapshotPayload []byte
+	ownerToken      string
+	leaseUntil      string
 }
 
 type marketRefreshReceiptBinding struct {
@@ -46,6 +58,7 @@ type marketRefreshReceiptBinding struct {
 	RequestFingerprint string
 	Refresh            domain.RefreshResult
 	Missing            []string
+	ownerToken         string
 }
 
 // RefreshMarketDataIdempotent uses a durable phase record around the provider
@@ -57,12 +70,34 @@ func (s *Store) RefreshMarketDataIdempotent(ctx context.Context, options MarketR
 	if err := validateMarketRefreshIdempotency(options); err != nil {
 		return domain.MarketRefreshResult{}, false, err
 	}
-	s.marketRefreshMu.Lock()
-	defer s.marketRefreshMu.Unlock()
-
-	receipt, err := s.readOrReserveMarketRefresh(ctx, options)
+	ownerToken, err := newMarketRefreshOwnerToken()
 	if err != nil {
 		return domain.MarketRefreshResult{}, false, err
+	}
+	options.ownerToken = ownerToken
+	var receipt marketRefreshReceipt
+	waitDeadline := time.Now().Add(marketRefreshWaitDuration)
+	for {
+		var owner bool
+		receipt, owner, err = s.acquireOrReadMarketRefresh(ctx, options, ownerToken)
+		if err != nil {
+			return domain.MarketRefreshResult{}, false, err
+		}
+		if receipt.state == "committed" || owner {
+			break
+		}
+		if time.Now().After(waitDeadline) {
+			return domain.MarketRefreshResult{}, false, ErrMarketRefreshInProgress
+		}
+		wait := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !wait.Stop() {
+				<-wait.C
+			}
+			return domain.MarketRefreshResult{}, false, ctx.Err()
+		case <-wait.C:
+		}
 	}
 	if receipt.state == "committed" {
 		var result domain.MarketRefreshResult
@@ -70,6 +105,33 @@ func (s *Store) RefreshMarketDataIdempotent(ctx context.Context, options MarketR
 			return domain.MarketRefreshResult{}, false, fmt.Errorf("decode market refresh receipt: %w", err)
 		}
 		return result, true, nil
+	}
+	stopLease := make(chan struct{})
+	leaseDone := make(chan struct{})
+	go func() {
+		defer close(leaseDone)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = s.renewMarketRefreshLease(ctx, options, ownerToken)
+			case <-stopLease:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stopLease)
+		<-leaseDone
+	}()
+	if receipt.phase == "reserved" {
+		if hookErr := s.marketRefreshFailure("after_reservation"); hookErr != nil {
+			_ = s.recordMarketRefreshFailure(ctx, options, hookErr)
+			return domain.MarketRefreshResult{}, false, hookErr
+		}
 	}
 
 	var refresh domain.RefreshResult
@@ -79,7 +141,10 @@ func (s *Store) RefreshMarketDataIdempotent(ctx context.Context, options MarketR
 		}
 	} else {
 		options.Refresh.RefreshID = receipt.refreshID
-		options.Refresh.receipt = &marketRefreshReceiptBinding{ActorCategory: options.ActorCategory, ActorID: options.ActorID, PortfolioID: options.PortfolioID, IdempotencyKey: options.IdempotencyKey, RequestFingerprint: options.RequestFingerprint}
+		options.Refresh.receipt = &marketRefreshReceiptBinding{ActorCategory: options.ActorCategory, ActorID: options.ActorID, PortfolioID: options.PortfolioID, IdempotencyKey: options.IdempotencyKey, RequestFingerprint: options.RequestFingerprint, ownerToken: ownerToken}
+		if err := s.renewMarketRefreshLease(ctx, options, ownerToken); err != nil {
+			return domain.MarketRefreshResult{}, false, err
+		}
 		refresh, err = s.Refresh(ctx, options.Refresh)
 		if err != nil {
 			_ = s.recordMarketRefreshFailure(ctx, options, err)
@@ -95,7 +160,10 @@ func (s *Store) RefreshMarketDataIdempotent(ctx context.Context, options MarketR
 			return domain.MarketRefreshResult{}, false, fmt.Errorf("decode persisted snapshot phase: %w", err)
 		}
 	} else {
-		options.Snapshot.receipt = &marketRefreshReceiptBinding{ActorCategory: options.ActorCategory, ActorID: options.ActorID, PortfolioID: options.PortfolioID, IdempotencyKey: options.IdempotencyKey, RequestFingerprint: options.RequestFingerprint, Refresh: refresh, Missing: options.Missing}
+		options.Snapshot.receipt = &marketRefreshReceiptBinding{ActorCategory: options.ActorCategory, ActorID: options.ActorID, PortfolioID: options.PortfolioID, IdempotencyKey: options.IdempotencyKey, RequestFingerprint: options.RequestFingerprint, ownerToken: ownerToken, Refresh: refresh, Missing: options.Missing}
+		if err := s.renewMarketRefreshLease(ctx, options, ownerToken); err != nil {
+			return domain.MarketRefreshResult{}, false, err
+		}
 		snapshot, err = s.CreateSnapshot(ctx, options.Snapshot)
 		if err != nil {
 			_ = s.recordMarketRefreshFailure(ctx, options, err)
@@ -139,12 +207,54 @@ func validateMarketRefreshIdempotency(options MarketRefreshIdempotencyOptions) e
 	return nil
 }
 
+func newMarketRefreshOwnerToken() (string, error) {
+	bytes := make([]byte, 24)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("generate market refresh owner token: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
+}
+
+func marketRefreshLeaseExpired(value string, now time.Time) bool {
+	if strings.TrimSpace(value) == "" {
+		return true
+	}
+	lease, err := time.Parse(time.RFC3339Nano, value)
+	return err != nil || !lease.After(now.UTC())
+}
+
+func formatMarketRefreshTimestamp(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
+}
+
+func marketRefreshSnapshotExists(ctx context.Context, query interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, snapshotID string) bool {
+	var count int
+	return query.QueryRowContext(ctx, "SELECT COUNT(*) FROM snapshots WHERE id=?", snapshotID).Scan(&count) == nil && count == 1
+}
+
+// readOrReserveMarketRefresh is retained as a small test and migration helper.
+// The composed workflow uses acquireOrReadMarketRefresh, which reports durable
+// ownership separately and never treats a live owner as an invitation to run.
 func (s *Store) readOrReserveMarketRefresh(ctx context.Context, options MarketRefreshIdempotencyOptions) (marketRefreshReceipt, error) {
-	const maxAttempts = 5
+	ownerToken, err := newMarketRefreshOwnerToken()
+	if err != nil {
+		return marketRefreshReceipt{}, err
+	}
+	receipt, _, err := s.acquireOrReadMarketRefresh(ctx, options, ownerToken)
+	return receipt, err
+}
+
+func (s *Store) acquireOrReadMarketRefresh(ctx context.Context, options MarketRefreshIdempotencyOptions, ownerToken string) (marketRefreshReceipt, bool, error) {
+	const maxAttempts = 50
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		receipt, err := s.readOrReserveMarketRefreshOnce(ctx, options)
+		receipt, owner, err := s.readOrReserveMarketRefreshOnce(ctx, options, ownerToken)
 		if err == nil || !isSQLiteBusy(err) || attempt == maxAttempts-1 {
-			return receipt, err
+			if attempt == maxAttempts-1 && isSQLiteBusy(err) {
+				return marketRefreshReceipt{}, false, ErrMarketRefreshInProgress
+			}
+			return receipt, owner, err
 		}
 		backoff := time.Duration(attempt+1) * 10 * time.Millisecond
 		timer := time.NewTimer(backoff)
@@ -153,62 +263,118 @@ func (s *Store) readOrReserveMarketRefresh(ctx context.Context, options MarketRe
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return marketRefreshReceipt{}, ctx.Err()
+			return marketRefreshReceipt{}, false, ctx.Err()
 		case <-timer.C:
 		}
 	}
-	return marketRefreshReceipt{}, ctx.Err()
+	return marketRefreshReceipt{}, false, ctx.Err()
 }
 
-func (s *Store) readOrReserveMarketRefreshOnce(ctx context.Context, options MarketRefreshIdempotencyOptions) (marketRefreshReceipt, error) {
+func (s *Store) readOrReserveMarketRefreshOnce(ctx context.Context, options MarketRefreshIdempotencyOptions, ownerToken string) (marketRefreshReceipt, bool, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return marketRefreshReceipt{}, err
+		return marketRefreshReceipt{}, false, err
 	}
 	defer tx.Rollback()
 	var fingerprint, state, phase, payload string
-	var refreshID, snapshotID, refreshPayload, snapshotPayload, errorMessage sql.NullString
+	var refreshID, snapshotID, refreshPayload, snapshotPayload, errorMessage, existingOwner, leaseUntil sql.NullString
 	err = tx.QueryRowContext(ctx, `SELECT request_fingerprint,state,phase,response_payload,refresh_id,snapshot_id,refresh_payload,snapshot_payload,error_message
 		FROM market_refresh_idempotency WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=?`,
 		options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey).Scan(&fingerprint, &state, &phase, &payload, &refreshID, &snapshotID, &refreshPayload, &snapshotPayload, &errorMessage)
 	if err == nil {
 		if fingerprint != options.RequestFingerprint {
-			return marketRefreshReceipt{}, ErrMarketRefreshIdempotencyConflict
+			return marketRefreshReceipt{}, false, ErrMarketRefreshIdempotencyConflict
 		}
-		return marketRefreshReceipt{responsePayload: []byte(payload), state: state, phase: phase, refreshID: nullStringValue(refreshID), snapshotID: nullStringValue(snapshotID), refreshPayload: nullBytes(refreshPayload), snapshotPayload: nullBytes(snapshotPayload)}, nil
+		if err := tx.QueryRowContext(ctx, `SELECT owner_token,lease_until FROM market_refresh_idempotency WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=?`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey).Scan(&existingOwner, &leaseUntil); err != nil {
+			return marketRefreshReceipt{}, false, err
+		}
+		receipt := marketRefreshReceipt{responsePayload: []byte(payload), state: state, phase: phase, refreshID: nullStringValue(refreshID), snapshotID: nullStringValue(snapshotID), refreshPayload: nullBytes(refreshPayload), snapshotPayload: nullBytes(snapshotPayload), ownerToken: nullStringValue(existingOwner), leaseUntil: nullStringValue(leaseUntil)}
+		if state == "committed" {
+			if receipt.snapshotID == "" || !marketRefreshSnapshotExists(ctx, tx, receipt.snapshotID) {
+				return marketRefreshReceipt{}, false, ErrMarketRefreshCorrupt
+			}
+			return receipt, false, nil
+		}
+		if receipt.ownerToken == ownerToken {
+			return receipt, true, nil
+		}
+		if !marketRefreshLeaseExpired(receipt.leaseUntil, s.now()) {
+			return receipt, false, nil
+		}
+		newLease := formatMarketRefreshTimestamp(s.now().Add(marketRefreshLeaseDuration))
+		update, updateErr := tx.ExecContext(ctx, `UPDATE market_refresh_idempotency SET owner_token=?,lease_until=?,phase=CASE WHEN phase='failed' AND refresh_payload IS NULL THEN 'reserved' WHEN phase='failed' AND refresh_payload IS NOT NULL THEN 'observed' ELSE phase END WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND state='pending' AND (lease_until IS NULL OR lease_until<=?)`, ownerToken, newLease, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, formatMarketRefreshTimestamp(s.now()))
+		if updateErr != nil {
+			return marketRefreshReceipt{}, false, updateErr
+		}
+		affected, _ := update.RowsAffected()
+		if affected != 1 {
+			if commitErr := tx.Commit(); commitErr != nil {
+				return marketRefreshReceipt{}, false, commitErr
+			}
+			return receipt, false, nil
+		}
+		if err := tx.Commit(); err != nil {
+			return marketRefreshReceipt{}, false, err
+		}
+		receipt.ownerToken, receipt.leaseUntil = ownerToken, newLease
+		return receipt, true, nil
 	}
 	if err != sql.ErrNoRows {
-		return marketRefreshReceipt{}, err
+		return marketRefreshReceipt{}, false, err
 	}
-	created := s.now().Format(time.RFC3339Nano)
+	created := formatMarketRefreshTimestamp(s.now())
+	leaseUntilText := formatMarketRefreshTimestamp(s.now().Add(marketRefreshLeaseDuration))
 	if _, err := tx.ExecContext(ctx, `INSERT INTO market_refresh_idempotency
-		(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), created); err != nil {
+		(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,created_at,owner_token,lease_until)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), created, ownerToken, leaseUntilText); err != nil {
 		if !isUniqueError(err) {
-			return marketRefreshReceipt{}, err
+			return marketRefreshReceipt{}, false, err
 		}
 		_ = tx.Rollback()
-		return s.readExistingMarketRefresh(ctx, options)
+		return s.readExistingMarketRefresh(ctx, options, ownerToken)
 	}
 	if err := tx.Commit(); err != nil {
-		return marketRefreshReceipt{}, err
+		return marketRefreshReceipt{}, false, err
 	}
-	return marketRefreshReceipt{state: "pending", phase: "reserved", refreshID: deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey)}, nil
+	return marketRefreshReceipt{state: "pending", phase: "reserved", refreshID: deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), ownerToken: ownerToken, leaseUntil: leaseUntilText}, true, nil
 }
 
-func (s *Store) readExistingMarketRefresh(ctx context.Context, options MarketRefreshIdempotencyOptions) (marketRefreshReceipt, error) {
+func (s *Store) readExistingMarketRefresh(ctx context.Context, options MarketRefreshIdempotencyOptions, ownerToken string) (marketRefreshReceipt, bool, error) {
 	var fingerprint, state, phase, payload string
-	var refreshID, snapshotID, refreshPayload, snapshotPayload, errorMessage sql.NullString
+	var refreshID, snapshotID, refreshPayload, snapshotPayload, errorMessage, existingOwner, leaseUntil sql.NullString
 	err := s.DB.QueryRowContext(ctx, `SELECT request_fingerprint,state,phase,response_payload,refresh_id,snapshot_id,refresh_payload,snapshot_payload,error_message
 		FROM market_refresh_idempotency WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=?`,
 		options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey).Scan(&fingerprint, &state, &phase, &payload, &refreshID, &snapshotID, &refreshPayload, &snapshotPayload, &errorMessage)
 	if err != nil {
-		return marketRefreshReceipt{}, err
+		return marketRefreshReceipt{}, false, err
 	}
 	if fingerprint != options.RequestFingerprint {
-		return marketRefreshReceipt{}, ErrMarketRefreshIdempotencyConflict
+		return marketRefreshReceipt{}, false, ErrMarketRefreshIdempotencyConflict
 	}
-	return marketRefreshReceipt{responsePayload: []byte(payload), state: state, phase: phase, refreshID: nullStringValue(refreshID), snapshotID: nullStringValue(snapshotID), refreshPayload: nullBytes(refreshPayload), snapshotPayload: nullBytes(snapshotPayload)}, nil
+	if err := s.DB.QueryRowContext(ctx, `SELECT owner_token,lease_until FROM market_refresh_idempotency WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=?`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey).Scan(&existingOwner, &leaseUntil); err != nil {
+		return marketRefreshReceipt{}, false, err
+	}
+	receipt := marketRefreshReceipt{responsePayload: []byte(payload), state: state, phase: phase, refreshID: nullStringValue(refreshID), snapshotID: nullStringValue(snapshotID), refreshPayload: nullBytes(refreshPayload), snapshotPayload: nullBytes(snapshotPayload), ownerToken: nullStringValue(existingOwner), leaseUntil: nullStringValue(leaseUntil)}
+	if state == "committed" && (receipt.snapshotID == "" || !marketRefreshSnapshotExists(ctx, s.DB, receipt.snapshotID)) {
+		return marketRefreshReceipt{}, false, ErrMarketRefreshCorrupt
+	}
+	return receipt, state != "committed" && (receipt.ownerToken == ownerToken || marketRefreshLeaseExpired(receipt.leaseUntil, s.now())), nil
+}
+
+func (s *Store) renewMarketRefreshLease(ctx context.Context, options MarketRefreshIdempotencyOptions, ownerToken string) error {
+	leaseUntil := formatMarketRefreshTimestamp(s.now().Add(marketRefreshLeaseDuration))
+	result, err := s.DB.ExecContext(ctx, `UPDATE market_refresh_idempotency SET lease_until=?
+		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=?
+		AND request_fingerprint=? AND state='pending' AND owner_token=? AND lease_until>?`, leaseUntil,
+		options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, ownerToken, formatMarketRefreshTimestamp(s.now()))
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return ErrMarketRefreshInProgress
+	}
+	return nil
 }
 
 func nullBytes(value sql.NullString) []byte {
@@ -227,22 +393,22 @@ func nullStringValue(value sql.NullString) string {
 
 func (s *Store) markMarketRefreshObserved(ctx context.Context, options MarketRefreshIdempotencyOptions, refreshID string, payload []byte) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE market_refresh_idempotency SET phase='observed',refresh_id=?,refresh_payload=?,error_message=NULL
-		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending'`,
-		refreshID, payload, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint)
+		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending' AND owner_token=?`,
+		refreshID, payload, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, options.ownerToken)
 	return err
 }
 
 func (s *Store) markMarketRefreshSnapshotted(ctx context.Context, options MarketRefreshIdempotencyOptions, snapshotID string, payload []byte) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE market_refresh_idempotency SET phase='snapshotted',snapshot_id=?,snapshot_payload=?,error_message=NULL
-		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending'`,
-		snapshotID, payload, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint)
+		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending' AND owner_token=?`,
+		snapshotID, payload, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, options.ownerToken)
 	return err
 }
 
 func updateMarketRefreshObservedTx(ctx context.Context, tx *sql.Tx, binding marketRefreshReceiptBinding, refreshID string, payload []byte) error {
 	update, err := tx.ExecContext(ctx, `UPDATE market_refresh_idempotency SET phase='observed',refresh_id=?,refresh_payload=?,error_message=NULL
-		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending' AND phase='reserved'`,
-		refreshID, payload, binding.ActorCategory, binding.ActorID, binding.PortfolioID, "refresh", binding.IdempotencyKey, binding.RequestFingerprint)
+		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending' AND phase='reserved' AND owner_token=?`,
+		refreshID, payload, binding.ActorCategory, binding.ActorID, binding.PortfolioID, "refresh", binding.IdempotencyKey, binding.RequestFingerprint, binding.ownerToken)
 	if err != nil {
 		return err
 	}
@@ -257,9 +423,9 @@ func (s *Store) recordMarketRefreshFailure(ctx context.Context, options MarketRe
 	if len(message) > 512 {
 		message = message[:512]
 	}
-	_, err := s.DB.ExecContext(ctx, `UPDATE market_refresh_idempotency SET phase='failed',error_message=?
-		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending'`,
-		message, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint)
+	_, err := s.DB.ExecContext(ctx, `UPDATE market_refresh_idempotency SET phase='failed',error_message=?,owner_token=NULL,lease_until=NULL
+		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending' AND owner_token=?`,
+		message, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, options.ownerToken)
 	return err
 }
 
@@ -269,13 +435,17 @@ func (s *Store) commitMarketRefreshReceipt(ctx context.Context, options MarketRe
 		return err
 	}
 	defer tx.Rollback()
-	now := s.now().Format(time.RFC3339Nano)
+	now := formatMarketRefreshTimestamp(s.now())
 	auditID := deterministicID("audit", "refresh", result.Refresh.RefreshID)
 	activityID := deterministicID("activity", auditID, options.PortfolioID)
-	update, err := tx.ExecContext(ctx, `UPDATE market_refresh_idempotency SET state='committed',phase='committed',response_payload=?,refresh_id=?,snapshot_id=?,audit_event_id=?,activity_event_id=?,committed_at=?,error_message=NULL
-		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending'`,
-		encoded, result.Refresh.RefreshID, result.Snapshot.SnapshotID, auditID, activityID, now,
-		options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint)
+	snapshotPayload, marshalErr := json.Marshal(result.Snapshot)
+	if marshalErr != nil {
+		return marshalErr
+	}
+	update, err := tx.ExecContext(ctx, `UPDATE market_refresh_idempotency SET state='committed',phase='committed',response_payload=?,refresh_id=?,snapshot_id=?,snapshot_payload=?,audit_event_id=?,activity_event_id=?,committed_at=?,error_message=NULL,owner_token=NULL,lease_until=NULL
+		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending' AND owner_token=?`,
+		encoded, result.Refresh.RefreshID, result.Snapshot.SnapshotID, snapshotPayload, auditID, activityID, now,
+		options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, options.ownerToken)
 	if err != nil {
 		return err
 	}
@@ -285,12 +455,16 @@ func (s *Store) commitMarketRefreshReceipt(ctx context.Context, options MarketRe
 	return tx.Commit()
 }
 
-func commitMarketRefreshReceiptTx(ctx context.Context, tx *sql.Tx, binding marketRefreshReceiptBinding, result domain.MarketRefreshResult, encoded []byte, snapshotID, auditID, activityID string) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	update, err := tx.ExecContext(ctx, `UPDATE market_refresh_idempotency SET state='committed',phase='committed',response_payload=?,refresh_id=?,snapshot_id=?,audit_event_id=?,activity_event_id=?,committed_at=?,error_message=NULL
-		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending' AND phase='observed'`,
-		encoded, result.Refresh.RefreshID, snapshotID, auditID, activityID, now,
-		binding.ActorCategory, binding.ActorID, binding.PortfolioID, "refresh", binding.IdempotencyKey, binding.RequestFingerprint)
+func (s *Store) commitMarketRefreshReceiptTx(ctx context.Context, tx *sql.Tx, binding marketRefreshReceiptBinding, result domain.MarketRefreshResult, encoded []byte, snapshotID, auditID, activityID string) error {
+	now := formatMarketRefreshTimestamp(s.now())
+	snapshotPayload, marshalErr := json.Marshal(result.Snapshot)
+	if marshalErr != nil {
+		return marshalErr
+	}
+	update, err := tx.ExecContext(ctx, `UPDATE market_refresh_idempotency SET state='committed',phase='committed',response_payload=?,refresh_id=?,snapshot_id=?,snapshot_payload=?,audit_event_id=?,activity_event_id=?,committed_at=?,error_message=NULL,owner_token=NULL,lease_until=NULL
+		WHERE actor_category=? AND actor_id=? AND portfolio_id=? AND operation=? AND idempotency_key=? AND request_fingerprint=? AND state='pending' AND phase='observed' AND owner_token=?`,
+		encoded, result.Refresh.RefreshID, snapshotID, snapshotPayload, auditID, activityID, now,
+		binding.ActorCategory, binding.ActorID, binding.PortfolioID, "refresh", binding.IdempotencyKey, binding.RequestFingerprint, binding.ownerToken)
 	if err != nil {
 		return err
 	}

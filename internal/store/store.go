@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -22,11 +21,11 @@ var migrationFiles embed.FS
 const defaultPortfolioID = "portfolio-default"
 
 type Store struct {
-	DB              *sql.DB
-	cursorKey       []byte
-	reviewCursorKey []byte
-	clock           func() time.Time
-	marketRefreshMu sync.Mutex
+	DB                       *sql.DB
+	cursorKey                []byte
+	reviewCursorKey          []byte
+	clock                    func() time.Time
+	marketRefreshFailureHook func(string) error
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -116,6 +115,20 @@ func (s *Store) now() time.Time {
 		return time.Now().UTC()
 	}
 	return s.clock().UTC()
+}
+
+// SetMarketRefreshFailureHook is a narrow test seam for exercising recovery at
+// durable workflow boundaries. Production callers leave it nil; ownership
+// never depends on this process-local hook.
+func (s *Store) SetMarketRefreshFailureHook(hook func(string) error) {
+	s.marketRefreshFailureHook = hook
+}
+
+func (s *Store) marketRefreshFailure(point string) error {
+	if s.marketRefreshFailureHook == nil {
+		return nil
+	}
+	return s.marketRefreshFailureHook(point)
 }
 
 // SetActivityCursorSecret is used by the authenticated HTTP constructor. It

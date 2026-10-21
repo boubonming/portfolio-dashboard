@@ -51,26 +51,48 @@ type ProviderMapping struct {
 }
 
 type ProviderRefreshStatus struct {
-	Provider       string   `json:"provider"`
-	Status         string   `json:"status"`
-	RequestCount   int      `json:"request_count"`
-	SucceededCount int      `json:"succeeded_count"`
-	FailedCount    int      `json:"failed_count"`
-	MissingMapping int      `json:"missing_mapping_count"`
-	ObservationIDs []string `json:"observation_ids,omitempty"`
-	Errors         []string `json:"errors,omitempty"`
+	Provider          string             `json:"provider"`
+	Status            string             `json:"status"`
+	RequestCount      int                `json:"request_count"`
+	SucceededCount    int                `json:"succeeded_count"`
+	FailedCount       int                `json:"failed_count"`
+	MissingMapping    int                `json:"missing_mapping_count"`
+	ObservationIDs    []string           `json:"observation_ids,omitempty"`
+	QuoteObservations []QuoteObservation `json:"quote_observations,omitempty"`
+	FXObservations    []FXObservation    `json:"fx_observations,omitempty"`
+	Errors            []string           `json:"errors,omitempty"`
 }
 
-// RefreshResult is deliberately aggregate-only. It contains no holdings,
-// symbols, quantities, or provider credentials.
+// QuoteObservation and FXObservation are trusted identity witnesses for the
+// opaque IDs returned in a refresh. IDs alone are not sufficient to prove that
+// a snapshot used the configured instrument and currency path.
+type QuoteObservation struct {
+	ID           string `json:"id"`
+	InstrumentID string `json:"instrument_id"`
+	Symbol       string `json:"symbol"`
+	Currency     string `json:"currency"`
+	Source       string `json:"source"`
+}
+
+type FXObservation struct {
+	ID            string `json:"id"`
+	BaseCurrency  string `json:"base_currency"`
+	QuoteCurrency string `json:"quote_currency"`
+	Source        string `json:"source"`
+}
+
+// RefreshResult contains aggregate workflow status plus trusted observation
+// identity witnesses. It contains no quantities, holdings, or provider credentials.
 type RefreshResult struct {
-	RefreshID      string                  `json:"refresh_id"`
-	PortfolioID    string                  `json:"portfolio_id"`
-	Status         string                  `json:"status"`
-	StartedAt      string                  `json:"started_at"`
-	EndedAt        string                  `json:"ended_at"`
-	ObservationIDs []string                `json:"observation_ids,omitempty"`
-	Providers      []ProviderRefreshStatus `json:"providers"`
+	RefreshID         string                  `json:"refresh_id"`
+	PortfolioID       string                  `json:"portfolio_id"`
+	Status            string                  `json:"status"`
+	StartedAt         string                  `json:"started_at"`
+	EndedAt           string                  `json:"ended_at"`
+	ObservationIDs    []string                `json:"observation_ids,omitempty"`
+	QuoteObservations []QuoteObservation      `json:"quote_observations,omitempty"`
+	FXObservations    []FXObservation         `json:"fx_observations,omitempty"`
+	Providers         []ProviderRefreshStatus `json:"providers"`
 }
 
 type Freshness struct {
@@ -156,6 +178,8 @@ type SnapshotStatus struct {
 	InvalidDependencies  []string           `json:"invalid_dependencies"`
 	QuoteIDs             []string           `json:"quote_ids"`
 	FXIDs                []string           `json:"fx_ids"`
+	QuoteObservations    []QuoteObservation `json:"quote_observations"`
+	FXObservations       []FXObservation    `json:"fx_observations"`
 	SourceTimestamps     []string           `json:"source_timestamps"`
 	PresentationTimezone string             `json:"presentation_timezone"`
 }

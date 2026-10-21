@@ -849,6 +849,8 @@ components:
         started_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         ended_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         observation_ids: { type: array, maxItems: 4096, uniqueItems: true, items: { $ref: '#/components/schemas/ObservationId' } }
+        quote_observations: { type: array, maxItems: 4096, items: { $ref: '#/components/schemas/QuoteObservation' } }
+        fx_observations: { type: array, maxItems: 4096, items: { $ref: '#/components/schemas/FXObservation' } }
         providers: { type: array, maxItems: 32, items: { $ref: '#/components/schemas/ProviderRefreshStatus' } }
     ProviderRefreshStatus:
       type: object
@@ -862,11 +864,13 @@ components:
         failed_count: { type: integer, minimum: 0, maximum: 1000000 }
         missing_mapping_count: { type: integer, minimum: 0, maximum: 1000000 }
         observation_ids: { type: array, maxItems: 4096, uniqueItems: true, items: { $ref: '#/components/schemas/ObservationId' } }
+        quote_observations: { type: array, maxItems: 4096, items: { $ref: '#/components/schemas/QuoteObservation' } }
+        fx_observations: { type: array, maxItems: 4096, items: { $ref: '#/components/schemas/FXObservation' } }
         errors: { type: array, maxItems: 64, items: { type: string, minLength: 1, maxLength: 128 } }
     SnapshotStatus:
       type: object
       additionalProperties: false
-      required: [snapshot_id, portfolio_id, calculation_version, created_at, as_of, complete, reporting_currency, currencies, subtotals, missing_count, stale_count, invalid_count, missing_dependencies, stale_dependencies, invalid_dependencies, quote_ids, fx_ids, source_timestamps, presentation_timezone]
+      required: [snapshot_id, portfolio_id, calculation_version, created_at, as_of, complete, reporting_currency, currencies, subtotals, missing_count, stale_count, invalid_count, missing_dependencies, stale_dependencies, invalid_dependencies, quote_ids, fx_ids, quote_observations, fx_observations, source_timestamps, presentation_timezone]
       properties:
         snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
         portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
@@ -886,6 +890,8 @@ components:
         invalid_dependencies: { type: array, maxItems: 10000, items: { type: string, minLength: 1, maxLength: 256 } }
         quote_ids: { type: array, maxItems: 10000, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 128 } }
         fx_ids: { type: array, maxItems: 10000, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 128 } }
+        quote_observations: { type: array, maxItems: 10000, items: { $ref: '#/components/schemas/QuoteObservation' } }
+        fx_observations: { type: array, maxItems: 10000, items: { $ref: '#/components/schemas/FXObservation' } }
         source_timestamps: { type: array, maxItems: 10000, items: { $ref: '#/components/schemas/CanonicalDateTime' } }
         presentation_timezone: { type: string, minLength: 1, maxLength: 64 }
     SnapshotSubtotal:
@@ -897,6 +903,25 @@ components:
         market_value: { $ref: '#/components/schemas/DecimalString' }
         cost_basis: { $ref: '#/components/schemas/DecimalString' }
         unrealised_pnl: { type: string, pattern: '^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$' }
+    QuoteObservation:
+      type: object
+      additionalProperties: false
+      required: [id, instrument_id, symbol, currency, source]
+      properties:
+        id: { $ref: '#/components/schemas/ObservationId' }
+        instrument_id: { $ref: '#/components/schemas/InstrumentId' }
+        symbol: { type: string, minLength: 1, maxLength: 128 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        source: { type: string, minLength: 1, maxLength: 64 }
+    FXObservation:
+      type: object
+      additionalProperties: false
+      required: [id, base_currency, quote_currency, source]
+      properties:
+        id: { $ref: '#/components/schemas/ObservationId' }
+        base_currency: { type: string, pattern: '^[A-Z]{3}$' }
+        quote_currency: { type: string, pattern: '^[A-Z]{3}$' }
+        source: { type: string, minLength: 1, maxLength: 64 }
     PortfolioId:
       type: string
       minLength: 1
