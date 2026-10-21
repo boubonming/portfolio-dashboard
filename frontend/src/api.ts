@@ -379,7 +379,7 @@ function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDat
     }
     const missingInstrumentLabels = new Set(setup.instruments.map((instrument) => `${instrument.symbol} (${instrument.currency})`))
     if (new Set(result.missing_instruments).size !== result.missing_instruments.length || result.missing_instruments.some((instrument) => !missingInstrumentLabels.has(instrument))) throw new APIError(200, 'Invalid market refresh response: unknown missing instrument.')
-    for (const dependency of [...result.snapshot.missing_dependencies, ...result.snapshot.stale_dependencies, ...result.snapshot.invalid_dependencies]) {
+    for (const dependency of [...result.snapshot.missing_dependencies, ...result.snapshot.stale_dependencies, ...result.snapshot.future_dependencies, ...result.snapshot.invalid_dependencies]) {
       const normalized = dependency.replace(/^(?:missing|stale|invalid)\s+/i, '')
       const quote = normalized.match(/^quote:([A-Za-z0-9._~-]+)$/)
       const fx = normalized.match(/^fx:([A-Z]{3})\/([A-Z]{3})$/)

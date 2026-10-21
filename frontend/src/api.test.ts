@@ -76,6 +76,32 @@ describe('semantic market refresh decoding', () => {
     await expect(decodeMarketResult(reversed)).rejects.toSatisfy((error: unknown) => error instanceof APIError && /ordering/.test(error.message))
   })
 
+  it('accepts setup-bound future quote and FX dependencies', async () => {
+    const value = coherentRefresh()
+    value.snapshot.future_count = 2
+    value.snapshot.future_dependencies = ['quote:instrument-a', 'fx:USD/MYR']
+    await expect(decodeMarketResult(value)).resolves.toMatchObject({ complete: true })
+  })
+
+  it.each([
+    ['foreign future quote instrument', 'quote:foreign-instrument'],
+    ['foreign future FX source currency', 'fx:EUR/MYR'],
+    ['foreign future FX target currency', 'fx:USD/SGD'],
+    ['malformed future dependency', 'future:instrument-a'],
+  ])('rejects %s', async (_name, dependency) => {
+    const value = coherentRefresh()
+    value.snapshot.future_count = 1
+    value.snapshot.future_dependencies = [dependency]
+    await expect(decodeMarketResult(value)).rejects.toSatisfy((error: unknown) => error instanceof APIError && /Invalid/.test(error.message))
+  })
+
+  it('rejects duplicate future dependency identities', async () => {
+    const value = coherentRefresh()
+    value.snapshot.future_count = 2
+    value.snapshot.future_dependencies = ['quote:instrument-a', 'quote:instrument-a']
+    await expect(decodeMarketResult(value)).rejects.toSatisfy((error: unknown) => error instanceof APIError && /duplicate dependency/.test(error.message))
+  })
+
   it.each([
     ['unbound quote observation', (value: ReturnType<typeof coherentRefresh>) => { value.snapshot.quote_ids = ['not-an-observation'] }],
     ['snapshot as-of after creation', (value: ReturnType<typeof coherentRefresh>) => { value.snapshot.as_of = '2026-01-01T00:00:03.000000000Z' }],
