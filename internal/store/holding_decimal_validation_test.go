@@ -16,3 +16,15 @@ func TestValidateHoldingDecimalsPreservesExactProductBounds(t *testing.T) {
 		t.Fatalf("exponent notation error=%v", err)
 	}
 }
+
+func TestValidateHoldingDecimalsAcceptsMaximum80DigitIntegerProduct(t *testing.T) {
+	if err := validateHoldingDecimals("9999999999999999999999999999999999999999", "9999999999999999999999999999999999999999", "99999999999999999999999999999999999999980000000000000000000000000000000000000001"); err != nil {
+		t.Fatalf("maximum 80-digit product rejected: %v", err)
+	}
+}
+
+func TestValidateHoldingDecimalsRejectsCostBasisBeyond80Characters(t *testing.T) {
+	if err := validateHoldingDecimals("1", "1", "99999999999999999999999999999999999999999999999999999999999999999999999999999999.1"); !errors.Is(err, ErrInvalidHoldingMutation) {
+		t.Fatalf("overlong cost basis error=%v", err)
+	}
+}

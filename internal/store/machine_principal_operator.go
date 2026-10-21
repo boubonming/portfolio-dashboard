@@ -80,7 +80,7 @@ func (s *Store) setMachineHoldingsGrant(ctx context.Context, principalID, portfo
 	}
 	occurredAt := canonicalSnapshotTime(s.now())
 	retainUntil := canonicalSnapshotTime(s.now().AddDate(7, 0, 0))
-	payload, err := json.Marshal(map[string]any{"principal_id": principalID, "portfolio_id": portfolioID, "holdings_write": enabled, "result": map[bool]string{true: "granted", false: "revoked"}[changed]})
+	payload, err := json.Marshal(map[string]any{"principal_id": principalID, "portfolio_id": portfolioID, "holdings_write": enabled, "result": map[bool]string{true: "granted", false: "revoked"}[enabled]})
 	if !changed {
 		payload, err = json.Marshal(map[string]any{"principal_id": principalID, "portfolio_id": portfolioID, "holdings_write": enabled, "result": map[bool]string{true: "already_granted", false: "already_revoked"}[enabled]})
 	}

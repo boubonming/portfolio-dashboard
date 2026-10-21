@@ -365,7 +365,7 @@ func validateHoldingDecimals(quantity, unitCost, costBasis string) error {
 	if len(quantity) == 0 || len(quantity) > 40 || !holdingQuantityDecimal.MatchString(quantity) || strings.Trim(quantity, "0.") == "" {
 		return ErrInvalidHoldingMutation
 	}
-	if len(unitCost) == 0 || len(unitCost) > 40 || !holdingQuantityDecimal.MatchString(unitCost) || len(costBasis) == 0 || len(costBasis) > 79 || !holdingCostBasisDecimal.MatchString(costBasis) {
+	if len(unitCost) == 0 || len(unitCost) > 40 || !holdingQuantityDecimal.MatchString(unitCost) || len(costBasis) == 0 || len(costBasis) > 80 || !holdingCostBasisDecimal.MatchString(costBasis) {
 		return ErrInvalidHoldingMutation
 	}
 	quantityDigits, quantityScale := holdingDecimalParts(quantity)

@@ -476,7 +476,7 @@ func parseHoldingDecimal(raw json.RawMessage, quantity bool) (string, error) {
 
 func parseHoldingCostBasis(raw json.RawMessage) (string, error) {
 	value, err := parseHoldingString(raw, false)
-	if err != nil || len(value) == 0 || len(value) > 79 || !holdingCostBasisDecimal.MatchString(value) {
+	if err != nil || len(value) == 0 || len(value) > 80 || !holdingCostBasisDecimal.MatchString(value) {
 		return "", store.ErrInvalidHoldingMutation
 	}
 	return value, nil

@@ -941,7 +941,7 @@ components:
     HoldingCostBasis:
       type: string
       minLength: 1
-      maxLength: 79
+      maxLength: 80
       pattern: '^(?:0|[1-9][0-9]*)(?:[.][0-9]{1,36})?$'
       description: Non-negative canonical base-10 exact product of quantity and unit cost, with at most 36 fractional digits and a bounded product length.
     InstrumentReference:

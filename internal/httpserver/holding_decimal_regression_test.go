@@ -23,3 +23,21 @@ func TestParseHoldingCreateAcceptsMaxInputProductAndRejectsOverlongCostBasis(t *
 		t.Fatal("cost basis beyond 36 fractional digits was accepted")
 	}
 }
+
+func TestParseHoldingCreateAcceptsMaximum80DigitIntegerProduct(t *testing.T) {
+	body := []byte(`{"instrument":{"symbol":"MAXINT","currency":"USD"},"quantity":"9999999999999999999999999999999999999999","unit_cost":"9999999999999999999999999999999999999999","cost_basis":"99999999999999999999999999999999999999980000000000000000000000000000000000000001","currency":"USD"}`)
+	parsed, _, err := parseHoldingCreate(body)
+	if err != nil {
+		t.Fatalf("maximum 80-digit product rejected: %v", err)
+	}
+	if parsed.costBasis != "99999999999999999999999999999999999999980000000000000000000000000000000000000001" {
+		t.Fatalf("cost basis=%q", parsed.costBasis)
+	}
+}
+
+func TestParseHoldingCreateRejectsCostBasisBeyond80Characters(t *testing.T) {
+	body := []byte(`{"instrument":{"symbol":"TOOLONG","currency":"USD"},"quantity":"1","unit_cost":"1","cost_basis":"99999999999999999999999999999999999999999999999999999999999999999999999999999999.1","currency":"USD"}`)
+	if _, _, err := parseHoldingCreate(body); err == nil {
+		t.Fatal("cost basis beyond 80 characters was accepted")
+	}
+}

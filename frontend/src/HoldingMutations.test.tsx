@@ -106,6 +106,36 @@ describe('HoldingMutations', () => {
     expect(() => validateHoldingMutationReceipt({ ...receipt, unexpected: true }, { operation: 'create', portfolioId: 'portfolio-default', idempotencyKey: receipt.idempotency_key, body: JSON.stringify({}), lotId: undefined })).toThrow()
   })
 
+  it('accepts an exact receipt whose cost basis is the maximum 80-character product', () => {
+    const quantity = '9999999999999999999999999999999999999999'
+    const costBasis = '99999999999999999999999999999999999999980000000000000000000000000000000000000001'
+    const maximumReceipt = { ...receipt, holding: { ...receipt.holding, quantity, unit_cost: quantity, cost_basis: costBasis } }
+    expect(() => validateHoldingMutationReceipt(maximumReceipt, {
+      operation: 'create', portfolioId: 'portfolio-default', idempotencyKey: receipt.idempotency_key,
+      body: JSON.stringify({ instrument: { instrument_id: 'instrument-new' }, quantity, unit_cost: quantity, cost_basis: costBasis, currency: 'USD' }),
+    })).not.toThrow()
+  })
+
+  it('accepts the maximum exact product through the holding form', async () => {
+    const props = baseProps()
+    const quantity = '9999999999999999999999999999999999999999'
+    const costBasis = '99999999999999999999999999999999999999980000000000000000000000000000000000000001'
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async (_input, init) => ({
+      ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }),
+      json: async () => ({ ...receipt, holding: { ...receipt.holding, quantity, unit_cost: quantity, cost_basis: costBasis }, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }),
+    } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    fireEvent.click(screen.getByLabelText('Existing instrument ID'))
+    fireEvent.change(screen.getByLabelText('Instrument ID'), { target: { value: 'instrument-new' } })
+    for (const [label, value] of [['Quantity', quantity], ['Unit cost', quantity], ['Cost basis', costBasis], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
+    const payload = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>
+    expect(payload.cost_basis).toBe(costBasis)
+  })
+
   it('reuses the exact uncertain create attempt after the overview ETag changes', async () => {
     const props = baseProps()
     let calls = 0
