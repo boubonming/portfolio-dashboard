@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
@@ -28,6 +30,8 @@ var (
 )
 
 var mutationActorID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~-]*$`)
+var holdingQuantityDecimal = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]{1,18})?$`)
+var holdingCostBasisDecimal = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]{1,36})?$`)
 
 type MutationActor struct {
 	Category    string
@@ -75,6 +79,9 @@ type HoldingMutationResult struct {
 
 func (s *Store) CreateHolding(ctx context.Context, params HoldingCreateParams) (HoldingMutationResult, error) {
 	if err := validateMutationParams(params.PortfolioID, params.IdempotencyKey, params.RequestFingerprint, params.Actor); err != nil {
+		return HoldingMutationResult{}, err
+	}
+	if err := validateHoldingDecimals(params.Quantity, params.UnitCost, params.CostBasis); err != nil {
 		return HoldingMutationResult{}, err
 	}
 	return s.withHoldingMutationRetry(ctx, func(attemptCtx context.Context) (HoldingMutationResult, error) {
@@ -352,6 +359,43 @@ func validateMutationParams(portfolioID, key, fingerprint string, actor Mutation
 		return ErrInvalidHoldingMutation
 	}
 	return nil
+}
+
+func validateHoldingDecimals(quantity, unitCost, costBasis string) error {
+	if len(quantity) == 0 || len(quantity) > 40 || !holdingQuantityDecimal.MatchString(quantity) || strings.Trim(quantity, "0.") == "" {
+		return ErrInvalidHoldingMutation
+	}
+	if len(unitCost) == 0 || len(unitCost) > 40 || !holdingQuantityDecimal.MatchString(unitCost) || len(costBasis) == 0 || len(costBasis) > 79 || !holdingCostBasisDecimal.MatchString(costBasis) {
+		return ErrInvalidHoldingMutation
+	}
+	quantityDigits, quantityScale := holdingDecimalParts(quantity)
+	unitDigits, unitScale := holdingDecimalParts(unitCost)
+	costDigits, costScale := holdingDecimalParts(costBasis)
+	productScale := quantityScale + unitScale
+	targetScale := productScale
+	if costScale > targetScale {
+		targetScale = costScale
+	}
+	product := new(big.Int).Mul(quantityDigits, unitDigits)
+	product.Mul(product, big.NewInt(1).Exp(big.NewInt(10), big.NewInt(int64(targetScale-productScale)), nil))
+	costDigits.Mul(costDigits, big.NewInt(1).Exp(big.NewInt(10), big.NewInt(int64(targetScale-costScale)), nil))
+	if product.Cmp(costDigits) != 0 {
+		return ErrInvalidHoldingMutation
+	}
+	return nil
+}
+
+func holdingDecimalParts(value string) (*big.Int, int) {
+	parts := strings.SplitN(value, ".", 2)
+	scale := 0
+	digits := parts[0]
+	if len(parts) == 2 {
+		scale = len(parts[1])
+		digits += parts[1]
+	}
+	parsed := new(big.Int)
+	parsed.SetString(digits, 10)
+	return parsed, scale
 }
 
 func verifyMutationActor(ctx context.Context, tx *sql.Tx, actor MutationActor, portfolioID string) error {
