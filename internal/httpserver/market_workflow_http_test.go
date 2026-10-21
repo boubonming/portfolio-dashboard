@@ -132,6 +132,9 @@ func TestMarketWorkflowHTTPAuthETagAndAtomicBatch(t *testing.T) {
 	if setupResponse.Code != http.StatusOK || setupResponse.Header().Get("ETag") == "" {
 		t.Fatalf("setup status=%d etag=%q body=%s", setupResponse.Code, setupResponse.Header().Get("ETag"), setupResponse.Body.String())
 	}
+	if !strings.Contains(setupResponse.Body.String(), `"mappings":[]`) || strings.Contains(setupResponse.Body.String(), `"mappings":null`) {
+		t.Fatalf("setup mappings were not encoded as an empty array: %s", setupResponse.Body.String())
+	}
 	var setup struct {
 		ETag string `json:"etag"`
 	}

@@ -2,11 +2,14 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
+	"github.com/boubonming/portfolio-dashboard/internal/marketdata"
 )
 
 func TestMarketDataSetupAndBatchMappingsAreScopedAndAtomic(t *testing.T) {
@@ -43,6 +46,74 @@ func TestMarketDataSetupAndBatchMappingsAreScopedAndAtomic(t *testing.T) {
 	}
 	if _, err := s.AddProviderMappingsBatch(ctx, "market-portfolio", setup.ETag, []domain.MappingBatchItem{{InstrumentID: "market-instrument", Provider: "finnhub", ProviderSymbol: "MSFT", QuoteCurrency: "USD", Provenance: "stale", ConfirmUnverified: true}}); err == nil {
 		t.Fatal("stale mapping batch unexpectedly succeeded")
+	}
+}
+
+func TestMarketDataSetupUsesStableEmptyMappingsForMixedPortfolioScope(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "market-mixed.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := "2026-01-01T00:00:00.000000000Z"
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, []any{"market-mixed", "Mixed", "MYR", now, now}},
+		{`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, []any{"market-foreign", "Foreign", "MYR", now, now}},
+		{`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, []any{"market-mapped", "AAA", "Mapped", "USD", now}},
+		{`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, []any{"market-unmapped", "BBB", "Unmapped", "USD", now}},
+		{`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, []any{"market-foreign-instrument", "CCC", "Foreign", "USD", now}},
+		{`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, []any{"market-mixed", "market-mapped", now}},
+		{`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, []any{"market-mixed", "market-unmapped", now}},
+		{`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, []any{"market-foreign", "market-foreign-instrument", now}},
+		{`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,lifecycle,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, []any{"market-mapped-lot", "market-mixed", "market-mapped", "1", "USD", "active", now, now}},
+		{`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,lifecycle,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, []any{"market-unmapped-lot", "market-mixed", "market-unmapped", "1", "USD", "active", now, now}},
+		{`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,lifecycle,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, []any{"market-foreign-lot", "market-foreign", "market-foreign-instrument", "1", "USD", "active", now, now}},
+		{`INSERT INTO instrument_provider_mappings(id,instrument_id,provider,provider_symbol,quote_currency,active_from,provenance,created_at) VALUES(?,?,?,?,?,?,?,?)`, []any{"market-mapping", "market-mapped", "coingecko", "aaa", "USD", now, "verified fixture", now}},
+	} {
+		if _, err := s.DB.Exec(statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	providers := MarketProviders(map[marketdata.Provider]bool{marketdata.ProviderFinnhub: true})
+	setup, err := s.MarketDataSetup(ctx, "market-mixed", providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := s.MarketDataSetup(ctx, "market-mixed", providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setup.ETag == "" || setup.ETag != repeated.ETag || len(setup.Instruments) != 2 {
+		t.Fatalf("setup is not deterministic or correctly scoped: setup=%+v repeated=%+v", setup, repeated)
+	}
+	if setup.Instruments[0].InstrumentID != "market-mapped" || len(setup.Instruments[0].Mappings) != 1 || setup.Instruments[1].InstrumentID != "market-unmapped" || setup.Instruments[1].Mappings == nil || len(setup.Instruments[1].Mappings) != 0 {
+		t.Fatalf("mixed mapping state=%+v", setup.Instruments)
+	}
+	var finnhubConfigured, coinGeckoPublic bool
+	for _, provider := range setup.Providers {
+		if provider.Name == marketdata.ProviderFinnhub.String() {
+			finnhubConfigured = provider.Configured
+		}
+		if provider.Name == marketdata.ProviderCoinGecko.String() {
+			coinGeckoPublic = provider.Public && provider.Configured
+		}
+	}
+	if !finnhubConfigured || !coinGeckoPublic || len(setup.Providers) != 4 {
+		t.Fatalf("provider readiness changed: %+v", setup.Providers)
+	}
+	payload, err := json.Marshal(setup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"mappings":[]`) || strings.Contains(string(payload), `"mappings":null`) || strings.Contains(string(payload), "market-foreign-instrument") {
+		t.Fatalf("invalid mixed setup payload: %s", payload)
+	}
+	if _, err := s.AddProviderMappingsBatch(ctx, "market-mixed", setup.ETag, []domain.MappingBatchItem{{InstrumentID: "market-unmapped", Provider: "finnhub", ProviderSymbol: "BBB", QuoteCurrency: "USD", Provenance: "verified fixture", ConfirmUnverified: true}}); err == nil {
+		t.Fatal("partial mixed mapping batch unexpectedly succeeded")
 	}
 }
 
