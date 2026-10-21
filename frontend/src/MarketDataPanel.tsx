@@ -93,7 +93,8 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       const result = await saveMarketMappings(portfolioID, setup.etag, mappings, csrfToken, controller.signal)
       if (controller.signal.aborted || generation !== generationRef.current || scopeRef.current.portfolioID !== portfolioID) return
       const expectedIDs = new Set(entries.map((instrument) => instrument.instrument_id))
-      if (result.outcomes.some((outcome) => !expectedIDs.has(outcome.instrument_id)) || new Set(result.outcomes.map((outcome) => outcome.instrument_id)).size !== result.outcomes.length) throw new APIError(200, 'Invalid mapping batch response: stale instrument scope.')
+      const outcomeIDs = result.outcomes.map((outcome) => outcome.instrument_id)
+      if (outcomeIDs.length !== expectedIDs.size || new Set(outcomeIDs).size !== outcomeIDs.length || outcomeIDs.some((id) => !expectedIDs.has(id))) throw new APIError(200, 'Invalid mapping batch response: stale instrument scope.')
       setMessage(`Saved ${result.outcomes.length} mapping${result.outcomes.length === 1 ? '' : 's'} as a new revision.`)
       setSaving(false); savingRef.current = false
       load()
@@ -116,7 +117,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
     refreshingRef.current = true
     setRefreshing(true); setError(''); setMessage('Refreshing prices and creating an immutable snapshot…')
     try {
-      const result = await refreshMarketData(portfolioID, reportingCurrency, newRequestKey(), csrfToken, controller.signal)
+      const result = await refreshMarketData(portfolioID, reportingCurrency, newRequestKey(), csrfToken, controller.signal, setup || undefined)
       if (controller.signal.aborted || generation !== generationRef.current || scopeRef.current.portfolioID !== portfolioID || scopeRef.current.reportingCurrency !== reportingCurrency) return
       if (result.refresh.portfolio_id !== portfolioID || result.snapshot.portfolio_id !== portfolioID || result.snapshot.reporting_currency !== reportingCurrency.toUpperCase()) throw new APIError(200, 'Invalid market refresh response: stale portfolio scope.')
       setLastRefresh(result)

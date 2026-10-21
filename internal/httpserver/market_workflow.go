@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/boubonming/portfolio-dashboard/internal/auth"
 	"github.com/boubonming/portfolio-dashboard/internal/config"
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 	"github.com/boubonming/portfolio-dashboard/internal/marketdata"
@@ -21,27 +22,33 @@ type marketWorkflowEndpoint struct {
 	database  *store.Store
 	clients   map[marketdata.Provider]marketdata.ProviderClient
 	readiness []domain.ProviderReadiness
+	auth      *auth.Authenticator
 }
 
 func (h *marketWorkflowEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.serveHTTP(w, r)
 }
 
-func newMarketWorkflowEndpoint(database *store.Store, cfg config.Config) *marketWorkflowEndpoint {
+func newMarketWorkflowEndpoint(database *store.Store, cfg config.Config, authenticator *auth.Authenticator, injected map[marketdata.Provider]marketdata.ProviderClient) *marketWorkflowEndpoint {
 	keys := map[marketdata.Provider]bool{
 		marketdata.ProviderFinnhub:           cfg.ProviderKeys.Finnhub != "",
 		marketdata.ProviderAlphaVantage:      cfg.ProviderKeys.AlphaVantage != "",
 		marketdata.ProviderOpenExchangeRates: cfg.ProviderKeys.OpenExchangeRates != "",
 	}
-	return &marketWorkflowEndpoint{
-		database: database,
-		clients: map[marketdata.Provider]marketdata.ProviderClient{
+	clients := injected
+	if clients == nil {
+		clients = map[marketdata.Provider]marketdata.ProviderClient{
 			marketdata.ProviderFinnhub:           marketdata.NewFinnhubClient(cfg.ProviderKeys.Finnhub, marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.Finnhub}),
 			marketdata.ProviderAlphaVantage:      marketdata.NewAlphaVantageClient(cfg.ProviderKeys.AlphaVantage, marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.AlphaVantage}),
 			marketdata.ProviderCoinGecko:         marketdata.NewCoinGeckoClient(marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.CoinGecko}),
 			marketdata.ProviderOpenExchangeRates: marketdata.NewOpenExchangeRatesClient(cfg.ProviderKeys.OpenExchangeRates, marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.OpenExchangeRates}),
-		},
+		}
+	}
+	return &marketWorkflowEndpoint{
+		database:  database,
+		clients:   clients,
 		readiness: store.MarketProviders(keys),
+		auth:      authenticator,
 	}
 }
 
@@ -161,7 +168,7 @@ func (h *marketWorkflowEndpoint) refresh(w http.ResponseWriter, r *http.Request,
 		ReportingCurrency string `json:"reporting_currency"`
 	}
 	body, err := readJSONBody(w, r, 8<<10)
-	if err == nil && len(body) > 0 {
+	if err == nil {
 		if hasDuplicateJSONKeys(body) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_refresh_request"})
 			return
@@ -214,8 +221,13 @@ func (h *marketWorkflowEndpoint) refresh(w http.ResponseWriter, r *http.Request,
 			missing = append(missing, fmt.Sprintf("%s (%s)", instrument.Symbol, instrument.Currency))
 		}
 	}
+	actorID, actorOK := h.auth.BrowserActorID(r)
+	if !actorOK {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	response, _, err := h.database.RefreshMarketDataIdempotent(r.Context(), store.MarketRefreshIdempotencyOptions{
-		ActorCategory: "browser_user", ActorID: "local-owner", PortfolioID: portfolioID, IdempotencyKey: key, RequestFingerprint: fingerprint,
+		ActorCategory: "browser_user", ActorID: actorID, PortfolioID: portfolioID, IdempotencyKey: key, RequestFingerprint: fingerprint,
 		Refresh:  store.RefreshOptions{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, Clients: h.clients},
 		Snapshot: store.SnapshotRequest{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, MaxAge: domain.DefaultFreshness}, Missing: missing,
 	})

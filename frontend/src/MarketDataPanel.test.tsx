@@ -72,6 +72,49 @@ describe('MarketDataPanel', () => {
     expect(new Headers(call?.[1]?.headers as HeadersInit).get('If-Match')).toBe('"setup-1"')
   })
 
+  it.each([
+    ['partial', [{ instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-0', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }]],
+    ['extra foreign', [{ instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-0', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }, { instrument_id: 'foreign', status: 'saved', mapping: { id: 'mapping-x', instrument_id: 'foreign', provider: 'coingecko', provider_symbol: 'coin-x', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }]],
+    ['duplicate', [{ instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-0', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }, { instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a2', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-1', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }]],
+  ])('rejects %s successful outcome sets without reloading setup', async (_label, outcomes) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/market-data/mappings')
+      ? json({ status: 'saved', etag: '"setup-2"', outcomes })
+      : json(setup()))
+    renderPanel(fetchMock)
+    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))
+    const rows = screen.getAllByRole('row').slice(1)
+    for (const [index, row] of rows.entries()) {
+      fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'coingecko' } })
+      fireEvent.change(within(row).getByPlaceholderText('Exact listing / coin ID'), { target: { value: `coin-${index}` } })
+      fireEvent.change(within(row).getByPlaceholderText('Where you verified it'), { target: { value: 'provider listing' } })
+      fireEvent.click(within(row).getByRole('checkbox'))
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/invalid mapping batch response/i))
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data')).length).toBe(1)
+  })
+
+  it('accepts the exact instrument set when the server reorders outcomes', async () => {
+    const mappings = [
+      { instrument_id: 'authority-b', status: 'saved', mapping: { id: 'mapping-b', instrument_id: 'authority-b', provider: 'coingecko', provider_symbol: 'coin-1', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } },
+      { instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-0', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } },
+    ]
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/mappings') ? json({ status: 'saved', etag: '"setup-2"', outcomes: mappings }) : json(setup()))
+    renderPanel(fetchMock)
+    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))
+    const rows = screen.getAllByRole('row').slice(1)
+    for (const [index, row] of rows.entries()) {
+      fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'coingecko' } })
+      fireEvent.change(within(row).getByPlaceholderText('Exact listing / coin ID'), { target: { value: `coin-${index}` } })
+      fireEvent.change(within(row).getByPlaceholderText('Where you verified it'), { target: { value: 'provider listing' } })
+      fireEvent.click(within(row).getByRole('checkbox'))
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data')).length).toBe(2))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data')).length).toBe(2)
+  })
+
   it('reports a stale ETag without pretending the batch was saved', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/mappings') ? json({ error: 'stale_mapping_setup' }, 412) : json(setup()))
     renderPanel(fetchMock)

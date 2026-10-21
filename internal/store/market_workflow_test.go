@@ -86,3 +86,25 @@ func TestMarketMappingBatchRequiresConfirmationAndRollsBackBeforeCommit(t *testi
 		t.Fatalf("atomic batch wrote %d mappings", count)
 	}
 }
+
+func TestMarketRefreshReceiptIsAppendOnly(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "receipt.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := "2026-01-01T00:00:00.000000000Z"
+	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "receipt-portfolio", "Receipt", "MYR", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO market_refresh_idempotency(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,created_at,committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "browser_user", "receipt-user", "receipt-portfolio", "refresh", "receipt-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "committed", "committed", `{}`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`DELETE FROM market_refresh_idempotency WHERE actor_id=?`, "receipt-user"); err == nil {
+		t.Fatal("committed receipt delete unexpectedly succeeded")
+	}
+	if _, err := s.DB.Exec(`UPDATE market_refresh_idempotency SET response_payload=? WHERE actor_id=?`, `{"changed":true}`, "receipt-user"); err == nil {
+		t.Fatal("committed receipt update unexpectedly succeeded")
+	}
+}

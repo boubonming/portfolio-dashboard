@@ -257,7 +257,7 @@ function decodeMappingResult(value: unknown): MappingBatchResult {
   return { status, etag, outcomes }
 }
 
-function decodeRefreshResult(value: unknown, portfolioID: string, reportingCurrency: string): MarketRefreshResult {
+function decodeRefreshResult(value: unknown, portfolioID: string, reportingCurrency: string, setup?: MarketDataSetup): MarketRefreshResult {
   const body = objectResponse(value, 'market refresh')
   exactKeys(body, ['refresh', 'snapshot', 'complete', 'freshness_policy'], ['missing_instruments'], 'market refresh')
   const refresh = objectResponse(body.refresh, 'market refresh')
@@ -283,9 +283,8 @@ function decodeRefreshResult(value: unknown, portfolioID: string, reportingCurre
   if (new Set(observationIDs).size !== observationIDs.length) throw new APIError(200, 'Invalid market refresh response: duplicate observation.')
   const nestedObservationIDs = providers.flatMap((provider) => provider.observation_ids)
   if (new Set(nestedObservationIDs).size !== nestedObservationIDs.length || nestedObservationIDs.length !== observationIDs.length || nestedObservationIDs.some((id) => !observationIDs.includes(id))) throw new APIError(200, 'Invalid market refresh response: contradictory observation identity.')
-  const snapshotCurrency = currencyCode(snapshot.reporting_currency, 'reporting_currency', 'market refresh snapshot')
   const currencies = stringArray(snapshot.currencies, 'currencies', 'market refresh snapshot', 32)
-  if (new Set(currencies).size !== currencies.length || !currencies.includes(snapshotCurrency) && snapshot.complete === true) throw new APIError(200, 'Invalid market refresh response: contradictory currencies.')
+  if (new Set(currencies).size !== currencies.length) throw new APIError(200, 'Invalid market refresh response: contradictory currencies.')
   const missingDependencies = stringArray(snapshot.missing_dependencies, 'missing_dependencies', 'market refresh snapshot')
   const staleDependencies = stringArray(snapshot.stale_dependencies, 'stale_dependencies', 'market refresh snapshot')
   const invalidDependencies = stringArray(snapshot.invalid_dependencies, 'invalid_dependencies', 'market refresh snapshot')
@@ -299,7 +298,64 @@ function decodeRefreshResult(value: unknown, portfolioID: string, reportingCurre
   if (refreshStatus !== 'complete' && refreshStatus !== 'incomplete') throw new APIError(200, 'Invalid market refresh response: refresh status.')
   const result: MarketRefreshResult = { refresh: { refresh_id: canonicalID(refresh.refresh_id, 'refresh_id', 'market refresh'), portfolio_id: portfolioID, status: refreshStatus, started_at: canonicalTime(refresh.started_at, 'started_at', 'market refresh'), ended_at: canonicalTime(refresh.ended_at, 'ended_at', 'market refresh'), observation_ids: observationIDs, providers }, snapshot: snapshotResult, complete: body.complete as boolean, freshness_policy: stringField(body.freshness_policy, 'freshness_policy', 'market refresh', 512), missing_instruments: body.missing_instruments === undefined ? [] : stringArray(body.missing_instruments, 'missing_instruments', 'market refresh') }
   if (result.complete !== (result.refresh.status === 'complete' && result.snapshot.complete)) throw new APIError(200, 'Invalid market refresh response: contradictory completion state.')
+  validateRefreshSemantics(result, setup)
   return result
+}
+
+function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDataSetup): void {
+  const refreshTimes = [
+    ['started_at', result.refresh.started_at],
+    ['ended_at', result.refresh.ended_at],
+    ['snapshot.created_at', result.snapshot.created_at],
+    ['snapshot.as_of', result.snapshot.as_of],
+    ...result.snapshot.source_timestamps.map((value, index) => [`source_timestamps[${index}]`, value] as const),
+  ] as const
+  const parsedTimes = refreshTimes.map(([field, value]) => [field, Date.parse(value)] as const)
+  if (parsedTimes.some(([, value]) => Number.isNaN(value))) throw new APIError(200, 'Invalid market refresh response: timestamp.')
+  const now = Date.now() + 5000
+  const future = parsedTimes.find(([, value]) => value > now)
+  if (future) throw new APIError(200, `Future market refresh response timestamp: ${future[0]}.`)
+  if (Date.parse(result.refresh.started_at) > Date.parse(result.refresh.ended_at)) throw new APIError(200, 'Invalid market refresh response: timestamp ordering.')
+
+  const allObservationIDs = result.refresh.providers.flatMap((provider) => provider.observation_ids)
+  for (const provider of result.refresh.providers) {
+    if (provider.succeeded_count + provider.failed_count !== provider.request_count) throw new APIError(200, `Invalid market refresh response: ${provider.provider} counters.`)
+    if (provider.observation_ids.length !== provider.succeeded_count) throw new APIError(200, `Invalid market refresh response: ${provider.provider} observations.`)
+    const shouldBeComplete = provider.failed_count === 0 && provider.missing_mapping_count === 0 && provider.errors.length === 0 && provider.succeeded_count === provider.request_count
+    if ((provider.status === 'complete') !== shouldBeComplete) throw new APIError(200, `Invalid market refresh response: ${provider.provider} status.`)
+    if (provider.failed_count > 0 && provider.errors.length === 0) throw new APIError(200, `Invalid market refresh response: ${provider.provider} errors.`)
+  }
+  if (new Set(allObservationIDs).size !== allObservationIDs.length || new Set(allObservationIDs).size !== result.refresh.observation_ids.length) throw new APIError(200, 'Invalid market refresh response: observation identity.')
+  if (result.refresh.status === 'complete' && result.refresh.providers.some((provider) => provider.status !== 'complete')) throw new APIError(200, 'Invalid market refresh response: refresh status.')
+  if (result.refresh.status === 'incomplete' && result.refresh.providers.every((provider) => provider.status === 'complete')) throw new APIError(200, 'Invalid market refresh response: refresh status.')
+
+  const currencies = new Set(result.snapshot.currencies)
+  const subtotalCurrencies = new Set(result.snapshot.subtotals.map((subtotal) => subtotal.currency))
+  if (currencies.size !== result.snapshot.currencies.length || currencies.size !== subtotalCurrencies.size || [...currencies].some((currency) => !subtotalCurrencies.has(currency))) throw new APIError(200, 'Invalid market refresh response: contradictory original-currency subtotals.')
+  if (setup) {
+    const instrumentIDs = new Set(setup.instruments.map((instrument) => instrument.instrument_id))
+    const instrumentCurrencies = new Set(setup.instruments.map((instrument) => instrument.currency))
+    const expectedFXCurrencies = new Set([...instrumentCurrencies].filter((currency) => currency !== result.snapshot.reporting_currency))
+    const providerNames = new Set(setup.providers.map((provider) => provider.name))
+    if (result.refresh.providers.some((provider) => !providerNames.has(provider.provider))) throw new APIError(200, 'Invalid market refresh response: unknown provider.')
+    const missingInstrumentLabels = new Set(setup.instruments.map((instrument) => `${instrument.symbol} (${instrument.currency})`))
+    if (new Set(result.missing_instruments).size !== result.missing_instruments.length || result.missing_instruments.some((instrument) => !missingInstrumentLabels.has(instrument))) throw new APIError(200, 'Invalid market refresh response: unknown missing instrument.')
+    for (const dependency of [...result.snapshot.missing_dependencies, ...result.snapshot.stale_dependencies, ...result.snapshot.invalid_dependencies]) {
+      const normalized = dependency.replace(/^(?:missing|stale|invalid)\s+/i, '')
+      const quote = normalized.match(/^quote:([A-Za-z0-9._~-]+)$/)
+      const fx = normalized.match(/^fx:([A-Z]{3})\/([A-Z]{3})$/)
+      if (quote && !instrumentIDs.has(quote[1])) throw new APIError(200, 'Invalid market refresh response: unknown dependency identity.')
+      if (fx && (!expectedFXCurrencies.has(fx[1]) || fx[2] !== result.snapshot.reporting_currency)) throw new APIError(200, 'Invalid market refresh response: unknown dependency currency.')
+      if (!quote && !fx && !/^(?:lot|cost):[A-Za-z0-9._~-]+(?::[A-Za-z0-9._~-]+)?$/.test(normalized)) throw new APIError(200, 'Invalid market refresh response: unknown dependency identity.')
+    }
+    if (result.complete && result.missing_instruments.length !== 0) throw new APIError(200, 'Invalid market refresh response: complete result has missing instruments.')
+    if (result.complete && result.snapshot.quote_ids.length !== setup.instruments.length) throw new APIError(200, 'Invalid market refresh response: incomplete quote dependencies.')
+    if (result.complete && result.snapshot.fx_ids.length !== expectedFXCurrencies.size) throw new APIError(200, 'Invalid market refresh response: incomplete FX dependencies.')
+    for (const subtotal of result.snapshot.subtotals) if (!instrumentCurrencies.has(subtotal.currency)) throw new APIError(200, 'Invalid market refresh response: unknown subtotal currency.')
+  }
+  if (result.complete) {
+    if (result.snapshot.missing_count !== 0 || result.snapshot.stale_count !== 0 || result.snapshot.invalid_count !== 0 || result.snapshot.missing_dependencies.length !== 0 || result.snapshot.stale_dependencies.length !== 0 || result.snapshot.invalid_dependencies.length !== 0 || result.snapshot.reporting_total === undefined || result.snapshot.source_timestamps.length !== result.snapshot.quote_ids.length + result.snapshot.fx_ids.length) throw new APIError(200, 'Invalid market refresh response: incomplete result.')
+  }
 }
 
 export async function getMarketDataSetup(portfolioID: string, signal?: AbortSignal): Promise<MarketDataSetup> {
@@ -315,9 +371,9 @@ export async function saveMarketMappings(portfolioID: string, etag: string, mapp
   return decodeMappingResult(await jsonResponse<unknown>(response))
 }
 
-export async function refreshMarketData(portfolioID: string, reportingCurrency: string, idempotencyKey: string, csrfToken?: string, signal?: AbortSignal): Promise<MarketRefreshResult> {
+export async function refreshMarketData(portfolioID: string, reportingCurrency: string, idempotencyKey: string, csrfToken?: string, signal?: AbortSignal, setup?: MarketDataSetup): Promise<MarketRefreshResult> {
   const response = await apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioID)}/market-data/refresh`, {
     method: 'POST', csrfToken, signal, headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ reporting_currency: reportingCurrency }),
   })
-  return decodeRefreshResult(await jsonResponse<unknown>(response), portfolioID, reportingCurrency)
+  return decodeRefreshResult(await jsonResponse<unknown>(response), portfolioID, reportingCurrency, setup)
 }

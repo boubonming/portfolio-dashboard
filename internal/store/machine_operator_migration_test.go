@@ -82,6 +82,16 @@ func TestMachineOperatorMigrationUpgradesExistingTenMigrationDatabase(t *testing
 	if migrationCount != 12 {
 		t.Fatalf("migration count after upgrade=%d", migrationCount)
 	}
+	var phaseColumn, deleteTrigger, immutableTrigger int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('market_refresh_idempotency') WHERE name='phase'`).Scan(&phaseColumn); err != nil || phaseColumn != 1 {
+		t.Fatalf("idempotency phase column=%d err=%v", phaseColumn, err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('market_refresh_idempotency_no_delete','market_refresh_idempotency_committed_immutable')`).Scan(&deleteTrigger); err != nil || deleteTrigger != 2 {
+		t.Fatalf("idempotency triggers=%d err=%v", deleteTrigger, err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='market_refresh_idempotency'`).Scan(&immutableTrigger); err != nil || immutableTrigger != 1 {
+		t.Fatalf("idempotency table=%d err=%v", immutableTrigger, err)
+	}
 	var action, payload string
 	if err := database.QueryRow(`SELECT action,payload FROM audit_events WHERE id='legacy-audit'`).Scan(&action, &payload); err != nil {
 		t.Fatal(err)
