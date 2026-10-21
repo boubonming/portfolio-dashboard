@@ -46,6 +46,74 @@ func TestMarketDataSetupAndBatchMappingsAreScopedAndAtomic(t *testing.T) {
 	}
 }
 
+func TestMarketMappingBatchRequiresExactActiveInstrumentSet(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "market-multi.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := "2026-01-01T00:00:00.000000000Z"
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, []any{"market-multi", "Market", "MYR", now, now}},
+		{`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, []any{"market-multi-a", "AAA", "First", "USD", now}},
+		{`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, []any{"market-multi-b", "BBB", "Second", "USD", now}},
+		{`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, []any{"market-multi", "market-multi-a", now}},
+		{`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, []any{"market-multi", "market-multi-b", now}},
+		{`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,lifecycle,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, []any{"market-multi-lot-a", "market-multi", "market-multi-a", "1", "USD", "active", now, now}},
+		{`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,lifecycle,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, []any{"market-multi-lot-b", "market-multi", "market-multi-b", "1", "USD", "active", now, now}},
+	} {
+		if _, err := s.DB.Exec(statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setup, err := s.MarketDataSetup(ctx, "market-multi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := func(id, symbol string) domain.MappingBatchItem {
+		return domain.MappingBatchItem{InstrumentID: id, Provider: "finnhub", ProviderSymbol: symbol, QuoteCurrency: "USD", Provenance: "verified listing", ConfirmUnverified: true}
+	}
+	if _, err := s.AddProviderMappingsBatch(ctx, "market-multi", setup.ETag, []domain.MappingBatchItem{item("market-multi-a", "AAA")}); err == nil {
+		t.Fatal("partial mapping batch unexpectedly succeeded")
+	}
+	var mappings, audits, activities int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM instrument_provider_mappings`).Scan(&mappings); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM activity_events`).Scan(&activities); err != nil {
+		t.Fatal(err)
+	}
+	if mappings != 0 || audits != 0 || activities != 0 {
+		t.Fatalf("partial mapping batch changed state: mappings=%d audits=%d activities=%d", mappings, audits, activities)
+	}
+	result, err := s.AddProviderMappingsBatch(ctx, "market-multi", setup.ETag, []domain.MappingBatchItem{item("market-multi-a", "AAA"), item("market-multi-b", "BBB")})
+	if err != nil || len(result.Outcomes) != 2 {
+		t.Fatalf("complete mapping batch result=%+v err=%v", result, err)
+	}
+	if result.ETag == setup.ETag {
+		t.Fatal("complete mapping batch did not advance setup ETag")
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM instrument_provider_mappings`).Scan(&mappings); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM activity_events`).Scan(&activities); err != nil {
+		t.Fatal(err)
+	}
+	if mappings != 2 || audits != 2 || activities != 2 {
+		t.Fatalf("complete mapping batch effects: mappings=%d audits=%d activities=%d", mappings, audits, activities)
+	}
+}
+
 func TestMarketMappingBatchRequiresConfirmationAndRollsBackBeforeCommit(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "market-rollback.sqlite"))

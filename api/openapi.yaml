@@ -826,6 +826,7 @@ components:
     MarketRefreshRequest:
       type: object
       additionalProperties: false
+      description: JSON null, empty bytes, non-object values, unknown fields, and trailing JSON are rejected with invalid_refresh_request.
       properties:
         reporting_currency: { type: string, pattern: '^[A-Za-z]{3}$' }
     MarketRefreshResult:
@@ -870,7 +871,7 @@ components:
     SnapshotStatus:
       type: object
       additionalProperties: false
-      required: [snapshot_id, portfolio_id, calculation_version, created_at, as_of, complete, reporting_currency, currencies, subtotals, missing_count, stale_count, invalid_count, missing_dependencies, stale_dependencies, invalid_dependencies, quote_ids, fx_ids, quote_observations, fx_observations, source_timestamps, presentation_timezone]
+      required: [snapshot_id, portfolio_id, calculation_version, created_at, as_of, complete, reporting_currency, currencies, subtotals, missing_count, stale_count, future_count, invalid_count, missing_dependencies, stale_dependencies, future_dependencies, invalid_dependencies, quote_ids, fx_ids, quote_observations, fx_observations, source_timestamps, presentation_timezone]
       properties:
         snapshot_id: { $ref: '#/components/schemas/SnapshotId' }
         portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
@@ -884,9 +885,11 @@ components:
         subtotals: { type: array, maxItems: 32, items: { $ref: '#/components/schemas/SnapshotSubtotal' } }
         missing_count: { type: integer, minimum: 0, maximum: 1000000 }
         stale_count: { type: integer, minimum: 0, maximum: 1000000 }
+        future_count: { type: integer, minimum: 0, maximum: 1000000 }
         invalid_count: { type: integer, minimum: 0, maximum: 1000000 }
         missing_dependencies: { type: array, maxItems: 10000, items: { type: string, minLength: 1, maxLength: 256 } }
         stale_dependencies: { type: array, maxItems: 10000, items: { type: string, minLength: 1, maxLength: 256 } }
+        future_dependencies: { type: array, maxItems: 10000, items: { type: string, minLength: 1, maxLength: 256 } }
         invalid_dependencies: { type: array, maxItems: 10000, items: { type: string, minLength: 1, maxLength: 256 } }
         quote_ids: { type: array, maxItems: 10000, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 128 } }
         fx_ids: { type: array, maxItems: 10000, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 128 } }

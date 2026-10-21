@@ -147,6 +147,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, request SnapshotRequest) (do
 	if hookErr := s.marketRefreshFailure("before_snapshot_commit"); hookErr != nil {
 		return domain.SnapshotStatus{}, hookErr
 	}
+	s.marketRefreshCommitFailure("before_snapshot_tx_commit")
 	if err = tx.Commit(); err != nil {
 		return domain.SnapshotStatus{}, err
 	}
@@ -236,7 +237,7 @@ func statusFromPayload(encoded []byte) (domain.SnapshotStatus, error) {
 		seenFXIDs[id] = true
 		fxObservations = append(fxObservations, domain.FXObservation{ID: fx.ID, BaseCurrency: fx.BaseCurrency, QuoteCurrency: fx.QuoteCurrency, Source: fx.Source})
 	}
-	return domain.SnapshotStatus{SnapshotID: payload.SnapshotID, PortfolioID: payload.PortfolioID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: v.Complete, ReportingCurrency: v.ReportingCurrency, ReportingTotal: v.ReportingTotal, Currencies: currencies, Subtotals: v.Subtotals, MissingCount: len(v.MissingDependencies), StaleCount: len(v.StaleDependencies), InvalidCount: len(v.InvalidDependencies), MissingDependencies: v.MissingDependencies, StaleDependencies: v.StaleDependencies, InvalidDependencies: v.InvalidDependencies, QuoteIDs: v.QuoteIDs, FXIDs: v.FXIDs, QuoteObservations: quoteObservations, FXObservations: fxObservations, SourceTimestamps: v.SourceTimestamps, PresentationTimezone: v.PresentationTimezone}, nil
+	return domain.SnapshotStatus{SnapshotID: payload.SnapshotID, PortfolioID: payload.PortfolioID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: v.Complete, ReportingCurrency: v.ReportingCurrency, ReportingTotal: v.ReportingTotal, Currencies: currencies, Subtotals: v.Subtotals, MissingCount: len(v.MissingDependencies), StaleCount: len(v.StaleDependencies), FutureCount: len(v.FutureDependencies), InvalidCount: len(v.InvalidDependencies), MissingDependencies: v.MissingDependencies, StaleDependencies: v.StaleDependencies, FutureDependencies: v.FutureDependencies, InvalidDependencies: v.InvalidDependencies, QuoteIDs: v.QuoteIDs, FXIDs: v.FXIDs, QuoteObservations: quoteObservations, FXObservations: fxObservations, SourceTimestamps: v.SourceTimestamps, PresentationTimezone: v.PresentationTimezone}, nil
 }
 
 func (s *Store) SnapshotStatus(ctx context.Context, snapshotID string) (domain.SnapshotStatus, error) {

@@ -26,6 +26,7 @@ type Store struct {
 	reviewCursorKey          []byte
 	clock                    func() time.Time
 	marketRefreshFailureHook func(string) error
+	marketRefreshCommitHook  func(string)
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -122,6 +123,19 @@ func (s *Store) now() time.Time {
 // never depends on this process-local hook.
 func (s *Store) SetMarketRefreshFailureHook(hook func(string) error) {
 	s.marketRefreshFailureHook = hook
+}
+
+// SetMarketRefreshCommitHook is a test-only seam that runs immediately before
+// a market-refresh transaction commits. Tests use it to cancel the transaction
+// context and exercise the database driver's real commit error path.
+func (s *Store) SetMarketRefreshCommitHook(hook func(string)) {
+	s.marketRefreshCommitHook = hook
+}
+
+func (s *Store) marketRefreshCommitFailure(point string) {
+	if s.marketRefreshCommitHook != nil {
+		s.marketRefreshCommitHook(point)
+	}
 }
 
 func (s *Store) marketRefreshFailure(point string) error {

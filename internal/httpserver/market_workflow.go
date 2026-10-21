@@ -167,6 +167,9 @@ func (h *marketWorkflowEndpoint) refresh(w http.ResponseWriter, r *http.Request,
 	var request struct {
 		ReportingCurrency string `json:"reporting_currency"`
 	}
+	var decoded *struct {
+		ReportingCurrency string `json:"reporting_currency"`
+	}
 	body, err := readJSONBody(w, r, 8<<10)
 	if err == nil {
 		if hasDuplicateJSONKeys(body) {
@@ -175,12 +178,15 @@ func (h *marketWorkflowEndpoint) refresh(w http.ResponseWriter, r *http.Request,
 		}
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.DisallowUnknownFields()
-		err = decoder.Decode(&request)
-		if err == nil {
+		err = decoder.Decode(&decoded)
+		if err == nil && decoded != nil {
+			request = *decoded
 			var extra any
 			if decoder.Decode(&extra) != io.EOF {
 				err = errors.New("trailing JSON")
 			}
+		} else if err == nil {
+			err = errors.New("refresh request must be an object")
 		}
 	}
 	if err != nil {

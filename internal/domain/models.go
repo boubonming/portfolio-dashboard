@@ -152,6 +152,7 @@ type Valuation struct {
 	Lots                 []LotValuation     `json:"lots,omitempty"`
 	MissingDependencies  []string           `json:"missing_dependencies,omitempty"`
 	StaleDependencies    []string           `json:"stale_dependencies,omitempty"`
+	FutureDependencies   []string           `json:"future_dependencies,omitempty"`
 	InvalidDependencies  []string           `json:"invalid_dependencies,omitempty"`
 	QuoteIDs             []string           `json:"quote_ids"`
 	FXIDs                []string           `json:"fx_ids"`
@@ -172,9 +173,11 @@ type SnapshotStatus struct {
 	Subtotals            []CurrencySubtotal `json:"subtotals"`
 	MissingCount         int                `json:"missing_count"`
 	StaleCount           int                `json:"stale_count"`
+	FutureCount          int                `json:"future_count"`
 	InvalidCount         int                `json:"invalid_count"`
 	MissingDependencies  []string           `json:"missing_dependencies"`
 	StaleDependencies    []string           `json:"stale_dependencies"`
+	FutureDependencies   []string           `json:"future_dependencies"`
 	InvalidDependencies  []string           `json:"invalid_dependencies"`
 	QuoteIDs             []string           `json:"quote_ids"`
 	FXIDs                []string           `json:"fx_ids"`

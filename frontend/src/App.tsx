@@ -39,6 +39,7 @@ export type AllocationCoverage = {
   missing_dependencies: number
   stale_dependencies: number
   invalid_dependencies: number
+  future_dependencies?: number
 }
 
 export type InstrumentAllocation = {
@@ -79,6 +80,7 @@ export type PortfolioOverview = {
     reporting_total?: string
     missing_dependencies?: string[]
     stale_dependencies?: string[]
+    future_dependencies?: string[]
     invalid_dependencies?: string[]
     subtotals: Array<{ currency: string; market_value: string; cost_basis?: string; unrealised_pnl?: string }>
   }
@@ -195,6 +197,7 @@ function CoveragePanel({ allocation, unavailable }: { allocation: Allocation; un
             <div><dt>Valued lots</dt><dd>{coverage.valued_lots} / {coverage.total_lots}</dd></div>
             <div><dt>Missing dependencies</dt><dd>{coverage.missing_dependencies}</dd></div>
             <div><dt>Stale dependencies</dt><dd>{coverage.stale_dependencies}</dd></div>
+            <div><dt>Future dependencies</dt><dd>{coverage.future_dependencies || 0}</dd></div>
             <div><dt>Invalid dependencies</dt><dd>{coverage.invalid_dependencies}</dd></div>
           </dl>
         </>

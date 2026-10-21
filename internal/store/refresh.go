@@ -214,6 +214,7 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 			return domain.RefreshResult{}, err
 		}
 	}
+	s.marketRefreshCommitFailure("before_observation_tx_commit")
 	if err := tx.Commit(); err != nil {
 		return domain.RefreshResult{}, err
 	}

@@ -228,6 +228,37 @@ func TestMarketWorkflowHTTPRejectsEmptyRequiredRefreshBody(t *testing.T) {
 	}
 }
 
+func TestMarketWorkflowHTTPRejectsNullAndNonObjectRefreshBodiesWithoutEffects(t *testing.T) {
+	handler, database, cookie, csrf := marketHTTPFixture(t)
+	defer database.Close()
+	for index, body := range []string{`null`, `[]`, `true`, `42`, `{"unknown":"field"}`, `{"reporting_currency":"MYR"} {}`} {
+		request := httptest.NewRequest(http.MethodPost, "https://example.test/api/v1/portfolios/portfolio-market-http/market-data/refresh", strings.NewReader(body))
+		request.AddCookie(cookie)
+		request.Header.Set("Origin", "https://example.test")
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set(auth.CSRFHeaderName, csrf)
+		request.Header.Set("Idempotency-Key", "invalid-body-key-"+string(rune('a'+index)))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_refresh_request") {
+			t.Fatalf("body=%q status=%d response=%s", body, response.Code, response.Body.String())
+		}
+	}
+	var receipts, observations, snapshots int
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM market_refresh_idempotency`).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM quotes`).Scan(&observations); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM snapshots`).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 0 || observations != 0 || snapshots != 0 {
+		t.Fatalf("invalid bodies caused effects: receipts=%d observations=%d snapshots=%d", receipts, observations, snapshots)
+	}
+}
+
 func TestMarketWorkflowHTTPFakeProviderEndToEndAndRestartReplay(t *testing.T) {
 	quoteProvider := &fakeMarketProvider{provider: marketdata.ProviderCoinGecko}
 	fxProvider := &fakeMarketProvider{provider: marketdata.ProviderOpenExchangeRates}

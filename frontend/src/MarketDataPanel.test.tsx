@@ -14,9 +14,9 @@ const setup = (overrides: Record<string, unknown> = {}) => ({
   ],
   ...overrides,
 })
-const refreshResult = (complete = false) => ({
+const refreshResult = (complete = false, diagnostics: { future?: string[]; invalid?: string[] } = {}) => ({
   refresh: { refresh_id: 'refresh-1', portfolio_id: 'portfolio-a', status: complete ? 'complete' : 'incomplete', started_at: '2026-01-01T00:00:00.000000000Z', ended_at: '2026-01-01T00:00:01.000000000Z', observation_ids: [], providers: [{ provider: 'finnhub', status: complete ? 'complete' : 'incomplete', request_count: 1, succeeded_count: complete ? 1 : 0, failed_count: complete ? 0 : 1, missing_mapping_count: complete ? 0 : 1, observation_ids: [], quote_observations: [], fx_observations: [], errors: complete ? [] : ['configuration'] }] },
-  snapshot: { snapshot_id: 'snapshot-1', portfolio_id: 'portfolio-a', calculation_version: 'phase-b.decimal.v1', created_at: '2026-01-01T00:00:01.000000000Z', as_of: '2026-01-01T00:00:01.000000000Z', complete, reporting_currency: 'MYR', currencies: [], subtotals: [], missing_count: complete ? 0 : 1, stale_count: 0, invalid_count: 0, missing_dependencies: complete ? [] : ['quote:authority-a'], stale_dependencies: [], invalid_dependencies: [], quote_ids: [], fx_ids: [], quote_observations: [], fx_observations: [], source_timestamps: [], presentation_timezone: 'Asia/Singapore' }, complete,
+  snapshot: { snapshot_id: 'snapshot-1', portfolio_id: 'portfolio-a', calculation_version: 'phase-b.decimal.v1', created_at: '2026-01-01T00:00:01.000000000Z', as_of: '2026-01-01T00:00:01.000000000Z', complete, reporting_currency: 'MYR', currencies: [], subtotals: [], missing_count: complete ? 0 : 1, stale_count: 0, future_count: diagnostics.future?.length || 0, invalid_count: diagnostics.invalid?.length || 0, missing_dependencies: complete ? [] : ['quote:authority-a'], stale_dependencies: [], future_dependencies: diagnostics.future || [], invalid_dependencies: diagnostics.invalid || [], quote_ids: [], fx_ids: [], quote_observations: [], fx_observations: [], source_timestamps: [], presentation_timezone: 'Asia/Singapore' }, complete,
   freshness_policy: 'quotes and FX must be no older than the configured 36h freshness window; incomplete data never becomes zero',
   missing_instruments: complete ? [] : ['SAME (USD)'],
 })
@@ -119,11 +119,12 @@ describe('MarketDataPanel', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/mappings') ? json({ error: 'stale_mapping_setup' }, 412) : json(setup()))
     renderPanel(fetchMock)
     await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))
-    const row = screen.getAllByRole('row')[1]
-    fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'coingecko' } })
-    fireEvent.change(within(row).getByPlaceholderText('Exact listing / coin ID'), { target: { value: 'coin-a' } })
-    fireEvent.change(within(row).getByPlaceholderText('Where you verified it'), { target: { value: 'provider listing' } })
-    fireEvent.click(within(row).getByRole('checkbox'))
+    for (const [index, row] of screen.getAllByRole('row').slice(1).entries()) {
+      fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'coingecko' } })
+      fireEvent.change(within(row).getByPlaceholderText('Exact listing / coin ID'), { target: { value: `coin-${index}` } })
+      fireEvent.change(within(row).getByPlaceholderText('Where you verified it'), { target: { value: 'provider listing' } })
+      fireEvent.click(within(row).getByRole('checkbox'))
+    }
     fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/changed in another window/i))
   })
@@ -144,6 +145,20 @@ describe('MarketDataPanel', () => {
     await waitFor(() => expect(screen.getByText(/No partial total is shown/i)).toBeTruthy())
     expect(screen.getByText(/Latest refresh: incomplete/i)).toBeTruthy()
     expect(screen.getByText(/Missing exact mappings/i)).toBeTruthy()
+  })
+
+  it('renders future and invalid dependencies as distinct diagnostics', async () => {
+    const result = refreshResult(false, { future: ['quote:authority-a'], invalid: ['quote:authority-b'] })
+    result.snapshot.missing_count = 0
+    result.snapshot.missing_dependencies = []
+    result.missing_instruments = []
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/refresh') ? json(result) : json(setup()))
+    renderPanel(fetchMock)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh prices' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText('Future quote for SAME (USD)')).toBeTruthy())
+    expect(screen.getByText('Invalid quote for SAME (USD)')).toBeTruthy()
+    expect(screen.queryByText(/invalid or future/i)).toBeNull()
   })
 
   it('validates successful response shape and cleans up pending requests on scope replacement and unmount', async () => {

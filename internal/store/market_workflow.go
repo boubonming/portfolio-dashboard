@@ -137,6 +137,18 @@ func (s *Store) AddProviderMappingsBatch(ctx context.Context, portfolioID, expec
 	if expectedETag == "" || expectedETag != setup.ETag {
 		return domain.MappingBatchResult{}, fmt.Errorf("mapping setup is stale")
 	}
+	activeIDs := make(map[string]struct{}, len(setup.Instruments))
+	for _, instrument := range setup.Instruments {
+		activeIDs[instrument.InstrumentID] = struct{}{}
+	}
+	if len(items) != len(activeIDs) {
+		return domain.MappingBatchResult{}, fmt.Errorf("mapping batch must cover every active instrument")
+	}
+	for _, item := range items {
+		if _, ok := activeIDs[strings.TrimSpace(item.InstrumentID)]; !ok {
+			return domain.MappingBatchResult{}, fmt.Errorf("instrument is not in the active setup")
+		}
+	}
 	for _, item := range items {
 		var instrumentCurrency string
 		if err := s.DB.QueryRowContext(ctx, `SELECT i.currency FROM instruments i JOIN lots l ON l.instrument_id=i.id WHERE i.id=? AND l.portfolio_id=? AND l.lifecycle='active' LIMIT 1`, strings.TrimSpace(item.InstrumentID), portfolioID).Scan(&instrumentCurrency); err != nil {

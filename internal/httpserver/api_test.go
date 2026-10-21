@@ -341,7 +341,7 @@ func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing
 	if err := json.Unmarshal(response.Body.Bytes(), &partialOverview); err != nil {
 		t.Fatal(err)
 	}
-	if partialOverview.Snapshot.State != "incomplete" || partialOverview.Snapshot.Complete || partialOverview.Allocation.State != "partial" || partialOverview.Allocation.Coverage.TotalLots != 33 || partialOverview.Allocation.Coverage.ValuedLots != 31 || partialOverview.Allocation.Coverage.InvalidDependencies != 2 || len(partialOverview.Allocation.ByInstrument) != 0 || len(partialOverview.Allocation.BySourceCurrency) != 0 {
+	if partialOverview.Snapshot.State != "incomplete" || partialOverview.Snapshot.Complete || partialOverview.Allocation.State != "partial" || partialOverview.Allocation.Coverage.TotalLots != 33 || partialOverview.Allocation.Coverage.ValuedLots != 31 || partialOverview.Allocation.Coverage.FutureDependencies != 2 || partialOverview.Allocation.Coverage.InvalidDependencies != 0 || len(partialOverview.Allocation.ByInstrument) != 0 || len(partialOverview.Allocation.BySourceCurrency) != 0 {
 		t.Fatalf("partial overview=%+v", partialOverview)
 	}
 	var partialWire map[string]json.RawMessage
