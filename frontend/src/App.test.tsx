@@ -344,7 +344,7 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
     const globalReviewsCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/reviews'))
     expect(String(globalReviewsCall?.[0])).not.toContain('holding_id=')
-    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Holdings' }))
     const lotC = screen.getByRole('button', { name: 'View reviews for SAME lot lot-c' })
     fireEvent.click(lotC)
     await waitFor(() => expect(screen.getByText('Filtered to exact lot lot-c')).toBeTruthy())
@@ -361,6 +361,31 @@ describe('Portfolio Dashboard', () => {
     expect(screen.getByRole('status').textContent).toMatch(/loading portfolio/i)
   })
 
+  it('opens on the first-class Holdings destination and keeps Overview focused on valuation', async () => {
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'Holdings' }).getAttribute('aria-current')).toBe('page')
+    expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
+    await waitFor(() => expect(screen.getByText('Overview', { selector: '.eyebrow' })).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Add holding' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Holdings' })).toBeNull()
+  })
+
+  it('tears down holding mutation controls when navigating away and remounts them on Holdings', async () => {
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    expect(screen.getByRole('heading', { name: 'Add one holding' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
+    expect(screen.queryByRole('heading', { name: 'Add one holding' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Holdings' }))
+    expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Add one holding' })).toBeNull()
+  })
+
   it('renders complete snapshots, flags, filtering and currency changes', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
@@ -369,9 +394,12 @@ describe('Portfolio Dashboard', () => {
     })
     vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
     render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
     expect(screen.getByText('100.5 MYR')).toBeTruthy()
-    expect(screen.getByText(/Distinct AAA instrument description/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Holdings' }))
+    await waitFor(() => expect(screen.getByText(/Distinct AAA instrument description/)).toBeTruthy())
     expect(screen.getByText('Source unit cost')).toBeTruthy()
     expect(screen.getByRole('columnheader', { name: /cost basis/i })).toBeTruthy()
     expect(screen.getAllByText('10').length).toBeGreaterThan(0)
@@ -443,6 +471,7 @@ describe('Portfolio Dashboard', () => {
     fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('currency=USD'), expect.anything()))
     resolveUSD?.({ ok: true, json: async () => ({ ...completeOverview, reporting_currency: 'USD' }) } as Response)
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getByText(/Reporting in USD/i)).toBeTruthy())
     resolveMYR?.({ ok: true, json: async () => completeOverview } as Response)
     await waitFor(() => expect(screen.getByText(/Reporting in USD/i)).toBeTruthy())
@@ -452,18 +481,26 @@ describe('Portfolio Dashboard', () => {
     const incomplete = { ...completeOverview, snapshot: { ...completeOverview.snapshot, state: 'incomplete' as const, complete: false, reporting_total: undefined } }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => incomplete } as Response)))
     render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getByText(/valuation is incomplete/i)).toBeTruthy())
     expect(screen.queryByText('100.5 MYR')).toBeNull()
     const noSnapshot = { ...completeOverview, snapshot: { state: 'no_snapshot' as const, complete: false, subtotals: [] }, holdings: [] }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => noSnapshot } as Response)))
     cleanup()
     render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getByText(/no immutable snapshot yet/i)).toBeTruthy())
+    expect(screen.getByText(/frozen point-in-time valuation/i)).toBeTruthy()
+    expect(screen.getByText(/does not place trades or change holdings/i)).toBeTruthy()
   })
 
   it('renders accessible complete instrument and source-currency allocation detail', async () => {
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => allocationOverview } as Response)))
     render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Allocation' })).toBeTruthy())
     expect(screen.getByRole('list', { name: 'Allocation by instrument' })).toBeTruthy()
     expect(screen.getByRole('list', { name: 'Allocation by original source currency' })).toBeTruthy()
@@ -486,6 +523,8 @@ describe('Portfolio Dashboard', () => {
     }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => sameSymbol } as Response)))
     render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getAllByText('SAME (USD) allocation').length).toBeGreaterThan(0))
     expect(screen.getAllByText('SAME (SGD) allocation').length).toBeGreaterThan(0)
     const region = screen.getByRole('region', { name: 'Allocation detail tables' })
@@ -497,6 +536,8 @@ describe('Portfolio Dashboard', () => {
     const incomplete = { ...allocationOverview, snapshot: { ...allocationOverview.snapshot, state: 'incomplete' as const, complete: false, reporting_total: undefined }, allocation: { ...allocationOverview.allocation!, state: 'partial' as const, coverage: { total_lots: 33, valued_lots: 31, missing_dependencies: 1, stale_dependencies: 1, invalid_dependencies: 0 }, by_instrument: [], by_source_currency: [] } }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => incomplete } as Response)))
     render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: /allocation percentages withheld/i })).toBeTruthy())
     expect(screen.getByText('31 / 33')).toBeTruthy()
     expect(screen.getByText(/partial values are not presented/i)).toBeTruthy()
@@ -510,6 +551,8 @@ describe('Portfolio Dashboard', () => {
     }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => inconsistent } as Response)))
     render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: /allocation percentages withheld/i })).toBeTruthy())
     expect(screen.queryByRole('list', { name: /allocation by instrument/i })).toBeNull()
     expect(screen.queryByRole('table', { name: /allocation detail/i })).toBeNull()
@@ -524,6 +567,8 @@ describe('Portfolio Dashboard', () => {
     }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => noSnapshot } as Response)))
     render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: /allocation unavailable/i })).toBeTruthy())
     expect(screen.getByText(/no immutable valuation exists yet/i)).toBeTruthy()
     expect(screen.queryByText('0 / 0')).toBeNull()
@@ -544,13 +589,18 @@ describe('Portfolio Dashboard', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, json: async () => String(input).includes('currency=USD') ? usdAllocation : allocationOverview } as Response))
     vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
     render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Allocation' })).toBeTruthy())
     expect(screen.getAllByText('80.25 · 80.25%').length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Holdings' }))
     fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await waitFor(() => expect(screen.getAllByText('40.25 · 80.10%').length).toBeGreaterThan(0))
     expect(screen.getAllByText('Value (USD)').length).toBe(2)
     expect(screen.queryByText('80.25 · 80.25%')).toBeNull()
-    expect(screen.getAllByText('MYR').length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/MYR allocation/).length).toBeGreaterThan(0)
   })
 
   it('renders a clear API error state', async () => {
@@ -753,6 +803,23 @@ describe('Portfolio Dashboard', () => {
     overview.unmount()
     expect(overviewInit?.signal && (overviewInit.signal as AbortSignal).aborted).toBe(true)
     void resolveSession
+  })
+
+  it('renders humanized holding activity while retaining the lot as secondary detail', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/activity')) return activityResponse([
+        activityItem('holding-created', '2026-01-02T12:00:00.000000000Z', { action: 'holding_created', category: 'holding', entity_type: 'holding', entity_id: 'lot-a', summary: 'Holding created: AAA — Acme Growth Fund', details: 'Lot lot-a · quantity 1.25 USD · unit cost 8.00 · cost basis 10.00' }),
+        activityItem('holding-archived', '2026-01-02T11:00:00.000000000Z', { action: 'holding_removed', category: 'holding', entity_type: 'holding', entity_id: 'lot-b', summary: 'Holding archived: BBB — Archived Fund', details: 'Lot lot-b · quantity 2 SGD · unit cost 5 · cost basis 10' }),
+        activityItem('generic', '2026-01-02T10:00:00.000000000Z'),
+      ])
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    await openActivity(fetchMock)
+    expect(screen.getByText('Holding created: AAA — Acme Growth Fund')).toBeTruthy()
+    expect(screen.getByText(/Lot lot-a.*quantity 1\.25 USD/)).toBeTruthy()
+    expect(screen.getByText('Holding archived: BBB — Archived Fund')).toBeTruthy()
+    expect(screen.getByText('Activity generic')).toBeTruthy()
   })
 
   it('loads safe authenticated activity with bounded load-more pagination', async () => {

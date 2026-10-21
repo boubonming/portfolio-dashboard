@@ -358,7 +358,7 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
 
 export default function App() {
   const [currency, setCurrency] = useState('MYR')
-  const [view, setView] = useState<'overview' | 'activity' | 'reviews'>('overview')
+  const [view, setView] = useState<'overview' | 'holdings' | 'activity' | 'reviews'>('holdings')
   const [reviewsHoldingId, setReviewsHoldingId] = useState<string | undefined>(undefined)
   const [data, setData] = useState<PortfolioOverview | null>(null)
   const [overviewETag, setOverviewETag] = useState<string | undefined>(undefined)
@@ -714,7 +714,7 @@ export default function App() {
 
   const closeReviews = useCallback(() => {
     setReviewsHoldingId(undefined)
-    setView('overview')
+    setView('holdings')
     window.setTimeout(() => {
       const lotId = reviewsReturnLotIdRef.current
       const target = lotId ? Array.from(document.querySelectorAll<HTMLButtonElement>('[data-reviews-lot-id]')).find((button) => button.dataset.reviewsLotId === lotId) : null
@@ -769,13 +769,14 @@ export default function App() {
       </header>
       <nav className="view-nav" aria-label="Portfolio views">
         <button type="button" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Overview</button>
+        <button type="button" aria-current={view === 'holdings' ? 'page' : undefined} onClick={() => setView('holdings')}>Holdings</button>
         <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
         <button type="button" aria-current={view === 'reviews' ? 'page' : undefined} onClick={() => { setReviewsHoldingId(undefined); setView('reviews') }}>Reviews</button>
       </nav>
 
       {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} /> : <>
-      {view === 'overview' && <>
-      <section className="toolbar" aria-label="Portfolio controls">
+      {(view === 'overview' || view === 'holdings') && <>
+      {view === 'holdings' && <section className="toolbar" aria-label="Portfolio controls">
         <label htmlFor="currency">Reporting currency</label>
         <select id="currency" value={currency} onChange={(event) => setCurrency(event.target.value)}>
           <option value="MYR">MYR</option>
@@ -788,7 +789,7 @@ export default function App() {
         <button type="button" onClick={downloadCSV} disabled={exportState === 'loading'} aria-busy={exportState === 'loading'}>{exportState === 'loading' ? 'Downloading CSV…' : 'Download CSV'}</button>
         {exportError && <span className="notice error" role="alert">{exportError} <button type="button" onClick={downloadCSV}>Retry download</button></span>}
         <span className="visually-hidden" role="status" aria-live="polite">{exportAnnouncement}</span>
-      </section>
+      </section>}
 
       {state === 'loading' && <section className="notice" role="status"><h2>Loading portfolio</h2><p>Reading the latest immutable snapshot…</p></section>}
       {authError && <section className="notice error" role="alert"><h2>Session error</h2><p>{authError}</p></section>}
@@ -796,7 +797,8 @@ export default function App() {
 
       {state === 'ready' && data && (
         <>
-          <section className="overview" aria-labelledby="overview-title">
+          {view === 'holdings' && <section className="holdings-page-heading" aria-labelledby="holdings-page-title"><span className="eyebrow">Holdings</span><h2 id="holdings-page-title">{data.portfolio.name}</h2><p className="muted">Canonical active lots in {data.reporting_currency}. Use Overview for valuation and allocation.</p></section>}
+          {view === 'overview' && <section className="overview" aria-labelledby="overview-title">
             <div>
               <span className="eyebrow">Overview</span>
               <h2 id="overview-title">{data.portfolio.name}</h2>
@@ -812,16 +814,16 @@ export default function App() {
               <div><dt>Snapshot as-of</dt><dd>{displayDate(data.snapshot.as_of)}</dd></div>
               <div><dt>Version</dt><dd>{data.snapshot.calculation_version || 'Not available'}</dd></div>
             </dl>
-          </section>
+          </section>}
 
-          {data.snapshot.state === 'no_snapshot' && <section className="notice"><h2>No immutable snapshot yet</h2><p>Canonical holdings are shown, but prices and reporting values are withheld until a snapshot is created.</p></section>}
-          {data.snapshot.state === 'incomplete' && <section className="notice warning"><h2>Valuation is incomplete</h2><p>Reporting total is intentionally withheld. Missing, stale or invalid market dependencies must be resolved before this view can be complete.</p></section>}
+          {view === 'overview' && data.snapshot.state === 'no_snapshot' && <section className="notice"><h2>No immutable snapshot yet</h2><p>A snapshot is a frozen point-in-time valuation calculated from the current holdings plus dated quotes and FX rates. It does not place trades or change holdings. Earnings, value and allocation are withheld until the required market inputs exist and a snapshot is created.</p></section>}
+          {view === 'overview' && data.snapshot.state === 'incomplete' && <section className="notice warning"><h2>Valuation is incomplete</h2><p>Reporting total is intentionally withheld. Missing, stale or invalid market dependencies must be resolved before this view can be complete.</p></section>}
 
-          <AllocationSection data={data} />
+          {view === 'overview' && <AllocationSection data={data} />}
 
-          <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active={view === 'overview'} scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized} />
+          {view === 'holdings' && <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized} />}
 
-          <section className="table-card" aria-labelledby="holdings-title">
+          {view === 'holdings' && <section className="table-card" aria-labelledby="holdings-title">
             <div className="section-heading"><div><span className="eyebrow">Canonical active lots</span><h2 id="holdings-title">Holdings</h2></div><span className="muted">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</span></div>
             <div className="table-scroll">
               <table>
@@ -853,7 +855,7 @@ export default function App() {
               </table>
               {!visibleHoldings.length && <p className="empty">No holdings match this filter.</p>}
             </div>
-          </section>
+          </section>}
         </>
       )}
       </>}

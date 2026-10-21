@@ -158,7 +158,8 @@ type SnapshotStatus struct {
 }
 
 // Activity is the safe, portfolio-scoped summary read model. It intentionally
-// contains no raw audit payload or monetary/holding values.
+// contains no raw audit payload; holding context is enriched separately at
+// read time from retained domain records.
 type Activity struct {
 	ID            string `json:"id"`
 	PortfolioID   string `json:"portfolio_id"`
