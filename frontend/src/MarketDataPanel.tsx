@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { APIError, getMarketDataSetup, refreshMarketData, saveMarketMappings, type MarketDataSetup, type MappingBatchItem } from './api'
+import { prefillMappingSuggestion } from './marketMappingSuggestions'
 
 function newRequestKey() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
   return `refresh-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
-type Draft = { provider: string; providerSymbol: string; quoteCurrency: string; provenance: string; confirmed: boolean }
+type Draft = { provider: string; providerSymbol: string; quoteCurrency: string; provenance: string; confirmed: boolean; suggested: boolean; guidance: string }
 
 function dependencyLabel(value: string, setup: MarketDataSetup | null): string {
   const quote = value.match(/^quote:([^:]+)$/)
@@ -22,6 +23,15 @@ function dependencyLabel(value: string, setup: MarketDataSetup | null): string {
 function providerErrorLabel(value: string): string {
   const labels: Record<string, string> = { configuration: 'credentials are not configured', auth: 'provider credentials were rejected', rate_limit: 'provider rate limit reached', timeout: 'provider request timed out', transport: 'provider could not be reached', invalid_value: 'provider returned an invalid value', invalid_timestamp: 'provider returned an invalid timestamp', currency_mismatch: 'provider did not return the requested currency', symbol_mismatch: 'provider returned a different symbol', provider_error: 'provider returned an error', persistence: 'the observation could not be stored', mapping_lookup: 'the mapping could not be read', mapping_ambiguous: 'more than one exact mapping matched; choose one explicitly' }
   return labels[value] || value.replace(/_/g, ' ')
+}
+
+function canonicalQuoteCurrency(value: string | undefined): string | null {
+  const trimmed = value?.trim() || ''
+  return /^[A-Z]{3}$/.test(trimmed) ? trimmed : null
+}
+
+function quoteCurrencyError(value: string | undefined): string {
+  return value?.trim() ? 'Use a three-letter uppercase currency code, such as USD.' : 'Quote currency is required before saving this mapping.'
 }
 
 export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfToken, onUnauthorized, onReload }: { portfolioID: string; reportingCurrency: string; csrfToken?: string; onUnauthorized: () => void; onReload: () => void }) {
@@ -56,8 +66,8 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       setSetup(next)
       const nextDrafts: Record<string, Draft> = {}
       for (const instrument of next.instruments) {
-        const mapping = instrument.mappings[0]
-        nextDrafts[instrument.instrument_id] = { provider: mapping?.provider || '', providerSymbol: mapping?.provider_symbol || '', quoteCurrency: mapping?.quote_currency || instrument.currency, provenance: mapping?.provenance || '', confirmed: Boolean(mapping) }
+        const seed = prefillMappingSuggestion(instrument, next.providers)
+        nextDrafts[instrument.instrument_id] = seed
       }
       setDrafts(nextDrafts); setState('ready')
     }).catch((reason: unknown) => {
@@ -76,10 +86,12 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
   const entries = useMemo(() => setup?.instruments || [], [setup])
   const mappings = entries.map((instrument): MappingBatchItem | null => {
     const draft = drafts[instrument.instrument_id]
-    if (!draft?.provider && !draft?.providerSymbol && !draft?.provenance) return null
-    if (!draft?.provider || !draft.providerSymbol || !draft.provenance || !draft.confirmed) return null
-    return { instrument_id: instrument.instrument_id, provider: draft.provider, provider_symbol: draft.providerSymbol, quote_currency: draft.quoteCurrency, provenance: draft.provenance, confirm_unverified: draft.confirmed }
+    if (!draft?.provider?.trim() && !draft?.providerSymbol?.trim() && !draft?.provenance?.trim()) return null
+    const quoteCurrency = canonicalQuoteCurrency(draft?.quoteCurrency)
+    if (!draft?.provider?.trim() || !draft.providerSymbol.trim() || !draft.provenance.trim() || !draft.confirmed || !quoteCurrency) return null
+    return { instrument_id: instrument.instrument_id, provider: draft.provider, provider_symbol: draft.providerSymbol, quote_currency: quoteCurrency, provenance: draft.provenance, confirm_unverified: draft.confirmed }
   }).filter((item): item is MappingBatchItem => item !== null)
+  const canSave = entries.length > 0 && mappings.length === entries.length
 
   const save = async () => {
     if (!setup || savingRef.current || refreshingRef.current) return
@@ -148,10 +160,14 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       <div className="table-scroll"><table className="market-data-table"><caption>Exact provider mapping setup for every active portfolio instrument</caption><thead><tr><th scope="col">Instrument</th><th scope="col">Provider</th><th scope="col">Exact provider symbol or ID</th><th scope="col">Quote currency</th><th scope="col">Provenance / confirmation</th></tr></thead><tbody>{entries.map((instrument) => {
         const draft = drafts[instrument.instrument_id]
         const available = setup?.providers.filter((provider) => provider.name !== 'open_exchange_rates' && (provider.configured || provider.public)) || []
-        return <tr key={instrument.instrument_id}><th scope="row"><strong>{instrument.symbol}</strong><span className="subline">{instrument.description || 'Description unavailable'} · {instrument.currency}</span><span className="subline">{instrument.mappings.length ? `Current: ${instrument.mappings.map((mapping) => `${mapping.provider} / ${mapping.provider_symbol}`).join(', ')}` : 'Not mapped'}</span></th><td><select aria-label={`Provider for ${instrument.symbol}`} value={draft?.provider || ''} onChange={(event) => update(instrument.instrument_id, 'provider', event.target.value)}><option value="">Choose exact provider</option>{available.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></td><td><input aria-label={`Exact provider identifier for ${instrument.symbol}`} value={draft?.providerSymbol || ''} onChange={(event) => update(instrument.instrument_id, 'providerSymbol', event.target.value)} placeholder="Exact listing / coin ID" /></td><td><input aria-label={`Quote currency for ${instrument.symbol}`} value={draft?.quoteCurrency || instrument.currency} maxLength={3} onChange={(event) => update(instrument.instrument_id, 'quoteCurrency', event.target.value.toUpperCase())} /></td><td><input aria-label={`Provenance for ${instrument.symbol}`} value={draft?.provenance || ''} onChange={(event) => update(instrument.instrument_id, 'provenance', event.target.value)} placeholder="Where you verified it" /><label className="checkbox-label"><input type="checkbox" checked={draft?.confirmed || false} onChange={(event) => update(instrument.instrument_id, 'confirmed', event.target.checked)} /> I confirmed this exact identifier</label></td></tr>
+        const instrumentLabel = `${instrument.symbol} (${instrument.description || instrument.currency})`
+        const quoteCurrency = draft?.quoteCurrency ?? ''
+        const quoteCurrencyID = `quote-currency-${instrument.instrument_id}`
+        const quoteCurrencyValid = canonicalQuoteCurrency(quoteCurrency) !== null
+        return <tr key={instrument.instrument_id}><th scope="row"><strong>{instrument.symbol}</strong><span className="subline">{instrument.description || 'Description unavailable'} · {instrument.currency}</span>{instrument.mappings.length ? <span className="subline">Current / confirmed: {instrument.mappings.map((mapping) => `${mapping.provider} / ${mapping.provider_symbol}`).join(', ')}</span> : <><span className="subline">{draft?.guidance || 'No mapping suggestion is available.'}</span>{draft?.suggested && <span className="subline">Suggested value is unverified until you confirm it.</span>}</>}</th><td><select aria-label={`Provider for ${instrumentLabel}`} value={draft?.provider || ''} onChange={(event) => update(instrument.instrument_id, 'provider', event.target.value)}><option value="">Choose exact provider</option>{available.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></td><td><input aria-label={`Exact provider identifier for ${instrumentLabel}`} value={draft?.providerSymbol || ''} onChange={(event) => update(instrument.instrument_id, 'providerSymbol', event.target.value)} placeholder="Exact listing / coin ID" /></td><td><input aria-label={`Quote currency for ${instrumentLabel}`} aria-describedby={quoteCurrencyID} aria-invalid={!quoteCurrencyValid} value={quoteCurrency} onChange={(event) => update(instrument.instrument_id, 'quoteCurrency', event.target.value)} /><span id={quoteCurrencyID} className="subline">{quoteCurrencyValid ? 'Three-letter uppercase currency code.' : quoteCurrencyError(quoteCurrency)}</span></td><td><input aria-label={`Provenance for ${instrumentLabel}`} value={draft?.provenance || ''} onChange={(event) => update(instrument.instrument_id, 'provenance', event.target.value)} placeholder="Where you verified it" /><label className="checkbox-label"><input type="checkbox" checked={draft?.confirmed || false} onChange={(event) => update(instrument.instrument_id, 'confirmed', event.target.checked)} /> I confirmed this exact identifier for {instrumentLabel}</label></td></tr>
       })}</tbody></table></div>
-      <div className="market-actions"><button type="button" onClick={save} disabled={saving || refreshing}>{saving ? 'Saving mappings…' : 'Save all mappings'}</button><button type="button" onClick={refresh} disabled={refreshing || saving}>{refreshing ? 'Refreshing prices…' : 'Refresh prices'}</button></div>
-      <p className="muted">Save validates the whole batch before committing. A stale setup is rejected rather than overwriting another revision.</p>
+      <div className="market-actions"><button type="button" onClick={save} disabled={saving || refreshing || !canSave}>{saving ? 'Saving mappings…' : 'Save all mappings'}</button><button type="button" onClick={refresh} disabled={refreshing || saving}>{refreshing ? 'Refreshing prices…' : 'Refresh prices'}</button></div>
+      <p className="muted">Save validates the whole batch before committing. Every row needs an exact editable identifier and explicit confirmation; unverified suggestions remain local until you confirm them. A stale setup is rejected rather than overwriting another revision.</p>
     </>}
     {lastRefresh && <section className="market-refresh-status" aria-labelledby="refresh-status-title" aria-live="polite"><h3 id="refresh-status-title">Latest refresh: {lastRefresh.complete ? 'complete' : 'incomplete'}</h3><p className="muted">{lastRefresh.freshness_policy}</p><ul>{lastRefresh.refresh.providers.map((provider) => <li key={provider.provider}><strong>{provider.provider}</strong>: {provider.status} · {provider.succeeded_count} succeeded · {provider.failed_count} failed · {provider.missing_mapping_count} missing{provider.errors.length > 0 && <span> — {provider.errors.map(providerErrorLabel).join('; ')}</span>}</li>)}</ul>{!lastRefresh.complete && <div className="notice warning" role="status"><strong>Dependencies requiring attention:</strong><ul>{[...lastRefresh.missing_instruments.map((item) => `Missing mapping: ${item}`), ...lastRefresh.snapshot.missing_dependencies.map((item) => `Missing ${dependencyLabel(item, setup)}`), ...lastRefresh.snapshot.stale_dependencies.map((item) => `Stale ${dependencyLabel(item, setup)}`), ...lastRefresh.snapshot.future_dependencies.map((item) => `Future ${dependencyLabel(item, setup)}`), ...lastRefresh.snapshot.invalid_dependencies.map((item) => `Invalid ${dependencyLabel(item, setup)}`)].map((item) => <li key={item}>{item}</li>)}</ul><p>Totals are withheld until every quote and FX dependency is valid and fresh.</p></div>}{lastRefresh.snapshot.complete ? <p role="status">Immutable snapshot is complete.</p> : <p className="notice warning" role="status">Immutable snapshot is incomplete; totals remain withheld.</p>}</section>}
     {message && <p className="notice" role="status" aria-live="polite">{message}</p>}
