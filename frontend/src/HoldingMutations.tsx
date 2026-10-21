@@ -243,7 +243,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     clearArchiveState()
   }
   useEffect(() => {
-    if (!active) abortWork()
+    if (!active || authorityChanged) clearArchiveState(true)
     return () => abortWork()
   }, [active, portfolioId, scopeKey])
   useEffect(() => { etagRef.current = overviewETag; scopeRef.current = scopeKey }, [overviewETag, scopeKey])

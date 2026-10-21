@@ -19,7 +19,9 @@ h1 { font-size: clamp(2rem, 6vw, 4rem); letter-spacing: -.04em; margin: .35rem 0
 h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .muted, .subline { color: #a9c1bd; }
 .subline { display: block; font-size: .78rem; margin-top: .25rem; }
-.toolbar, .overview, .allocation-card, .table-card, .notice { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; margin-top: 1.5rem; padding: 1.25rem; }
+.toolbar, .overview, .holdings-page-heading, .allocation-card, .table-card, .notice { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; margin-top: 1.5rem; padding: 1.25rem; }
+.holdings-page-heading h2 { margin-bottom: .35rem; }
+.holdings-page-heading p { margin-bottom: 0; }
 .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: .65rem 1rem; }
 .toolbar label { color: #b8cbc8; font-size: .9rem; font-weight: 700; }
 .toolbar input { min-width: 15rem; }

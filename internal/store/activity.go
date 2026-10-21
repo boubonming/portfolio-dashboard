@@ -449,6 +449,37 @@ func queryPortfolioIDs(ctx context.Context, tx *sql.Tx, query string, args ...an
 	return IDs, rows.Err()
 }
 
+// humanizeHoldingActivity enriches only holding mutations at read time. The
+// immutable activity row remains untouched, so legacy events become useful as
+// long as their retained lot and instrument records are still available.
+func humanizeHoldingActivity(item *domain.Activity, symbol, description, quantity, unitCost, costBasis, currency string) {
+	if item.EntityType != "holding" || (item.Action != "holding_created" && item.Action != "holding_removed") || item.EntityID == "" || symbol == "" {
+		return
+	}
+	verb := "created"
+	if item.Action == "holding_removed" {
+		verb = "archived"
+	}
+	label := symbol
+	if description != "" && description != symbol {
+		label += " — " + description
+	}
+	item.Summary = "Holding " + verb + ": " + label
+	details := []string{"Lot " + item.EntityID}
+	if quantity != "" && currency != "" {
+		details = append(details, "quantity "+quantity+" "+currency)
+	} else if quantity != "" {
+		details = append(details, "quantity "+quantity)
+	}
+	if unitCost != "" {
+		details = append(details, "unit cost "+unitCost)
+	}
+	if costBasis != "" {
+		details = append(details, "cost basis "+costBasis)
+	}
+	item.Details = strings.Join(details, " · ")
+}
+
 // Activity returns the canonical transactional activity read model.
 func (s *Store) Activity(ctx context.Context, portfolioID string, options ActivityPageOptions) (domain.ActivityPage, error) {
 	if strings.TrimSpace(portfolioID) == "" {
@@ -475,15 +506,20 @@ func (s *Store) Activity(ctx context.Context, portfolioID string, options Activi
 			return domain.ActivityPage{}, err
 		}
 	}
-	query := `SELECT id,portfolio_id,actor_category,action,category,
-		COALESCE(entity_type,''),COALESCE(entity_id,''),occurred_at,summary,details
-		FROM activity_events WHERE portfolio_id = ?`
+	query := `SELECT a.id,a.portfolio_id,a.actor_category,a.action,a.category,
+		COALESCE(a.entity_type,''),COALESCE(a.entity_id,''),a.occurred_at,a.summary,a.details,
+		COALESCE(i.symbol,''),COALESCE(i.description,''),COALESCE(l.quantity,''),
+		COALESCE(l.unit_cost,''),COALESCE(l.cost_basis,''),COALESCE(l.currency,'')
+		FROM activity_events a
+		LEFT JOIN lots l ON l.id=a.entity_id AND l.portfolio_id=a.portfolio_id AND a.entity_type='holding'
+		LEFT JOIN instruments i ON i.id=l.instrument_id
+		WHERE a.portfolio_id = ?
 	args := []any{portfolioID}
 	if options.Cursor != "" {
-		query += ` AND (sort_time,id) < (?,?)`
+		query += ` AND (a.sort_time,a.id) < (?,?)`
 		args = append(args, cursor.SortTime, cursor.ID)
 	}
-	query += ` ORDER BY sort_time DESC, id DESC LIMIT ?`
+	query += ` ORDER BY a.sort_time DESC, a.id DESC LIMIT ?`
 	args = append(args, options.Limit+1)
 	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -493,9 +529,11 @@ func (s *Store) Activity(ctx context.Context, portfolioID string, options Activi
 	records := make([]domain.Activity, 0, options.Limit+1)
 	for rows.Next() {
 		var item domain.Activity
-		if err := rows.Scan(&item.ID, &item.PortfolioID, &item.ActorCategory, &item.Action, &item.Category, &item.EntityType, &item.EntityID, &item.OccurredAt, &item.Summary, &item.Details); err != nil {
+		var symbol, description, quantity, unitCost, costBasis, currency string
+		if err := rows.Scan(&item.ID, &item.PortfolioID, &item.ActorCategory, &item.Action, &item.Category, &item.EntityType, &item.EntityID, &item.OccurredAt, &item.Summary, &item.Details, &symbol, &description, &quantity, &unitCost, &costBasis, &currency); err != nil {
 			return domain.ActivityPage{}, err
 		}
+		humanizeHoldingActivity(&item, symbol, description, quantity, unitCost, costBasis, currency)
 		item.ActorCategory = safeActorCategory(item.ActorCategory)
 		canonical, _, err := canonicalActivityTime(item.OccurredAt)
 		if err != nil {
