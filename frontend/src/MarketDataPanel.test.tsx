@@ -4,7 +4,7 @@ import MarketDataPanel from './MarketDataPanel'
 
 const providers = [
   { name: 'coingecko', configured: true, public: true },
-  { name: 'finnhub', configured: false },
+  { name: 'finnhub', configured: false, public: false },
 ]
 const setup = (overrides: Record<string, unknown> = {}) => ({
   portfolio_id: 'portfolio-a', etag: '"setup-1"', providers,
@@ -15,8 +15,8 @@ const setup = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 const refreshResult = (complete = false) => ({
-  refresh: { status: complete ? 'complete' : 'incomplete', providers: [{ provider: 'finnhub', status: complete ? 'complete' : 'incomplete', request_count: 1, succeeded_count: complete ? 1 : 0, failed_count: complete ? 0 : 1, missing_mapping_count: complete ? 0 : 1 }] },
-  snapshot: { complete, missing_count: complete ? 0 : 1, stale_count: 0, invalid_count: 0 }, complete,
+  refresh: { refresh_id: 'refresh-1', portfolio_id: 'portfolio-a', status: complete ? 'complete' : 'incomplete', started_at: '2026-01-01T00:00:00.000000000Z', ended_at: '2026-01-01T00:00:01.000000000Z', observation_ids: [], providers: [{ provider: 'finnhub', status: complete ? 'complete' : 'incomplete', request_count: 1, succeeded_count: complete ? 1 : 0, failed_count: complete ? 0 : 1, missing_mapping_count: complete ? 0 : 1, observation_ids: [], errors: complete ? [] : ['configuration'] }] },
+  snapshot: { snapshot_id: 'snapshot-1', portfolio_id: 'portfolio-a', calculation_version: 'phase-b.decimal.v1', created_at: '2026-01-01T00:00:01.000000000Z', as_of: '2026-01-01T00:00:01.000000000Z', complete, reporting_currency: 'MYR', currencies: [], subtotals: [], missing_count: complete ? 0 : 1, stale_count: 0, invalid_count: 0, missing_dependencies: complete ? [] : ['quote:authority-a'], stale_dependencies: [], invalid_dependencies: [], quote_ids: [], fx_ids: [], source_timestamps: [], presentation_timezone: 'Asia/Singapore' }, complete,
   freshness_policy: 'quotes and FX must be no older than the configured 36h freshness window; incomplete data never becomes zero',
   missing_instruments: complete ? [] : ['SAME (USD)'],
 })
@@ -51,7 +51,7 @@ describe('MarketDataPanel', () => {
 
   it('submits every confirmed mapping in one atomic batch, preserving duplicate symbols by row', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/market-data/mappings')
-      ? json({ status: 'saved', etag: '"setup-2"', outcomes: [{ instrument_id: 'authority-a' }, { instrument_id: 'authority-b' }] })
+      ? json({ status: 'saved', etag: '"setup-2"', outcomes: [{ instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-0', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }, { instrument_id: 'authority-b', status: 'saved', mapping: { id: 'mapping-b', instrument_id: 'authority-b', provider: 'coingecko', provider_symbol: 'coin-1', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }] })
       : json(setup()))
     renderPanel(fetchMock)
     await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))

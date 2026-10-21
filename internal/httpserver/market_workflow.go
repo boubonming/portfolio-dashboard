@@ -10,8 +10,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/config"
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
@@ -19,19 +17,10 @@ import (
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 )
 
-const marketRefreshFreshnessPolicy = "quotes and FX must be no older than the configured 36h freshness window; incomplete data never becomes zero"
-
 type marketWorkflowEndpoint struct {
 	database  *store.Store
 	clients   map[marketdata.Provider]marketdata.ProviderClient
 	readiness []domain.ProviderReadiness
-	mu        sync.Mutex
-	requests  map[string]marketRefreshRequest
-}
-
-type marketRefreshRequest struct {
-	fingerprint string
-	result      domain.MarketRefreshResult
 }
 
 func (h *marketWorkflowEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,19 +36,22 @@ func newMarketWorkflowEndpoint(database *store.Store, cfg config.Config) *market
 	return &marketWorkflowEndpoint{
 		database: database,
 		clients: map[marketdata.Provider]marketdata.ProviderClient{
-			marketdata.ProviderFinnhub:           marketdata.NewFinnhubClient(cfg.ProviderKeys.Finnhub, marketdata.ClientOptions{}),
-			marketdata.ProviderAlphaVantage:      marketdata.NewAlphaVantageClient(cfg.ProviderKeys.AlphaVantage, marketdata.ClientOptions{}),
-			marketdata.ProviderCoinGecko:         marketdata.NewCoinGeckoClient(marketdata.ClientOptions{}),
-			marketdata.ProviderOpenExchangeRates: marketdata.NewOpenExchangeRatesClient(cfg.ProviderKeys.OpenExchangeRates, marketdata.ClientOptions{}),
+			marketdata.ProviderFinnhub:           marketdata.NewFinnhubClient(cfg.ProviderKeys.Finnhub, marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.Finnhub}),
+			marketdata.ProviderAlphaVantage:      marketdata.NewAlphaVantageClient(cfg.ProviderKeys.AlphaVantage, marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.AlphaVantage}),
+			marketdata.ProviderCoinGecko:         marketdata.NewCoinGeckoClient(marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.CoinGecko}),
+			marketdata.ProviderOpenExchangeRates: marketdata.NewOpenExchangeRatesClient(cfg.ProviderKeys.OpenExchangeRates, marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.OpenExchangeRates}),
 		},
 		readiness: store.MarketProviders(keys),
-		requests:  map[string]marketRefreshRequest{},
 	}
 }
 
 func (h *marketWorkflowEndpoint) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.RawQuery != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_query"})
+		return
+	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-	if len(parts) < 5 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "portfolios" || parts[3] == "" || parts[4] != "market-data" || (len(parts) != 5 && len(parts) != 6) {
+	if len(parts) < 5 || len(parts) > 6 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "portfolios" || parts[3] == "" || len(parts[3]) > 128 || !canonicalPathID.MatchString(parts[3]) || strings.Contains(r.URL.EscapedPath(), "%") || parts[4] != "market-data" || (len(parts) != 5 && len(parts) != 6) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
@@ -113,6 +105,11 @@ func (h *marketWorkflowEndpoint) saveMappings(w http.ResponseWriter, r *http.Req
 	}
 	body, err := readJSONBody(w, r, 512<<10)
 	if err == nil {
+		if hasDuplicateJSONKeys(body) {
+			err = errors.New("duplicate JSON key")
+		}
+	}
+	if err == nil {
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.DisallowUnknownFields()
 		err = decoder.Decode(&request)
@@ -156,7 +153,7 @@ func readJSONBody(w http.ResponseWriter, r *http.Request, max int64) ([]byte, er
 
 func (h *marketWorkflowEndpoint) refresh(w http.ResponseWriter, r *http.Request, portfolioID string) {
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if len(key) < 8 || len(key) > 128 || strings.ContainsAny(key, "\r\n") {
+	if len(key) < 8 || len(key) > 128 || !canonicalPathID.MatchString(key) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "idempotency_key_required"})
 		return
 	}
@@ -165,50 +162,74 @@ func (h *marketWorkflowEndpoint) refresh(w http.ResponseWriter, r *http.Request,
 	}
 	body, err := readJSONBody(w, r, 8<<10)
 	if err == nil && len(body) > 0 {
+		if hasDuplicateJSONKeys(body) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_refresh_request"})
+			return
+		}
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.DisallowUnknownFields()
 		err = decoder.Decode(&request)
+		if err == nil {
+			var extra any
+			if decoder.Decode(&extra) != io.EOF {
+				err = errors.New("trailing JSON")
+			}
+		}
 	}
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_refresh_request"})
 		return
 	}
-	fingerprintBytes := sha256.Sum256([]byte(strings.TrimSpace(request.ReportingCurrency)))
-	fingerprint := hex.EncodeToString(fingerprintBytes[:])
-	cacheKey := portfolioID + "\x00" + key
-	h.mu.Lock()
-	if cached, ok := h.requests[cacheKey]; ok {
-		if cached.fingerprint != fingerprint {
-			h.mu.Unlock()
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency_key_conflict"})
+	setup, setupErr := h.database.MarketDataSetup(r.Context(), portfolioID, h.readiness)
+	if setupErr != nil {
+		if errors.Is(setupErr, store.ErrPortfolioNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "portfolio_not_found"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+		}
+		return
+	}
+	reportingCurrency := strings.TrimSpace(request.ReportingCurrency)
+	if reportingCurrency == "" {
+		if err := h.database.DB.QueryRowContext(r.Context(), "SELECT reporting_currency FROM portfolios WHERE id=?", portfolioID).Scan(&reportingCurrency); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
 			return
 		}
-		h.mu.Unlock()
-		writeJSON(w, http.StatusOK, cached.result)
+		reportingCurrency = strings.TrimSpace(reportingCurrency)
+	}
+	if len(reportingCurrency) != 3 || reportingCurrency != strings.ToUpper(reportingCurrency) || strings.Trim(reportingCurrency, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_reporting_currency"})
 		return
 	}
-	// Hold the lock over the bounded operation so a double-submit cannot issue
-	// a second provider request before the first response is cached.
-	defer h.mu.Unlock()
-	result, err := h.database.Refresh(r.Context(), store.RefreshOptions{PortfolioID: portfolioID, ReportingCurrency: request.ReportingCurrency, Clients: h.clients})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "refresh_failed"})
-		return
-	}
-	snapshot, err := h.database.CreateSnapshot(r.Context(), store.SnapshotRequest{PortfolioID: portfolioID, ReportingCurrency: request.ReportingCurrency, AsOf: time.Now().UTC(), MaxAge: domain.DefaultFreshness})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "snapshot_failed"})
-		return
-	}
-	setup, _ := h.database.MarketDataSetup(r.Context(), portfolioID, h.readiness)
+	fingerprintInput, _ := json.Marshal(struct {
+		PortfolioID       string `json:"portfolio_id"`
+		Operation         string `json:"operation"`
+		ReportingCurrency string `json:"reporting_currency"`
+	}{portfolioID, "refresh", reportingCurrency})
+	fingerprintBytes := sha256.Sum256(fingerprintInput)
+	fingerprint := hex.EncodeToString(fingerprintBytes[:])
 	missing := make([]string, 0)
 	for _, instrument := range setup.Instruments {
 		if len(instrument.Mappings) == 0 {
 			missing = append(missing, fmt.Sprintf("%s (%s)", instrument.Symbol, instrument.Currency))
 		}
 	}
-	response := domain.MarketRefreshResult{Refresh: result, Snapshot: snapshot, Complete: result.Status == "complete" && snapshot.Complete, Freshness: marketRefreshFreshnessPolicy, Missing: missing}
-	h.requests[cacheKey] = marketRefreshRequest{fingerprint: fingerprint, result: response}
+	response, _, err := h.database.RefreshMarketDataIdempotent(r.Context(), store.MarketRefreshIdempotencyOptions{
+		ActorCategory: "browser_user", ActorID: "local-owner", PortfolioID: portfolioID, IdempotencyKey: key, RequestFingerprint: fingerprint,
+		Refresh:  store.RefreshOptions{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, Clients: h.clients},
+		Snapshot: store.SnapshotRequest{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, MaxAge: domain.DefaultFreshness}, Missing: missing,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrMarketRefreshIdempotencyConflict):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency_key_conflict"})
+		case errors.Is(err, store.ErrMarketRefreshInProgress):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "refresh_in_progress"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "refresh_failed"})
+		}
+		return
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 

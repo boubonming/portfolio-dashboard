@@ -164,7 +164,7 @@ func statusFromPayload(encoded []byte) (domain.SnapshotStatus, error) {
 	for _, subtotal := range v.Subtotals {
 		currencies = append(currencies, subtotal.Currency)
 	}
-	return domain.SnapshotStatus{SnapshotID: payload.SnapshotID, PortfolioID: payload.PortfolioID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: v.Complete, ReportingCurrency: v.ReportingCurrency, ReportingTotal: v.ReportingTotal, Currencies: currencies, Subtotals: v.Subtotals, MissingCount: len(v.MissingDependencies), StaleCount: len(v.StaleDependencies), InvalidCount: len(v.InvalidDependencies), QuoteIDs: v.QuoteIDs, FXIDs: v.FXIDs, SourceTimestamps: v.SourceTimestamps, PresentationTimezone: v.PresentationTimezone}, nil
+	return domain.SnapshotStatus{SnapshotID: payload.SnapshotID, PortfolioID: payload.PortfolioID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: v.Complete, ReportingCurrency: v.ReportingCurrency, ReportingTotal: v.ReportingTotal, Currencies: currencies, Subtotals: v.Subtotals, MissingCount: len(v.MissingDependencies), StaleCount: len(v.StaleDependencies), InvalidCount: len(v.InvalidDependencies), MissingDependencies: v.MissingDependencies, StaleDependencies: v.StaleDependencies, InvalidDependencies: v.InvalidDependencies, QuoteIDs: v.QuoteIDs, FXIDs: v.FXIDs, SourceTimestamps: v.SourceTimestamps, PresentationTimezone: v.PresentationTimezone}, nil
 }
 
 func (s *Store) SnapshotStatus(ctx context.Context, snapshotID string) (domain.SnapshotStatus, error) {

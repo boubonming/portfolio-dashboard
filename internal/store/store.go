@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -25,6 +26,7 @@ type Store struct {
 	cursorKey       []byte
 	reviewCursorKey []byte
 	clock           func() time.Time
+	marketRefreshMu sync.Mutex
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {

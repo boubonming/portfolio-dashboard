@@ -472,6 +472,16 @@ func refreshValidationErrorClass(err error) string {
 	if errors.Is(err, errRefreshProviderContract) {
 		return "provider_error"
 	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "future") || strings.Contains(message, "timestamp") {
+		return "invalid_timestamp"
+	}
+	if strings.Contains(message, "currency") {
+		return "currency_mismatch"
+	}
+	if strings.Contains(message, "invalid provider") {
+		return "invalid_value"
+	}
 	return "persistence"
 }
 

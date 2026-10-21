@@ -79,7 +79,7 @@ func TestMachineOperatorMigrationUpgradesExistingTenMigrationDatabase(t *testing
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 11 {
+	if migrationCount != 12 {
 		t.Fatalf("migration count after upgrade=%d", migrationCount)
 	}
 	var action, payload string
@@ -114,7 +114,7 @@ func TestMachineOperatorMigrationUpgradesExistingTenMigrationDatabase(t *testing
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 11 {
+	if migrationCount != 12 {
 		t.Fatalf("migration count after repeat=%d", migrationCount)
 	}
 }
@@ -150,7 +150,7 @@ func TestMachineOperatorMigrationRollsBackAtomicallyOnTriggerConflict(t *testing
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 11 {
+	if migrationCount != 12 {
 		t.Fatalf("migration rows after retry=%d", migrationCount)
 	}
 }

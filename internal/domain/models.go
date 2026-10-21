@@ -151,6 +151,9 @@ type SnapshotStatus struct {
 	MissingCount         int                `json:"missing_count"`
 	StaleCount           int                `json:"stale_count"`
 	InvalidCount         int                `json:"invalid_count"`
+	MissingDependencies  []string           `json:"missing_dependencies"`
+	StaleDependencies    []string           `json:"stale_dependencies"`
+	InvalidDependencies  []string           `json:"invalid_dependencies"`
 	QuoteIDs             []string           `json:"quote_ids"`
 	FXIDs                []string           `json:"fx_ids"`
 	SourceTimestamps     []string           `json:"source_timestamps"`

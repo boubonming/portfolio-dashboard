@@ -213,6 +213,22 @@ instruments by human label, quote/FX freshness, and complete/incomplete state;
 partial values are never shown as a complete total. Secrets remain server-side
 and only readiness names/booleans are exposed.
 
+The browser refresh endpoint requires an `Idempotency-Key` and stores its
+canonical request fingerprint and committed response receipt in SQLite. The
+receipt namespace is actor category, bounded actor ID, portfolio, operation and
+key; the authenticated browser uses the non-secret `local-owner` actor ID.
+Replaying the same key and request after a process restart returns the original
+receipt without another provider call or snapshot effect. Reusing a key for a
+different reporting currency is a conflict, and pending or failed operations
+never claim a complete valuation. Refresh audit and Activity rows remain
+portfolio-owned and append-only.
+
+The status panel distinguishes configuration, authentication, rate-limit,
+timeout, transport, invalid-value/timestamp, currency/symbol mismatch,
+mapping, and persistence failures. It also names missing, stale, invalid and
+future quote/FX dependencies when the server provides enough instrument or
+currency context; incomplete snapshots withhold totals.
+
 The existing `mapping-add`, `mapping-list`, `market-refresh` and
 `snapshot-create` commands remain available for operators and tests. They are
 not required for ordinary owner setup. The accepted quote providers are
