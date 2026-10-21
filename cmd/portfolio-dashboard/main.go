@@ -40,7 +40,7 @@ func main() {
 		fatal(err)
 	}
 	defer database.Close()
-	handler, err := httpserver.NewHandlerWithAuth(database, cfg.Auth)
+	handler, err := httpserver.NewHandlerWithConfig(database, cfg)
 	if err != nil {
 		fatal(err)
 	}

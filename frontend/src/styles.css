@@ -169,6 +169,19 @@ tbody th { font-weight: 500; }
 .confirmation-backdrop { align-items: center; background: rgb(0 0 0 / 65%); display: flex; inset: 0; justify-content: center; padding: 1rem; position: fixed; z-index: 10; }
 .confirmation-dialog { background: #1a2524; border: 2px solid #52c7b8; border-radius: 12px; max-width: 38rem; padding: 1.5rem; width: 100%; }
 .confirmation-dialog h2:focus-visible, .holding-form h3:focus-visible { border-radius: 4px; outline: 2px solid #75d5c7; outline-offset: 4px; }
+.market-data-card { background: #172322; border: 1px solid #41615d; border-radius: 12px; margin-top: 1.5rem; padding: clamp(1rem, 3vw, 2rem); }
+.provider-status { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+.provider-chip { border: 1px solid #41615d; border-radius: 999px; font-size: .85rem; padding: .35rem .65rem; }
+.provider-chip.ready { border-color: #52c7b8; color: #bff8ef; }
+.provider-chip.not-ready { color: #a9c1bd; }
+.market-data-table input, .market-data-table select { min-width: 9rem; width: 100%; }
+.market-data-table th[scope="row"] { min-width: 15rem; }
+.checkbox-label { align-items: center; display: flex; font-size: .8rem; gap: .4rem; margin-top: .45rem; white-space: nowrap; }
+.checkbox-label input { min-width: auto; width: auto; }
+.market-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+.market-actions button:first-child { background: #164d43; font-weight: 700; }
+.market-refresh-status { border-top: 1px solid #41615d; margin-top: 1.25rem; padding-top: 1rem; }
+.market-refresh-status ul { line-height: 1.7; margin-bottom: 0; padding-left: 1.2rem; }
 @media (max-width: 780px) {
   .overview { grid-template-columns: 1fr; }
   .snapshot-meta { border-left: 0; border-top: 1px solid #41615d; padding-left: 0; padding-top: 1rem; }

@@ -4,6 +4,7 @@ import { apiFetch, APIError, jsonResponse } from './api'
 import ThesisEditor from './ThesisEditor'
 import Reviews, { type FeedbackAttemptStore } from './Reviews'
 import HoldingMutations, { validatePortfolioETag } from './HoldingMutations'
+import MarketDataPanel from './MarketDataPanel'
 
 export type Freshness = {
   status: 'fresh' | 'stale' | 'missing' | 'future' | 'invalid' | string
@@ -358,7 +359,7 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
 
 export default function App() {
   const [currency, setCurrency] = useState('MYR')
-  const [view, setView] = useState<'overview' | 'holdings' | 'activity' | 'reviews'>('holdings')
+  const [view, setView] = useState<'overview' | 'holdings' | 'market' | 'activity' | 'reviews'>('holdings')
   const [reviewsHoldingId, setReviewsHoldingId] = useState<string | undefined>(undefined)
   const [data, setData] = useState<PortfolioOverview | null>(null)
   const [overviewETag, setOverviewETag] = useState<string | undefined>(undefined)
@@ -770,6 +771,7 @@ export default function App() {
       <nav className="view-nav" aria-label="Portfolio views">
         <button type="button" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Overview</button>
         <button type="button" aria-current={view === 'holdings' ? 'page' : undefined} onClick={() => setView('holdings')}>Holdings</button>
+        <button type="button" aria-current={view === 'market' ? 'page' : undefined} onClick={() => setView('market')}>Market data</button>
         <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
         <button type="button" aria-current={view === 'reviews' ? 'page' : undefined} onClick={() => { setReviewsHoldingId(undefined); setView('reviews') }}>Reviews</button>
       </nav>
@@ -860,6 +862,7 @@ export default function App() {
       )}
       </>}
       {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={(keyboardActivated) => loadActivity(activity?.next_cursor, true, keyboardActivated)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
+      {view === 'market' && <MarketDataPanel portfolioID={data?.portfolio.id || activityPortfolioID} reportingCurrency={currency} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} onReload={() => load()} />}
       {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} feedbackAttempts={feedbackAttemptsRef.current} onUnauthorized={handleThesisUnauthorized} onBackToOverview={closeReviews} />}
       </>}
     </main>

@@ -1,0 +1,88 @@
+package store
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+
+	"github.com/boubonming/portfolio-dashboard/internal/domain"
+)
+
+func TestMarketDataSetupAndBatchMappingsAreScopedAndAtomic(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "market.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := "2026-01-01T00:00:00.000000000Z"
+	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "market-portfolio", "Market", "MYR", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "market-instrument", "AAPL", "Apple Inc.", "USD", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "market-portfolio", "market-instrument", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,lifecycle,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "market-lot", "market-portfolio", "market-instrument", "1", "USD", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	setup, err := s.MarketDataSetup(ctx, "market-portfolio", []domain.ProviderReadiness{{Name: "finnhub"}})
+	if err != nil || len(setup.Instruments) != 1 || len(setup.Instruments[0].Mappings) != 0 {
+		t.Fatalf("setup=%+v err=%v", setup, err)
+	}
+	result, err := s.AddProviderMappingsBatch(ctx, "market-portfolio", setup.ETag, []domain.MappingBatchItem{{InstrumentID: "market-instrument", Provider: "finnhub", ProviderSymbol: "AAPL", QuoteCurrency: "USD", Provenance: "provider documentation", ConfirmUnverified: true}})
+	if err != nil || result.Status != "saved" || len(result.Outcomes) != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	updated, err := s.MarketDataSetup(ctx, "market-portfolio", nil)
+	if err != nil || len(updated.Instruments[0].Mappings) != 1 {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	if _, err := s.AddProviderMappingsBatch(ctx, "market-portfolio", setup.ETag, []domain.MappingBatchItem{{InstrumentID: "market-instrument", Provider: "finnhub", ProviderSymbol: "MSFT", QuoteCurrency: "USD", Provenance: "stale", ConfirmUnverified: true}}); err == nil {
+		t.Fatal("stale mapping batch unexpectedly succeeded")
+	}
+}
+
+func TestMarketMappingBatchRequiresConfirmationAndRollsBackBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "market-rollback.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := "2026-01-01T00:00:00.000000000Z"
+	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "market-rollback", "Market", "MYR", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "market-rollback-instrument", "ROLL", "Rollback", "USD", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "market-rollback", "market-rollback-instrument", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,lifecycle,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "market-rollback-lot", "market-rollback", "market-rollback-instrument", "1", "USD", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	setup, err := s.MarketDataSetup(ctx, "market-rollback", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := domain.MappingBatchItem{InstrumentID: "market-rollback-instrument", Provider: "finnhub", ProviderSymbol: "ROLL", QuoteCurrency: "USD", Provenance: "verified listing", ConfirmUnverified: true}
+	if _, err := s.AddProviderMappingsBatch(ctx, "market-rollback", setup.ETag, []domain.MappingBatchItem{{
+		InstrumentID: confirmed.InstrumentID, Provider: confirmed.Provider, ProviderSymbol: confirmed.ProviderSymbol, QuoteCurrency: confirmed.QuoteCurrency, Provenance: confirmed.Provenance,
+	}}); err == nil {
+		t.Fatal("unconfirmed mapping unexpectedly succeeded")
+	}
+	if _, err := s.AddProviderMappingsBatch(ctx, "market-rollback", setup.ETag, []domain.MappingBatchItem{confirmed, {InstrumentID: "not-in-portfolio", Provider: "finnhub", ProviderSymbol: "OTHER", QuoteCurrency: "USD", Provenance: "verified", ConfirmUnverified: true}}); err == nil {
+		t.Fatal("invalid second mapping unexpectedly succeeded")
+	}
+	var count int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM instrument_provider_mappings`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("atomic batch wrote %d mappings", count)
+	}
+}

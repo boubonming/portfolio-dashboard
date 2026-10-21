@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/boubonming/portfolio-dashboard/internal/auth"
+	appconfig "github.com/boubonming/portfolio-dashboard/internal/config"
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 	"github.com/boubonming/portfolio-dashboard/internal/web"
@@ -22,7 +23,7 @@ import (
 
 // NewStaticHandler serves only public assets and health. It intentionally has
 // no database or private API access.
-func NewStaticHandler() (http.Handler, error) { return newHandler(nil, nil) }
+func NewStaticHandler() (http.Handler, error) { return newHandler(nil, nil, appconfig.Config{}) }
 
 // NewHandlerWithAuth is the production constructor. Authentication must be
 // configured explicitly before private routes are registered.
@@ -42,10 +43,32 @@ func NewHandlerWithAuth(database *store.Store, config auth.Config) (http.Handler
 			return nil, err
 		}
 	}
-	return newHandler(database, authenticator)
+	return newHandler(database, authenticator, appconfig.Config{Auth: config})
 }
 
-func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.Handler, error) {
+// NewHandlerWithConfig is the production constructor that also wires the
+// server-side provider clients. The legacy constructor above remains useful
+// to callers that only need authenticated read routes.
+func NewHandlerWithConfig(database *store.Store, configuration appconfig.Config) (http.Handler, error) {
+	authenticator, err := auth.New(configuration.Auth)
+	if err != nil {
+		return nil, err
+	}
+	if database != nil {
+		if err := database.SetActivityCursorSecret(authenticator.ActivityCursorSecret()); err != nil {
+			return nil, err
+		}
+		if err := database.SetReviewCursorSecret(authenticator.ReviewCursorSecret()); err != nil {
+			return nil, err
+		}
+		if err := database.RegisterMachinePrincipalIdentity(context.Background(), authenticator.MachinePrincipal()); err != nil {
+			return nil, err
+		}
+	}
+	return newHandler(database, authenticator, configuration)
+}
+
+func newHandler(database *store.Store, authenticator *auth.Authenticator, configuration appconfig.Config) (http.Handler, error) {
 	files, err := web.Files()
 	if err != nil {
 		return nil, err
@@ -78,6 +101,9 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings/{holdingId}", mutations)
 		overview := noStorePrivate(portfolioOverviewRoutes(database, authenticator))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/overview", overview)
+		market := noStorePrivate(authenticator.RequireAuth(portfolioCSRF(authenticator, newMarketWorkflowEndpoint(database, configuration))))
+		mux.Handle("/api/v1/portfolios/{portfolioId}/market-data", market)
+		mux.Handle("/api/v1/portfolios/{portfolioId}/market-data/", market)
 	}
 	portfolio := http.Handler(portfolioRoutes(database))
 	if authenticator != nil {

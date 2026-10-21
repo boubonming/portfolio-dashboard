@@ -192,26 +192,33 @@ multiple possible paths are rejected as ambiguous.
 
 ## Free-provider mappings and refresh
 
-The administrative refresh uses only explicitly recorded mappings. It never
-guesses an international ticker, sends holdings to a provider, or falls back to
-an unofficial scraper. Add a mapping only after checking the provider's exact
-symbol/coin ID and record the source and activation time:
+The normal owner workflow is in the authenticated **Market data** view. It
+shows every active instrument by symbol, description and quote currency, with
+its current exact mapping or an explicit `Not mapped` state. Enter exact
+provider symbols/coin IDs in the table, review the provider and provenance,
+then use **Save all mappings** once. The submission is atomic, append-only and
+optimistically concurrency checked; it does not require copying an internal
+instrument ID or running one command per holding.
 
-```sh
-go run ./cmd/portfolio-dashboard mapping-add -db portfolio.sqlite \
-  -instrument INSTRUMENT_ID -provider finnhub \
-  -provider-symbol AAPL -quote-currency USD \
-  -active-from 2026-10-09T00:00:00Z \
-  -provenance 'provider documentation checked on 2026-10-09'
-go run ./cmd/portfolio-dashboard mapping-list -db portfolio.sqlite
-```
+Provider keys authorize access; mappings identify exact listings. A key never
+proves that a ticker is the right international listing, ADR, or crypto ID, so
+the UI never guesses or silently reuses a holding symbol. Mappings are
+one-time/revisioned setup, not a recurring refresh requirement. Open Exchange
+Rates supplies FX and does not need an instrument ticker mapping.
 
-Mappings are append-only and versioned by `active-from`; a new symbol or
-listing is a new mapping row. The accepted quote providers are Finnhub for
-mapped US securities, Alpha Vantage `GLOBAL_QUOTE` for mapped international
-symbols, and CoinGecko for mapped coin IDs. Open Exchange Rates is used for
-USD-base FX rates and does not need an instrument ticker mapping. Manual quote
-and FX observations remain available through `quote-add` and `fx-add`.
+Use the single **Refresh prices** action in that same view. It performs the
+bounded provider refresh and then creates the immutable snapshot for the
+selected reporting currency. The result reports provider readiness, missing
+instruments by human label, quote/FX freshness, and complete/incomplete state;
+partial values are never shown as a complete total. Secrets remain server-side
+and only readiness names/booleans are exposed.
+
+The existing `mapping-add`, `mapping-list`, `market-refresh` and
+`snapshot-create` commands remain available for operators and tests. They are
+not required for ordinary owner setup. The accepted quote providers are
+Finnhub for mapped US securities, Alpha Vantage `GLOBAL_QUOTE` for mapped
+international symbols, and CoinGecko for mapped coin IDs. Manual quote and FX
+observations remain available through `quote-add` and `fx-add`.
 
 For a default refresh, each instrument uses the active mapping with the latest
 `active-from` timestamp across all selected quote providers, so a newer mapping
@@ -234,7 +241,7 @@ There are no live-key tests in this repository: adapter tests must use local
 `httptest` servers and the refresh command must be exercised with fake
 endpoints only.
 
-Run a bounded, aggregate-only refresh after mappings are reviewed:
+For operators who need the preserved CLI path, run a bounded, aggregate-only refresh after mappings are reviewed:
 
 ```sh
 go run ./cmd/portfolio-dashboard market-refresh -db portfolio.sqlite \
