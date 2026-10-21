@@ -272,11 +272,11 @@ func TestActivityHumanizesHoldingEventsFromActiveAndArchivedLots(t *testing.T) {
 	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "holding-activity", "holding-instrument", now); err != nil {
 		t.Fatal(err)
 	}
-	for _, lot := range []struct{ id, lifecycle, removedAt string }{
-		{ "active-lot", "active", "" },
-		{ "archived-lot", "removed", "2026-01-02T12:00:01.000000000Z" },
+	for _, lot := range []struct{ id, lifecycle, removedAt, removedByCategory, removedByID string }{
+		{"active-lot", "active", "", "", ""},
+		{"archived-lot", "removed", "2026-01-02T12:00:01.000000000Z", "browser_user", "local-owner"},
 	} {
-		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key,lifecycle,removed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, lot.id, "holding-activity", "holding-instrument", "1.25", "8.00", "10.00", "USD", now, now, lot.lifecycle, nullableStringValue(lot.removedAt)); err != nil {
+		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,cost_basis,currency,created_at,created_at_order_key,lifecycle,removed_at,removed_by_category,removed_by_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, lot.id, "holding-activity", "holding-instrument", "1.25", "8.00", "10.00", "USD", now, now, lot.lifecycle, nullableStringValue(lot.removedAt), nullableStringValue(lot.removedByCategory), nullableStringValue(lot.removedByID)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -287,7 +287,23 @@ func TestActivityHumanizesHoldingEventsFromActiveAndArchivedLots(t *testing.T) {
 			occurred = "2026-01-02T12:00:01.000000000Z"
 			action = "holding_removed"
 		}
-		if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,entity_type,entity_id,summary,details,occurred_at,sort_time,retain_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, "holding-event-"+lotID, "holding-activity", "browser", action, "holding", "holding", lotID, "Holding event", "", occurred, occurred, "2033-01-02T12:00:00.000000000Z"); err != nil {
+		operation := "create"
+		if action == "holding_removed" {
+			operation = "remove"
+		}
+		auditID := "holding-audit-" + lotID
+		payloadBytes, err := json.Marshal(map[string]string{"portfolio_id": "holding-activity", "holding_id": lotID, "operation": operation, "occurred_at": occurred})
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := string(payloadBytes)
+		if _, err := s.DB.Exec(`INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at,retain_until) VALUES(?,?,?,?,?,?,?,?)`, auditID, "local-owner", action, "holding", lotID, payload, occurred, "2033-01-02T12:00:00.000000000Z"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.Exec(`INSERT INTO audit_event_portfolios(audit_event_id,portfolio_id,retain_until) VALUES(?,?,?)`, auditID, "holding-activity", "2033-01-02T12:00:00.000000000Z"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.Exec(`INSERT INTO activity_events(id,portfolio_id,actor_category,action,category,entity_type,entity_id,summary,details,occurred_at,sort_time,source_audit_event_id,retain_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, "holding-event-"+lotID, "holding-activity", "browser_user", action, "holding", "holding", lotID, "Holding event", "", occurred, occurred, auditID, "2033-01-02T12:00:00.000000000Z"); err != nil {
 			t.Fatal(err)
 		}
 	}

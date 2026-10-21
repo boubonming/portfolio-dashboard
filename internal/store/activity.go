@@ -513,7 +513,7 @@ func (s *Store) Activity(ctx context.Context, portfolioID string, options Activi
 		FROM activity_events a
 		LEFT JOIN lots l ON l.id=a.entity_id AND l.portfolio_id=a.portfolio_id AND a.entity_type='holding'
 		LEFT JOIN instruments i ON i.id=l.instrument_id
-		WHERE a.portfolio_id = ?
+		WHERE a.portfolio_id = ?`
 	args := []any{portfolioID}
 	if options.Cursor != "" {
 		query += ` AND (a.sort_time,a.id) < (?,?)`
