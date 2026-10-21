@@ -25,6 +25,15 @@ function providerErrorLabel(value: string): string {
   return labels[value] || value.replace(/_/g, ' ')
 }
 
+function canonicalQuoteCurrency(value: string | undefined): string | null {
+  const trimmed = value?.trim() || ''
+  return /^[A-Z]{3}$/.test(trimmed) ? trimmed : null
+}
+
+function quoteCurrencyError(value: string | undefined): string {
+  return value?.trim() ? 'Use a three-letter uppercase currency code, such as USD.' : 'Quote currency is required before saving this mapping.'
+}
+
 export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfToken, onUnauthorized, onReload }: { portfolioID: string; reportingCurrency: string; csrfToken?: string; onUnauthorized: () => void; onReload: () => void }) {
   const [setup, setSetup] = useState<MarketDataSetup | null>(null)
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
@@ -78,8 +87,9 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
   const mappings = entries.map((instrument): MappingBatchItem | null => {
     const draft = drafts[instrument.instrument_id]
     if (!draft?.provider?.trim() && !draft?.providerSymbol?.trim() && !draft?.provenance?.trim()) return null
-    if (!draft?.provider?.trim() || !draft.providerSymbol.trim() || !draft.provenance.trim() || !draft.confirmed) return null
-    return { instrument_id: instrument.instrument_id, provider: draft.provider, provider_symbol: draft.providerSymbol, quote_currency: draft.quoteCurrency, provenance: draft.provenance, confirm_unverified: draft.confirmed }
+    const quoteCurrency = canonicalQuoteCurrency(draft?.quoteCurrency)
+    if (!draft?.provider?.trim() || !draft.providerSymbol.trim() || !draft.provenance.trim() || !draft.confirmed || !quoteCurrency) return null
+    return { instrument_id: instrument.instrument_id, provider: draft.provider, provider_symbol: draft.providerSymbol, quote_currency: quoteCurrency, provenance: draft.provenance, confirm_unverified: draft.confirmed }
   }).filter((item): item is MappingBatchItem => item !== null)
   const canSave = entries.length > 0 && mappings.length === entries.length
 
@@ -151,7 +161,10 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
         const draft = drafts[instrument.instrument_id]
         const available = setup?.providers.filter((provider) => provider.name !== 'open_exchange_rates' && (provider.configured || provider.public)) || []
         const instrumentLabel = `${instrument.symbol} (${instrument.description || instrument.currency})`
-        return <tr key={instrument.instrument_id}><th scope="row"><strong>{instrument.symbol}</strong><span className="subline">{instrument.description || 'Description unavailable'} · {instrument.currency}</span>{instrument.mappings.length ? <span className="subline">Current / confirmed: {instrument.mappings.map((mapping) => `${mapping.provider} / ${mapping.provider_symbol}`).join(', ')}</span> : <><span className="subline">{draft?.guidance || 'No mapping suggestion is available.'}</span>{draft?.suggested && <span className="subline">Suggested value is unverified until you confirm it.</span>}</>}</th><td><select aria-label={`Provider for ${instrumentLabel}`} value={draft?.provider || ''} onChange={(event) => update(instrument.instrument_id, 'provider', event.target.value)}><option value="">Choose exact provider</option>{available.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></td><td><input aria-label={`Exact provider identifier for ${instrumentLabel}`} value={draft?.providerSymbol || ''} onChange={(event) => update(instrument.instrument_id, 'providerSymbol', event.target.value)} placeholder="Exact listing / coin ID" /></td><td><input aria-label={`Quote currency for ${instrumentLabel}`} value={draft?.quoteCurrency || instrument.currency} maxLength={3} onChange={(event) => update(instrument.instrument_id, 'quoteCurrency', event.target.value.toUpperCase())} /></td><td><input aria-label={`Provenance for ${instrumentLabel}`} value={draft?.provenance || ''} onChange={(event) => update(instrument.instrument_id, 'provenance', event.target.value)} placeholder="Where you verified it" /><label className="checkbox-label"><input type="checkbox" checked={draft?.confirmed || false} onChange={(event) => update(instrument.instrument_id, 'confirmed', event.target.checked)} /> I confirmed this exact identifier for {instrumentLabel}</label></td></tr>
+        const quoteCurrency = draft?.quoteCurrency ?? ''
+        const quoteCurrencyID = `quote-currency-${instrument.instrument_id}`
+        const quoteCurrencyValid = canonicalQuoteCurrency(quoteCurrency) !== null
+        return <tr key={instrument.instrument_id}><th scope="row"><strong>{instrument.symbol}</strong><span className="subline">{instrument.description || 'Description unavailable'} · {instrument.currency}</span>{instrument.mappings.length ? <span className="subline">Current / confirmed: {instrument.mappings.map((mapping) => `${mapping.provider} / ${mapping.provider_symbol}`).join(', ')}</span> : <><span className="subline">{draft?.guidance || 'No mapping suggestion is available.'}</span>{draft?.suggested && <span className="subline">Suggested value is unverified until you confirm it.</span>}</>}</th><td><select aria-label={`Provider for ${instrumentLabel}`} value={draft?.provider || ''} onChange={(event) => update(instrument.instrument_id, 'provider', event.target.value)}><option value="">Choose exact provider</option>{available.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></td><td><input aria-label={`Exact provider identifier for ${instrumentLabel}`} value={draft?.providerSymbol || ''} onChange={(event) => update(instrument.instrument_id, 'providerSymbol', event.target.value)} placeholder="Exact listing / coin ID" /></td><td><input aria-label={`Quote currency for ${instrumentLabel}`} aria-describedby={quoteCurrencyID} aria-invalid={!quoteCurrencyValid} value={quoteCurrency} onChange={(event) => update(instrument.instrument_id, 'quoteCurrency', event.target.value)} /><span id={quoteCurrencyID} className="subline">{quoteCurrencyValid ? 'Three-letter uppercase currency code.' : quoteCurrencyError(quoteCurrency)}</span></td><td><input aria-label={`Provenance for ${instrumentLabel}`} value={draft?.provenance || ''} onChange={(event) => update(instrument.instrument_id, 'provenance', event.target.value)} placeholder="Where you verified it" /><label className="checkbox-label"><input type="checkbox" checked={draft?.confirmed || false} onChange={(event) => update(instrument.instrument_id, 'confirmed', event.target.checked)} /> I confirmed this exact identifier for {instrumentLabel}</label></td></tr>
       })}</tbody></table></div>
       <div className="market-actions"><button type="button" onClick={save} disabled={saving || refreshing || !canSave}>{saving ? 'Saving mappings…' : 'Save all mappings'}</button><button type="button" onClick={refresh} disabled={refreshing || saving}>{refreshing ? 'Refreshing prices…' : 'Refresh prices'}</button></div>
       <p className="muted">Save validates the whole batch before committing. Every row needs an exact editable identifier and explicit confirmation; unverified suggestions remain local until you confirm them. A stale setup is rejected rather than overwriting another revision.</p>

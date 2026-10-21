@@ -30,6 +30,13 @@ function renderPanel(fetchMock: ReturnType<typeof vi.fn>, props: Partial<React.C
   return render(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="MYR" csrfToken="csrf" onUnauthorized={vi.fn()} onReload={vi.fn()} {...props} />)
 }
 
+function completeMapping(row: HTMLElement, index = 0) {
+  fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'coingecko' } })
+  fireEvent.change(within(row).getByPlaceholderText('Exact listing / coin ID'), { target: { value: `coin-${index}` } })
+  fireEvent.change(within(row).getByPlaceholderText('Where you verified it'), { target: { value: 'provider listing' } })
+  fireEvent.click(within(row).getByRole('checkbox'))
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -86,6 +93,51 @@ describe('MarketDataPanel', () => {
     const body = JSON.parse(String(call?.[1]?.body)) as { mappings: Array<Record<string, string | boolean>> }
     expect(body.mappings.map((mapping) => mapping.provider_symbol)).toEqual(['bitcoin', 'MSFT', '7203'])
     expect(body.mappings.every((mapping) => mapping.confirm_unverified === true && String(mapping.provenance).includes('Suggested — verify'))).toBe(true)
+  })
+
+  it.each(['', '   ', 'US', 'USDD', 'usd', 'U2D', 'U$D'])('blocks a mapping with invalid quote currency %j without a save request', async (quoteCurrency) => {
+    const fetchMock = vi.fn((_input: RequestInfo | URL) => json(setup({ instruments: [setup().instruments[0]] })))
+    renderPanel(fetchMock)
+    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(1))
+    const row = screen.getAllByRole('row')[1]
+    completeMapping(row)
+    const quoteInput = within(row).getByRole('textbox', { name: 'Quote currency for SAME (First company)' })
+    fireEvent.change(quoteInput, { target: { value: quoteCurrency } })
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(quoteInput.getAttribute('aria-invalid')).toBe('true')
+    expect(screen.getByText(/quote currency is required|three-letter uppercase currency code/i)).toBeTruthy()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(0)
+  })
+
+  it('does not enable save until valid quote currency joins every other complete and confirmed field', async () => {
+    const fetchMock = vi.fn(() => json(setup()))
+    renderPanel(fetchMock)
+    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))
+    const rows = screen.getAllByRole('row').slice(1)
+    completeMapping(rows[0])
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    completeMapping(rows[1], 1)
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('blocks an invalid quote currency on a committed mapping and restores its canonical payload', async () => {
+    const committedSetup = setup({ instruments: [{ ...setup().instruments[0], mappings: [{ provider: 'coingecko', provider_symbol: 'coin-a', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing' }] }] })
+    const outcomes = [{ instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-a', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }]
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/mappings') ? json({ status: 'saved', etag: '"setup-2"', outcomes }) : json(committedSetup))
+    renderPanel(fetchMock)
+    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(1))
+    const row = screen.getAllByRole('row')[1]
+    const quoteInput = within(row).getByRole('textbox', { name: 'Quote currency for SAME (First company)' })
+    fireEvent.change(quoteInput, { target: { value: 'usd' } })
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(0)
+    fireEvent.change(quoteInput, { target: { value: 'USD' } })
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1))
+    const call = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/market-data/mappings')) as unknown as [RequestInfo | URL, RequestInit]
+    const body = JSON.parse(String(call[1].body)) as { mappings: Array<Record<string, unknown>> }
+    expect(body.mappings).toEqual([{ instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-a', quote_currency: 'USD', provenance: 'provider listing', confirm_unverified: true }])
   })
 
   it('uses human-readable instruments and exposes readiness without asking for authority IDs or secrets', async () => {
