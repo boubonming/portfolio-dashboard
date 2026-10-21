@@ -39,7 +39,7 @@ func (s *Store) MarketDataSetup(ctx context.Context, portfolioID string, provide
 	}
 	items := []domain.MarketInstrumentView{}
 	for rows.Next() {
-		var item domain.MarketInstrumentView
+		item := domain.MarketInstrumentView{Mappings: make([]domain.MarketMappingView, 0)}
 		if err := rows.Scan(&item.InstrumentID, &item.Symbol, &item.Description, &item.Currency); err != nil {
 			rows.Close()
 			return domain.MarketDataSetup{}, err

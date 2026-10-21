@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, apiFetch, refreshMarketData, type MarketDataSetup } from './api'
+import { APIError, apiFetch, getMarketDataSetup, refreshMarketData, type MarketDataSetup } from './api'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -28,6 +28,15 @@ describe('typed API helper', () => {
     await apiFetch('/api/v1/export.csv', { headers: { Accept: 'text/csv' } })
 
     expect((fetchMock.mock.calls[0][1]?.headers as Headers).get('Accept')).toBe('text/csv')
+  })
+
+  it('accepts an empty mapping array in a market-data setup response', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({
+      portfolio_id: 'portfolio-a', etag: '"setup-1"', providers: [{ name: 'coingecko', configured: true, public: true }],
+      instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', currency: 'USD', mappings: [] }],
+    }) } as Response)))
+
+    await expect(getMarketDataSetup('portfolio-a')).resolves.toMatchObject({ instruments: [{ mappings: [] }] })
   })
 })
 
