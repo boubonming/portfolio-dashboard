@@ -117,6 +117,11 @@ binding and `-confirm 'REVOKE HOLDINGS'`; inspect should then report
 `holdings_write:false`. Reopening the database or restarting the service cannot
 undo that persisted revocation; a new deliberate grant is required.
 
+`Store.Open` runs the forward migrations on startup. Existing databases must
+complete migration 011 before these commands are used; it preserves existing
+rows and makes both machine grant/revoke audit events and their portfolio
+ownership associations append-only.
+
 ## Phase B: dated observations and immutable snapshots
 
 This slice performs exact accounting with a standard-library `math/big` rational
