@@ -61,6 +61,22 @@ const canonicalTimestamp = (value: unknown) => {
   return day <= new Date(Date.UTC(year, month, 0)).getUTCDate()
 }
 
+export function holdingDisplayLabel(holding: Holding) {
+  const description = holding.description && holding.description !== holding.symbol
+    ? holding.description
+    : holding.name && holding.name !== holding.symbol ? holding.name : undefined
+  const context = [
+    `${holding.quantity} ${holding.currency}`,
+    holding.unit_cost ? `unit cost ${holding.unit_cost} ${holding.currency}` : '',
+    holding.cost_basis ? `cost basis ${holding.cost_basis} ${holding.currency}` : '',
+  ].filter(Boolean)
+  return [holding.symbol, description, ...context].filter(Boolean).join(' · ')
+}
+
+function shortenedLotID(lotID: string) {
+  return lotID.length > 18 ? `${lotID.slice(0, 8)}…${lotID.slice(-8)}` : lotID
+}
+
 function decimalParts(value: string) {
   const [whole, fraction = ''] = value.split('.')
   return { digits: BigInt(whole + fraction), scale: fraction.length }
@@ -171,6 +187,8 @@ type ArchiveContext = { portfolioId: string; scopeKey: string; lotId: string }
 
 export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, onRefresh, onUnauthorized }: Props) {
   const [formOpen, setFormOpen] = useState(false)
+  const [archivePickerOpen, setArchivePickerOpen] = useState(false)
+  const [selectedArchiveLotId, setSelectedArchiveLotId] = useState('')
   const [draft, setDraft] = useState(emptyDraft)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [archiveLot, setArchiveLot] = useState<Holding | null>(null)
@@ -227,7 +245,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     setArchiveLot(null)
     setError('')
     setStatus('')
-    if (resetForm) { setDraft(emptyDraft()); setFormOpen(false); setErrors({}) }
+    if (resetForm) { setDraft(emptyDraft()); setFormOpen(false); setArchivePickerOpen(false); setSelectedArchiveLotId(''); setErrors({}) }
   }
   const authorityChanged = activeRef.current !== active || portfolioIdRef.current !== portfolioId || scopeRef.current !== scopeKey
   if (!active || authorityChanged) invalidateArchiveAuthority()
@@ -429,11 +447,23 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     await submit('remove', attempt, lotId, `/api/v1/portfolios/${encodeURIComponent(portfolioIdRef.current)}/holdings/${encodeURIComponent(lotId)}`, 'DELETE')
   }
 
+  const continueToArchive = () => {
+    if (busy || !selectedArchiveLotId) return
+    const lot = holdings.find((holding) => holding.lot_id === selectedArchiveLotId)
+    if (!lot) return
+    archiveOriginRef.current = document.getElementById('archive-continue') as HTMLButtonElement | null
+    archiveContextRef.current = { portfolioId, scopeKey, lotId: lot.lot_id }
+    archiveLotRef.current = lot
+    setError('')
+    setStatus('')
+    setArchiveLot(lot)
+  }
+
   if (!active) return null
   const mutationETagValid = validatePortfolioETag(overviewETag, portfolioId) !== null
   return <>
     <section ref={contentRef} className="holding-mutation-card" aria-labelledby="holding-mutation-title">
-      <div className="section-heading"><div><span className="eyebrow">Authenticated portfolio control</span><h2 id="holding-mutation-title">Holding changes</h2></div><button ref={addButtonRef} type="button" onClick={() => { setFormOpen(true); setError(''); setStatus('') }} disabled={busy}>Add holding</button></div>
+      <div className="section-heading"><div><span className="eyebrow">Authenticated portfolio control</span><h2 id="holding-mutation-title">Manage holdings</h2></div><button ref={addButtonRef} type="button" onClick={() => { setFormOpen(true); setError(''); setStatus('') }} disabled={busy}>Add holding</button></div>
       {status && <p ref={statusRef} className="notice success" role="status" aria-live="polite" tabIndex={-1}>{status}</p>}
       {error && !archiveLot && <p className="notice error" role="alert">{error}</p>}
       {formOpen && <form className="holding-form" onSubmit={create} aria-labelledby="holding-form-title">
@@ -445,9 +475,20 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
         {errors.form && <p className="field-error" role="alert" aria-live="assertive">{errors.form}</p>}
         <div className="holding-form-actions"><button type="submit" disabled={busy || (!mutationETagValid && !createAttempt.current)} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</button><button type="button" onClick={() => { setFormOpen(false); setErrors({}); setError(''); addButtonRef.current?.focus() }} disabled={busy}>Cancel</button></div>
       </form>}
-      <div className="archive-controls"><h3>Archive an active lot</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p>{holdings.map((holding) => <div className="archive-row" key={holding.lot_id}><span><strong>Archive lot {holding.lot_id}</strong><span className="subline">Logical removal; history preserved</span></span><button type="button" ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} data-archive-lot-id={holding.lot_id} onClick={(event) => { archiveOriginRef.current = event.currentTarget as HTMLButtonElement; archiveContextRef.current = { portfolioId, scopeKey, lotId: holding.lot_id }; archiveLotRef.current = holding; (event.currentTarget as HTMLButtonElement).focus(); setError(''); setStatus(''); setArchiveLot(holding) }} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-label={`Archive lot ${holding.lot_id}`}>Archive lot</button></div>)}</div>
+      <div className="archive-controls">
+        <div className="section-heading"><div><h3>Archive a holding</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p></div><button type="button" onClick={() => { setArchivePickerOpen((open) => !open); setError(''); setStatus('') }} disabled={busy}>{archivePickerOpen ? 'Close archive controls' : 'Archive a holding'}</button></div>
+        {archivePickerOpen && <div className="archive-picker">
+          <label htmlFor="archive-holding">Holding to archive</label>
+          <select id="archive-holding" value={selectedArchiveLotId} onChange={(event) => setSelectedArchiveLotId(event.target.value)} disabled={busy || !holdings.length}>
+            <option value="">Choose an active holding…</option>
+            {holdings.map((holding) => <option key={holding.lot_id} value={holding.lot_id}>{holdingDisplayLabel(holding)}</option>)}
+          </select>
+          <p className="muted">Choose the exact lot. The archive confirmation will preserve its full audit identity.</p>
+          <button id="archive-continue" type="button" onClick={continueToArchive} disabled={busy || !selectedArchiveLotId || !mutationETagValid} aria-busy={busy}>Continue to archive</button>
+        </div>}
+      </div>
     </section>
-    {archiveVisible && createPortal(<div className="confirmation-backdrop"><section ref={dialogRef} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title" aria-describedby={error ? 'archive-dialog-description archive-dialog-error' : 'archive-dialog-description'}><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive lot {archiveLot?.lot_id}?</h2><p id="archive-dialog-description">This will logically archive the exact lot, not sell, trade, or permanently delete it. Its financial history, reviews, thesis and audit records remain preserved.</p>{error && <p ref={archiveErrorRef} id="archive-dialog-error" className="notice error" role="alert" aria-live="assertive" tabIndex={-1}>{error}</p>}<div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving lot…' : `Confirm archive lot ${archiveLot?.lot_id}`}</button><button type="button" onClick={() => { archiveRestoreRef.current = { lotId: archiveLot?.lot_id || '', success: false }; setArchiveLot(null) }} disabled={busy}>Cancel archive</button></div></section></div>, document.body)}
+    {archiveVisible && archiveLot && createPortal(<div className="confirmation-backdrop"><section ref={dialogRef} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title" aria-describedby={error ? 'archive-dialog-description archive-dialog-error' : 'archive-dialog-description'}><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive {archiveLot.symbol} holding?</h2><p id="archive-dialog-description">You are archiving <strong>{holdingDisplayLabel(archiveLot)}</strong>. This is a logical removal only; it does not sell, trade, or permanently delete the holding. Its financial history, reviews, thesis and audit records remain preserved.</p><p className="subline" title={archiveLot.lot_id}>Lot ID: {shortenedLotID(archiveLot.lot_id)} <span className="visually-hidden">Full lot ID: {archiveLot.lot_id}</span></p>{error && <p ref={archiveErrorRef} id="archive-dialog-error" className="notice error" role="alert" aria-live="assertive" tabIndex={-1}>{error}</p>}<div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving holding…' : 'Confirm archive holding'}</button><button type="button" onClick={() => { archiveRestoreRef.current = { lotId: archiveLot.lot_id, success: false }; setArchiveLot(null) }} disabled={busy}>Cancel archive</button></div></section></div>, document.body)}
   </>
 }
 
