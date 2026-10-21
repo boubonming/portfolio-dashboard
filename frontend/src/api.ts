@@ -316,6 +316,8 @@ function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDat
   const future = parsedTimes.find(([, value]) => value > now)
   if (future) throw new APIError(200, `Future market refresh response timestamp: ${future[0]}.`)
   if (Date.parse(result.refresh.started_at) > Date.parse(result.refresh.ended_at)) throw new APIError(200, 'Invalid market refresh response: timestamp ordering.')
+  if (Date.parse(result.refresh.ended_at) > Date.parse(result.snapshot.created_at) || Date.parse(result.snapshot.as_of) > Date.parse(result.snapshot.created_at)) throw new APIError(200, 'Invalid market refresh response: timestamp ordering.')
+  if (result.snapshot.source_timestamps.some((value) => Date.parse(value) > Date.parse(result.snapshot.created_at))) throw new APIError(200, 'Invalid market refresh response: timestamp ordering.')
 
   const allObservationIDs = result.refresh.providers.flatMap((provider) => provider.observation_ids)
   for (const provider of result.refresh.providers) {
@@ -326,6 +328,7 @@ function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDat
     if (provider.failed_count > 0 && provider.errors.length === 0) throw new APIError(200, `Invalid market refresh response: ${provider.provider} errors.`)
   }
   if (new Set(allObservationIDs).size !== allObservationIDs.length || new Set(allObservationIDs).size !== result.refresh.observation_ids.length) throw new APIError(200, 'Invalid market refresh response: observation identity.')
+  if (result.snapshot.quote_ids.some((id) => !allObservationIDs.includes(id)) || result.snapshot.fx_ids.some((id) => !allObservationIDs.includes(id)) || new Set([...result.snapshot.quote_ids, ...result.snapshot.fx_ids]).size !== result.snapshot.quote_ids.length + result.snapshot.fx_ids.length) throw new APIError(200, 'Invalid market refresh response: dependency observation identity.')
   if (result.refresh.status === 'complete' && result.refresh.providers.some((provider) => provider.status !== 'complete')) throw new APIError(200, 'Invalid market refresh response: refresh status.')
   if (result.refresh.status === 'incomplete' && result.refresh.providers.every((provider) => provider.status === 'complete')) throw new APIError(200, 'Invalid market refresh response: refresh status.')
 
@@ -351,6 +354,7 @@ function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDat
     if (result.complete && result.missing_instruments.length !== 0) throw new APIError(200, 'Invalid market refresh response: complete result has missing instruments.')
     if (result.complete && result.snapshot.quote_ids.length !== setup.instruments.length) throw new APIError(200, 'Invalid market refresh response: incomplete quote dependencies.')
     if (result.complete && result.snapshot.fx_ids.length !== expectedFXCurrencies.size) throw new APIError(200, 'Invalid market refresh response: incomplete FX dependencies.')
+    if (result.complete && (new Set(result.snapshot.currencies).size !== instrumentCurrencies.size || [...instrumentCurrencies].some((currency) => !currencies.has(currency)))) throw new APIError(200, 'Invalid market refresh response: incomplete original-currency dependencies.')
     for (const subtotal of result.snapshot.subtotals) if (!instrumentCurrencies.has(subtotal.currency)) throw new APIError(200, 'Invalid market refresh response: unknown subtotal currency.')
   }
   if (result.complete) {

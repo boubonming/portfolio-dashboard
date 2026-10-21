@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
@@ -106,5 +107,45 @@ func TestMarketRefreshReceiptIsAppendOnly(t *testing.T) {
 	}
 	if _, err := s.DB.Exec(`UPDATE market_refresh_idempotency SET response_payload=? WHERE actor_id=?`, `{"changed":true}`, "receipt-user"); err == nil {
 		t.Fatal("committed receipt update unexpectedly succeeded")
+	}
+}
+
+func TestMarketRefreshReservationConvergesAcrossSeparateStores(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "separate-stores.sqlite")
+	first, err := Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := first.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "separate-store-portfolio", "Separate", "MYR", "2026-01-01T00:00:00.000000000Z", "2026-01-01T00:00:00.000000000Z"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	options := MarketRefreshIdempotencyOptions{ActorCategory: "browser_user", ActorID: "separate-store-user", PortfolioID: "separate-store-portfolio", IdempotencyKey: "separate-store-key", RequestFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+	for _, database := range []*Store{first, second} {
+		group.Add(1)
+		go func(database *Store) {
+			defer group.Done()
+			_, err := database.readOrReserveMarketRefresh(ctx, options)
+			results <- err
+		}(database)
+	}
+	group.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("separate store reservation returned raw contention error: %v", err)
+		}
+	}
+	var count int
+	if err := first.DB.QueryRow(`SELECT COUNT(*) FROM market_refresh_idempotency WHERE idempotency_key=?`, options.IdempotencyKey).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("reservation count=%d err=%v", count, err)
 	}
 }

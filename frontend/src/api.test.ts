@@ -75,4 +75,14 @@ describe('semantic market refresh decoding', () => {
     reversed.refresh.started_at = '2026-01-01T00:00:02.000000000Z'
     await expect(decodeMarketResult(reversed)).rejects.toSatisfy((error: unknown) => error instanceof APIError && /ordering/.test(error.message))
   })
+
+  it.each([
+    ['unbound quote observation', (value: ReturnType<typeof coherentRefresh>) => { value.snapshot.quote_ids = ['not-an-observation'] }],
+    ['snapshot as-of after creation', (value: ReturnType<typeof coherentRefresh>) => { value.snapshot.as_of = '2026-01-01T00:00:03.000000000Z' }],
+    ['incomplete original currency set', (value: ReturnType<typeof coherentRefresh>) => { value.snapshot.currencies = [] }],
+  ])('rejects %s', async (_name, mutate) => {
+    const value = coherentRefresh()
+    mutate(value)
+    await expect(decodeMarketResult(value)).rejects.toSatisfy((error: unknown) => error instanceof APIError && /Invalid/.test(error.message))
+  })
 })

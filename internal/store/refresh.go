@@ -19,6 +19,10 @@ type RefreshOptions struct {
 	Providers         []marketdata.Provider
 	Clients           map[marketdata.Provider]marketdata.ProviderClient
 	AsOf              time.Time
+	// receipt binds refresh persistence to the durable idempotency operation.
+	// It is intentionally private: only the idempotent workflow can provide it.
+	receipt   *marketRefreshReceiptBinding
+	RefreshID string
 }
 
 type refreshTarget struct {
@@ -107,7 +111,11 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 		return domain.RefreshResult{}, err
 	}
 	started := time.Now().UTC()
-	result := domain.RefreshResult{RefreshID: deterministicID("refresh", options.PortfolioID, started.Format(time.RFC3339Nano)), PortfolioID: options.PortfolioID, Status: "complete", StartedAt: started.Format(time.RFC3339Nano)}
+	refreshID := options.RefreshID
+	if refreshID == "" {
+		refreshID = deterministicID("refresh", options.PortfolioID, started.Format(time.RFC3339Nano))
+	}
+	result := domain.RefreshResult{RefreshID: refreshID, PortfolioID: options.PortfolioID, Status: "complete", StartedAt: started.Format(time.RFC3339Nano)}
 	observations := refreshObservations{}
 	for _, provider := range providers {
 		status := s.refreshProvider(ctx, provider, options, targets, plan, &observations)
@@ -157,6 +165,15 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 	}
 	if err := recordActivity(ctx, tx, options.PortfolioID, "administrative", "market.refresh.completed", "market", "refresh_run", result.RefreshID, "Market refresh completed", "A market-data refresh completed.", result.EndedAt, auditID); err != nil {
 		return domain.RefreshResult{}, err
+	}
+	if options.receipt != nil {
+		encoded, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return domain.RefreshResult{}, marshalErr
+		}
+		if err := updateMarketRefreshObservedTx(ctx, tx, *options.receipt, result.RefreshID, encoded); err != nil {
+			return domain.RefreshResult{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.RefreshResult{}, err
