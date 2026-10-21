@@ -159,6 +159,10 @@ tbody th { font-weight: 500; }
 .holding-form-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .4rem; }
 .holding-form-actions button:first-child { background: #164d43; font-weight: 700; }
 .archive-controls { border-top: 1px solid #41615d; display: grid; gap: .7rem; margin-top: 1.5rem; padding-top: 1.25rem; }
+.archive-picker { display: grid; gap: .6rem; max-width: 52rem; padding-top: .4rem; }
+.archive-picker label { color: #b8cbc8; font-size: .9rem; font-weight: 700; }
+.archive-picker select { min-width: 0; width: 100%; }
+.archive-picker button { justify-self: start; }
 .archive-row { align-items: center; border-bottom: 1px solid #2d4441; display: flex; gap: 1rem; justify-content: space-between; min-width: 0; padding: .7rem 0; }
 .archive-row:last-child { border-bottom: 0; }
 .archive-row > span { min-width: 0; overflow-wrap: anywhere; }

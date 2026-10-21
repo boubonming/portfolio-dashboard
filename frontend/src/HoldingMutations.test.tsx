@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import HoldingMutations, { validateHoldingMutationReceipt, validatePortfolioETag } from './HoldingMutations'
@@ -22,9 +22,49 @@ const baseProps = () => ({
   holdings: [holding], active: true, scopeKey: 'portfolio-default:MYR:overview', onRefresh: vi.fn(async () => '"portfolio-default-8"'), onUnauthorized: vi.fn(),
 })
 
+function openArchive(lotId = 'lot-a') {
+  const openButton = screen.queryByRole('button', { name: 'Archive a holding' })
+  if (openButton) fireEvent.click(openButton)
+  fireEvent.change(screen.getByLabelText('Holding to archive'), { target: { value: lotId } })
+  fireEvent.click(screen.getByRole('button', { name: 'Continue to archive' }))
+}
+
 afterEach(() => cleanup())
 
 describe('HoldingMutations', () => {
+  it('keeps archive management collapsed until a human-readable holding is selected', () => {
+    render(<HoldingMutations {...baseProps()} holdings={[{ ...holding, symbol: 'NVDA', name: 'NVIDIA Corporation', quantity: '2.500', currency: 'USD', unit_cost: '100.25', cost_basis: '250.625', lot_id: 'lot-immutable-nvda-123456789' }]} />)
+    expect(screen.getByRole('button', { name: 'Archive a holding' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Archive lot/i })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Archive a holding' }))
+
+    expect(screen.getByLabelText('Holding to archive')).toBeTruthy()
+    expect(screen.getByRole('option', { name: /NVDA.*NVIDIA Corporation.*2\.500 USD.*unit cost 100\.25 USD.*cost basis 250\.625 USD/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Continue to archive' })).toBeTruthy()
+  })
+
+  it('binds duplicate-symbol archive selections and confirmation copy to the exact lot', async () => {
+    const props = { ...baseProps(), holdings: [
+      { ...holding, symbol: 'SAME', name: 'First lot', lot_id: 'lot-first', quantity: '1', unit_cost: '5', cost_basis: '5' },
+      { ...holding, symbol: 'SAME', name: 'Second lot', lot_id: 'lot-second', quantity: '2', unit_cost: '7', cost_basis: '14' },
+    ] }
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async (_input, init) => ({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...receipt, operation: 'remove', holding: { ...receipt.holding, holding_id: 'lot-second', lifecycle: 'removed', removed_at: '2026-01-02T12:00:00.000000000Z' }, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }) } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Archive a holding' }))
+    fireEvent.change(screen.getByLabelText('Holding to archive'), { target: { value: 'lot-second' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to archive' }))
+
+    expect(screen.getByRole('heading', { name: /Archive SAME holding/i })).toBeTruthy()
+    expect(within(screen.getByRole('dialog')).getByText(/Second lot.*2 USD.*unit cost 7 USD.*cost basis 14 USD/i)).toBeTruthy()
+    expect(screen.getByText(/Full lot ID: lot-second/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Confirm archive holding/i })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/holdings/lot-second')
+  })
+
   it('accepts only a strong canonical ETag bound to the requested portfolio', () => {
     expect(validatePortfolioETag('"portfolio-default-0"', 'portfolio-default')).toBe(0)
     expect(validatePortfolioETag('"portfolio-default-12"', 'portfolio-default')).toBe(12)
@@ -63,12 +103,12 @@ describe('HoldingMutations', () => {
     const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async (_input, init) => ({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...receipt, operation: 'remove', result: 'applied', holding: { ...receipt.holding, holding_id: 'lot-a', lifecycle: 'removed', removed_at: '2026-01-02T12:00:00.000000000Z' }, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }) } as Response))
     vi.stubGlobal('fetch', fetchMock)
     render(<HoldingMutations {...props} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
-    expect(screen.getByRole('dialog').textContent).toMatch(/logically archive/i)
+    openArchive('lot-a')
+    expect(screen.getByRole('dialog').textContent).toMatch(/logical removal/i)
     fireEvent.click(screen.getByRole('button', { name: 'Cancel archive' }))
     expect(fetchMock).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    openArchive('lot-a')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
     expect(String(fetchMock.mock.calls[0][0])).toContain('/holdings/lot-a')
     expect(fetchMock.mock.calls[0][1]?.method).toBe('DELETE')
@@ -82,8 +122,8 @@ describe('HoldingMutations', () => {
     root.id = 'root'
     document.body.appendChild(root)
     const rendered = render(<HoldingMutations {...props} />, { container: root })
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
-    const retainedConfirm = screen.getByRole('button', { name: 'Confirm archive lot lot-a' })
+    openArchive('lot-a')
+    const retainedConfirm = screen.getByRole('button', { name: 'Confirm archive holding' })
     const propsKey = Object.keys(retainedConfirm).find((key) => key.startsWith('__reactProps$'))
     const retainedHandler = propsKey ? (retainedConfirm as unknown as Record<string, { onClick?: () => Promise<void> }>)[propsKey]?.onClick : undefined
     expect(retainedHandler).toBeTypeOf('function')
@@ -198,8 +238,8 @@ describe('HoldingMutations', () => {
     } as Response))
     vi.stubGlobal('fetch', fetchMock)
     render(<HoldingMutations {...props} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    openArchive('lot-a')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
     expect(screen.queryByText(/uncertainty/i)).toBeNull()
   })
@@ -259,13 +299,13 @@ describe('HoldingMutations', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     const { rerender } = render(<HoldingMutations {...props} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    openArchive('lot-a')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
     await waitFor(() => expect(screen.getByText(/uncertainty/i)).toBeTruthy())
     const firstInit = fetchMock.mock.calls[0][1]
     const firstKey = new Headers(firstInit?.headers as HeadersInit).get('Idempotency-Key')
     rerender(<HoldingMutations {...props} overviewETag={'"portfolio-default-99"'} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
     const retryInit = fetchMock.mock.calls[1][1]
     expect(new Headers(retryInit?.headers as HeadersInit).get('Idempotency-Key')).toBe(firstKey)
@@ -276,7 +316,9 @@ describe('HoldingMutations', () => {
   it('contains archive focus, supports Escape, and returns focus to the exact duplicate-symbol lot', () => {
     const props = { ...baseProps(), holdings: [{ ...holding, lot_id: 'lot-a', symbol: 'SAME' }, { ...holding, lot_id: 'lot-b', symbol: 'SAME' }] }
     render(<HoldingMutations {...props} />)
-    const lotB = screen.getByRole('button', { name: 'Archive lot lot-b' })
+    fireEvent.click(screen.getByRole('button', { name: 'Archive a holding' }))
+    fireEvent.change(screen.getByLabelText('Holding to archive'), { target: { value: 'lot-b' } })
+    const lotB = screen.getByRole('button', { name: 'Continue to archive' })
     fireEvent.click(lotB)
     expect(screen.getByRole('dialog').contains(screen.getByRole('button', { name: 'Cancel archive' }))).toBe(true)
     fireEvent.keyDown(document, { key: 'Escape' })
@@ -289,7 +331,7 @@ describe('HoldingMutations', () => {
     root.id = 'root'
     document.body.appendChild(root)
     const { unmount } = render(<HoldingMutations {...baseProps()} />, { container: root })
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    openArchive('lot-a')
     const dialog = screen.getByRole('dialog')
     expect(root.getAttribute('aria-hidden')).toBe('true')
     expect((root as HTMLElement).inert).toBe(true)
@@ -308,10 +350,10 @@ describe('HoldingMutations', () => {
     root.id = 'root'
     document.body.appendChild(root)
     render(<HoldingMutations {...props} />, { container: root })
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-b' }))
+    openArchive('lot-b')
     const dialog = screen.getByRole('dialog')
-    const heading = screen.getByRole('heading', { name: /archive lot lot-b/i })
-    const confirm = screen.getByRole('button', { name: 'Confirm archive lot lot-b' })
+    const heading = screen.getByRole('heading', { name: /archive AAA holding/i })
+    const confirm = screen.getByRole('button', { name: 'Confirm archive holding' })
     const cancel = screen.getByRole('button', { name: 'Cancel archive' })
     expect(document.activeElement).toBe(heading)
     fireEvent.keyDown(heading, { key: 'Tab' })
@@ -331,14 +373,14 @@ describe('HoldingMutations', () => {
     const fetchMock = vi.fn(async () => ({ ok: false, status: 415, headers: new Headers(), clone: () => ({ json: async () => ({}) }) } as unknown as Response))
     vi.stubGlobal('fetch', fetchMock)
     render(<HoldingMutations {...props} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    openArchive('lot-a')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/unsupported request format/i))
     const dialog = screen.getByRole('dialog')
     const alert = screen.getByRole('alert')
     expect(dialog.contains(alert)).toBe(true)
     expect(document.activeElement).toBe(alert)
-    expect((screen.getByRole('button', { name: 'Confirm archive lot lot-a' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Confirm archive holding' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('wraps forward and reverse Tab from a focused archive alert', async () => {
@@ -346,11 +388,11 @@ describe('HoldingMutations', () => {
     const fetchMock = vi.fn(async () => ({ ok: false, status: 415, headers: new Headers(), clone: () => ({ json: async () => ({}) }) } as unknown as Response))
     vi.stubGlobal('fetch', fetchMock)
     render(<HoldingMutations {...props} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    openArchive('lot-a')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
     const alert = screen.getByRole('alert')
-    const confirm = screen.getByRole('button', { name: 'Confirm archive lot lot-a' })
+    const confirm = screen.getByRole('button', { name: 'Confirm archive holding' })
     const cancel = screen.getByRole('button', { name: 'Cancel archive' })
     expect(document.activeElement).toBe(alert)
     fireEvent.keyDown(alert, { key: 'Tab' })
@@ -369,7 +411,7 @@ describe('HoldingMutations', () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     const { rerender } = render(<HoldingMutations {...props} />, { container: root })
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    openArchive('lot-a')
     expect(screen.getByRole('dialog')).toBeTruthy()
 
     rerender(<HoldingMutations {...props} portfolioId="portfolio-next" overviewETag={'"portfolio-next-7"'} scopeKey="portfolio-next:SGD:overview" />)
@@ -379,6 +421,20 @@ describe('HoldingMutations', () => {
     expect(root.inert).toBe(true)
     expect(fetchMock).not.toHaveBeenCalled()
     root.remove()
+  })
+
+  it('clears a selected archive target when the active scope changes', () => {
+    const props = baseProps()
+    const { rerender } = render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Archive a holding' }))
+    fireEvent.change(screen.getByLabelText('Holding to archive'), { target: { value: 'lot-a' } })
+    expect((screen.getByLabelText('Holding to archive') as HTMLSelectElement).value).toBe('lot-a')
+
+    rerender(<HoldingMutations {...props} scopeKey="portfolio-default:USD:holdings" />)
+
+    expect(screen.queryByLabelText('Holding to archive')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Archive a holding' }))
+    expect((screen.getByLabelText('Holding to archive') as HTMLSelectElement).value).toBe('')
   })
 
   it('aborts an in-flight archive and restores the background on scope replacement', async () => {
@@ -392,8 +448,8 @@ describe('HoldingMutations', () => {
     const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>((resolve) => { resolveFetch = resolve }))
     vi.stubGlobal('fetch', fetchMock)
     const { rerender } = render(<HoldingMutations {...props} />, { container: root })
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    openArchive('lot-a')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
     const request = fetchMock.mock.calls[0][1]
 
@@ -417,14 +473,14 @@ describe('HoldingMutations', () => {
     document.body.appendChild(root)
     const props = baseProps()
     const { rerender, unmount } = render(<StrictMode><HoldingMutations {...props} /></StrictMode>, { container: root })
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    openArchive('lot-a')
     expect(screen.getByRole('dialog')).toBeTruthy()
     rerender(<StrictMode><HoldingMutations {...props} active={false} /></StrictMode>)
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(root.getAttribute('aria-hidden')).toBe('previous')
     expect(root.inert).toBe(true)
     rerender(<StrictMode><HoldingMutations {...props} /></StrictMode>)
-    fireEvent.click(screen.getByRole('button', { name: 'Archive lot lot-a' }))
+    openArchive('lot-a')
     expect(screen.getByRole('dialog')).toBeTruthy()
     unmount()
     expect(root.getAttribute('aria-hidden')).toBe('previous')
@@ -437,9 +493,11 @@ describe('HoldingMutations', () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => ({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...receipt, operation: 'remove', holding: { ...receipt.holding, holding_id: 'lot-a', lifecycle: 'removed', removed_at: '2026-01-02T12:00:00.000000000Z' }, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }) } as Response))
     vi.stubGlobal('fetch', fetchMock)
     const { rerender } = render(<HoldingMutations {...props} />)
-    const origin = screen.getByRole('button', { name: 'Archive lot lot-a' })
+    fireEvent.click(screen.getByRole('button', { name: 'Archive a holding' }))
+    const origin = screen.getByRole('button', { name: 'Continue to archive' })
+    fireEvent.change(screen.getByLabelText('Holding to archive'), { target: { value: 'lot-a' } })
     fireEvent.click(origin)
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive lot lot-a' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
     rerender(<HoldingMutations {...props} holdings={[]} overviewETag={'"portfolio-default-8"'} />)
     await waitFor(() => expect(document.activeElement).not.toBe(origin))
