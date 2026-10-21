@@ -87,6 +87,41 @@ the database. This identity can read the bound portfolio and submit immutable
 advisory reviews, but cannot edit holdings or trade. Market-provider settings
 are optional and independent of this machine identity.
 
+### Explicit machine holding grant lifecycle
+
+`PORTFOLIO_MACHINE_HOLDINGS_WRITE=true` is a runtime authorization bound. It
+does not promote an existing persisted principal, because startup deliberately
+preserves a prior operator revocation. After confirming the exact configured
+principal and portfolio, an operator must make the transition explicitly:
+
+```sh
+PORTFOLIO_MACHINE_PRINCIPAL_ID=the-configured-id \
+PORTFOLIO_MACHINE_PORTFOLIO_ID=portfolio-default \
+PORTFOLIO_MACHINE_PORTFOLIO_READ=true \
+PORTFOLIO_MACHINE_HOLDINGS_WRITE=true \
+go run ./cmd/portfolio-dashboard machine-grant-holdings \
+  -db /path/to/portfolio-dashboard.sqlite \
+  -principal the-configured-id -portfolio portfolio-default \
+  -confirm 'GRANT HOLDINGS'
+go run ./cmd/portfolio-dashboard machine-inspect \
+  -db /path/to/portfolio-dashboard.sqlite \
+  -principal the-configured-id -portfolio portfolio-default
+```
+
+The grant command requires the runtime read/write configuration and exact
+non-secret identity binding, accepts only an existing active read-enabled row,
+and writes a secret-free audit event in the same transaction. It never creates
+or reactivates a principal, grants review scope, or changes holdings. Repeating
+it reports `already_granted`. To revoke without raw SQL, use the same exact
+binding and `-confirm 'REVOKE HOLDINGS'`; inspect should then report
+`holdings_write:false`. Reopening the database or restarting the service cannot
+undo that persisted revocation; a new deliberate grant is required.
+
+`Store.Open` runs the forward migrations on startup. Existing databases must
+complete migration 011 before these commands are used; it preserves existing
+rows and makes both machine grant/revoke audit events and their portfolio
+ownership associations append-only.
+
 ## Phase B: dated observations and immutable snapshots
 
 This slice performs exact accounting with a standard-library `math/big` rational

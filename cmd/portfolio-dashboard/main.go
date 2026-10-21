@@ -81,11 +81,104 @@ func runCommand(command string, args []string) error {
 		return runMappingList(args)
 	case "market-refresh":
 		return runMarketRefresh(args)
+	case "machine-grant-holdings":
+		return runMachineGrantHoldings(args)
+	case "machine-revoke-holdings":
+		return runMachineRevokeHoldings(args)
+	case "machine-inspect":
+		return runMachineInspect(args)
 	case "healthcheck":
 		return runHealthcheck(args)
 	default:
-		return fmt.Errorf("unknown command %q (use healthcheck, mapping-add, mapping-list, market-refresh, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
+		return fmt.Errorf("unknown command %q (use healthcheck, mapping-add, mapping-list, market-refresh, machine-grant-holdings, machine-revoke-holdings, machine-inspect, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
 	}
+}
+
+func runMachineGrantHoldings(args []string) error {
+	flags := flag.NewFlagSet("machine-grant-holdings", flag.ContinueOnError)
+	databasePath := flags.String("db", "", "SQLite database path")
+	principalID := flags.String("principal", "", "existing machine principal ID")
+	portfolioID := flags.String("portfolio", "", "exact portfolio binding")
+	confirmation := flags.String("confirm", "", "must be exactly GRANT HOLDINGS")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *confirmation != "GRANT HOLDINGS" {
+		return errors.New("-confirm must be exactly GRANT HOLDINGS")
+	}
+	if err := requireConfiguredMachineBinding(*principalID, *portfolioID, true); err != nil {
+		return err
+	}
+	database, ctx, err := openDatabase(*databasePath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	changed, err := database.GrantMachineHoldings(ctx, *principalID, *portfolioID)
+	if err != nil {
+		return err
+	}
+	return writeJSON(map[string]any{"principal_id": *principalID, "portfolio_id": *portfolioID, "holdings_write": true, "changed": changed, "result": map[bool]string{true: "granted", false: "already_granted"}[changed]})
+}
+
+func runMachineRevokeHoldings(args []string) error {
+	flags := flag.NewFlagSet("machine-revoke-holdings", flag.ContinueOnError)
+	databasePath := flags.String("db", "", "SQLite database path")
+	principalID := flags.String("principal", "", "existing machine principal ID")
+	portfolioID := flags.String("portfolio", "", "exact portfolio binding")
+	confirmation := flags.String("confirm", "", "must be exactly REVOKE HOLDINGS")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *confirmation != "REVOKE HOLDINGS" {
+		return errors.New("-confirm must be exactly REVOKE HOLDINGS")
+	}
+	if err := requireConfiguredMachineBinding(*principalID, *portfolioID, false); err != nil {
+		return err
+	}
+	database, ctx, err := openDatabase(*databasePath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	changed, err := database.RevokeMachineHoldings(ctx, *principalID, *portfolioID)
+	if err != nil {
+		return err
+	}
+	return writeJSON(map[string]any{"principal_id": *principalID, "portfolio_id": *portfolioID, "holdings_write": false, "changed": changed, "result": map[bool]string{true: "revoked", false: "already_revoked"}[changed]})
+}
+
+func runMachineInspect(args []string) error {
+	flags := flag.NewFlagSet("machine-inspect", flag.ContinueOnError)
+	databasePath := flags.String("db", "", "SQLite database path")
+	principalID := flags.String("principal", "", "existing machine principal ID")
+	portfolioID := flags.String("portfolio", "", "exact portfolio binding")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	database, ctx, err := openDatabase(*databasePath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	grant, err := database.InspectMachinePrincipal(ctx, *principalID, *portfolioID)
+	if err != nil {
+		return err
+	}
+	return writeJSON(grant)
+}
+
+func requireConfiguredMachineBinding(principalID, portfolioID string, requireWrite bool) error {
+	if principalID == "" || portfolioID == "" || os.Getenv("PORTFOLIO_MACHINE_PRINCIPAL_ID") != principalID || os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_ID") != portfolioID {
+		return errors.New("principal and portfolio must exactly match the configured machine identity")
+	}
+	if os.Getenv("PORTFOLIO_MACHINE_PORTFOLIO_READ") != "true" {
+		return errors.New("PORTFOLIO_MACHINE_PORTFOLIO_READ must be true")
+	}
+	if requireWrite && os.Getenv("PORTFOLIO_MACHINE_HOLDINGS_WRITE") != "true" {
+		return errors.New("PORTFOLIO_MACHINE_HOLDINGS_WRITE must be true before granting")
+	}
+	return nil
 }
 
 // runHealthcheck is deliberately restricted to the public health endpoint so

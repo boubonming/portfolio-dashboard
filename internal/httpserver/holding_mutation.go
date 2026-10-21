@@ -24,6 +24,7 @@ const holdingMutationBodyLimit = 256 << 10
 var holdingIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$`)
 var holdingCurrency = regexp.MustCompile(`^[A-Z]{3}$`)
 var holdingDecimal = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]{1,18})?$`)
+var holdingCostBasisDecimal = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]{1,36})?$`)
 
 func holdingMutationRoutes(database *store.Store, authenticator *auth.Authenticator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +320,7 @@ func parseHoldingCreate(body []byte) (holdingCreateParsed, []byte, error) {
 	if err != nil {
 		return holdingCreateParsed{}, nil, err
 	}
-	costBasis, err := parseHoldingDecimal(raw["cost_basis"], false)
+	costBasis, err := parseHoldingCostBasis(raw["cost_basis"])
 	if err != nil {
 		return holdingCreateParsed{}, nil, err
 	}
@@ -472,6 +473,15 @@ func parseHoldingDecimal(raw json.RawMessage, quantity bool) (string, error) {
 	}
 	return value, nil
 }
+
+func parseHoldingCostBasis(raw json.RawMessage) (string, error) {
+	value, err := parseHoldingString(raw, false)
+	if err != nil || len(value) == 0 || len(value) > 80 || !holdingCostBasisDecimal.MatchString(value) {
+		return "", store.ErrInvalidHoldingMutation
+	}
+	return value, nil
+}
+
 func decimalProductEqual(quantity, unitCost, costBasis string) bool {
 	q, qs := decimalParts(quantity)
 	u, us := decimalParts(unitCost)

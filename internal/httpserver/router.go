@@ -76,6 +76,8 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator) (http.
 		mutations := noStorePrivate(holdingMutationRoutes(database, authenticator))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings", mutations)
 		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings/{holdingId}", mutations)
+		overview := noStorePrivate(portfolioOverviewRoutes(database, authenticator))
+		mux.Handle("/api/v1/portfolios/{portfolioId}/overview", overview)
 	}
 	portfolio := http.Handler(portfolioRoutes(database))
 	if authenticator != nil {
@@ -308,6 +310,64 @@ func portfolioOverview(database *store.Store) http.HandlerFunc {
 		w.Header().Set("ETag", holdingETag(parts[3], revision))
 		writeJSON(w, http.StatusOK, view)
 	}
+}
+
+func portfolioOverviewRoutes(database *store.Store, authenticator *auth.Authenticator) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !authenticatePortfolioOverview(w, r, database, authenticator) {
+			return
+		}
+		portfolioOverview(database).ServeHTTP(w, r)
+	})
+}
+
+func authenticatePortfolioOverview(w http.ResponseWriter, r *http.Request, database *store.Store, authenticator *auth.Authenticator) bool {
+	if authenticator == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return false
+	}
+	sessionCount := 0
+	for _, cookie := range r.Cookies() {
+		if cookie.Name == auth.SessionCookieName {
+			sessionCount++
+		}
+	}
+	token, bearerPresent, bearerWellFormed := auth.BearerToken(r)
+	if sessionCount > 1 || (sessionCount == 1 && bearerPresent) {
+		writeBearerUnauthorized(w)
+		return false
+	}
+	if bearerPresent {
+		if !bearerWellFormed || !authenticator.MachineTokenValid(token) {
+			writeBearerUnauthorized(w)
+			return false
+		}
+		parts := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "/")
+		if database == nil || len(parts) != 5 || !canonicalPathID.MatchString(parts[3]) {
+			writePhaseDError(w, http.StatusForbidden, "forbidden", "The credential lacks the required permission.")
+			return false
+		}
+		principal := authenticator.MachinePrincipal()
+		allowed, err := database.MachinePrincipalAllowedForRuntime(r.Context(), principal.PrincipalID, parts[3], principal.PortfolioID, principal.PortfolioRead)
+		if err != nil {
+			writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
+			return false
+		}
+		if !allowed {
+			writePhaseDError(w, http.StatusForbidden, "forbidden", "The credential lacks the required permission.")
+			return false
+		}
+		return true
+	}
+	if sessionCount == 1 {
+		if _, err := authenticator.Session(r); err != nil {
+			writeBearerUnauthorized(w)
+			return false
+		}
+		return true
+	}
+	writeBearerUnauthorized(w)
+	return false
 }
 
 func portfolioRoutes(database *store.Store) http.Handler {
