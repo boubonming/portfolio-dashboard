@@ -373,6 +373,16 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('heading', { name: 'Holdings' })).toBeNull()
   })
 
+  it('renders the canonical Holdings table before compact management controls', async () => {
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('table', { name: 'Holdings' })).toBeTruthy())
+    const table = screen.getByRole('table', { name: 'Holdings' })
+    const management = screen.getByRole('heading', { name: 'Manage holdings' })
+    expect(Boolean(table.compareDocumentPosition(management) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
+    expect(screen.queryByRole('button', { name: /Archive lot/i })).toBeNull()
+  })
+
   it('tears down holding mutation controls when navigating away and remounts them on Holdings', async () => {
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
     render(<App />)
