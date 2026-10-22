@@ -42,6 +42,7 @@ func (c *FinnhubClient) Search(ctx context.Context, query string) ([]DiscoveryCa
 		return nil, providerErr(c.Name(), "configuration", "FINNHUB_API_KEY is not configured")
 	}
 	var payload struct {
+		Count  json.RawMessage `json:"count"`
 		Result []struct {
 			Description   string `json:"description"`
 			DisplaySymbol string `json:"displaySymbol"`
@@ -49,8 +50,21 @@ func (c *FinnhubClient) Search(ctx context.Context, query string) ([]DiscoveryCa
 			Type          string `json:"type"`
 		} `json:"result"`
 	}
-	if err := searchRequest(ctx, c.http, c.Name(), c.baseURL+"/search", url.Values{"symbol": {query}, "token": {c.apiKey}}, &payload); err != nil {
+	if err := searchRequest(ctx, c.http, c.Name(), c.baseURL+"/search", url.Values{"q": {query}, "token": {c.apiKey}}, &payload); err != nil {
 		return nil, err
+	}
+	if len(payload.Count) == 0 || strings.EqualFold(strings.TrimSpace(string(payload.Count)), "null") {
+		return nil, providerErr(c.Name(), "malformed_json", "provider search result count is missing")
+	}
+	if payload.Result == nil {
+		return nil, providerErr(c.Name(), "malformed_json", "provider search result list is missing")
+	}
+	var count int
+	if err := json.Unmarshal(payload.Count, &count); err != nil || count < 0 {
+		return nil, providerErr(c.Name(), "malformed_json", "provider search result count is invalid")
+	}
+	if count != len(payload.Result) {
+		return nil, providerErr(c.Name(), "malformed_json", "provider search result count does not match results")
 	}
 	if len(payload.Result) > maxDiscoveryCandidates {
 		return nil, providerErr(c.Name(), "malformed_json", "provider returned too many search candidates")

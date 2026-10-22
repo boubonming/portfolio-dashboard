@@ -21,7 +21,7 @@ func TestDiscoveryAdaptersUseProviderSearchEndpointsAndBoundMetadata(t *testing.
 		{name: "coingecko", provider: ProviderCoinGecko, client: func(base string) DiscoveryClient { return NewCoinGeckoClient(ClientOptions{BaseURL: base}) }, path: "/api/v3/search", body: `{"coins":[{"id":"bitcoin","symbol":"btc","name":"Bitcoin"}]}`, wantID: "bitcoin"},
 		{name: "finnhub", provider: ProviderFinnhub, client: func(base string) DiscoveryClient {
 			return NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: base})
-		}, path: "/search", body: `{"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock"}]}`, wantID: "MSFT"},
+		}, path: "/search", body: `{"count":1,"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock"}]}`, wantID: "MSFT"},
 		{name: "alpha_vantage", provider: ProviderAlphaVantage, client: func(base string) DiscoveryClient {
 			return NewAlphaVantageClient("fixture-secret", ClientOptions{BaseURL: base + "/query"})
 		}, path: "/query", body: `{"bestMatches":[{"1. symbol":"7203.T","2. name":"Toyota","3. type":"Equity","4. region":"Japan","8. currency":"JPY"}]}`, wantID: "7203.T"},
@@ -29,7 +29,7 @@ func TestDiscoveryAdaptersUseProviderSearchEndpointsAndBoundMetadata(t *testing.
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != test.path || r.URL.Query().Get("query") == "" && r.URL.Query().Get("symbol") == "" && r.URL.Query().Get("keywords") == "" {
+				if r.URL.Path != test.path || r.URL.Query().Get("query") == "" && r.URL.Query().Get("q") == "" && r.URL.Query().Get("symbol") == "" && r.URL.Query().Get("keywords") == "" {
 					t.Fatalf("unexpected request: %s", r.URL.String())
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -70,7 +70,7 @@ func TestDiscoveryAdaptersRejectUntrustedSearchShapes(t *testing.T) {
 		{name: "coingecko", provider: ProviderCoinGecko, client: func(base string) DiscoveryClient { return NewCoinGeckoClient(ClientOptions{BaseURL: base}) }, path: "/api/v3/search", valid: `{"coins":[{"id":"bitcoin","symbol":"btc","name":"Bitcoin"}]}`, unknown: `{"coins":[{"id":"bitcoin","symbol":"btc","name":"Bitcoin","unexpected":"x"}]}`, duplicateID: `{"coins":[{"id":"bitcoin","symbol":"btc","name":"Bitcoin"},{"id":"bitcoin","symbol":"btc","name":"Other"}]}`},
 		{name: "finnhub", provider: ProviderFinnhub, client: func(base string) DiscoveryClient {
 			return NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: base})
-		}, path: "/search", valid: `{"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock"}]}`, unknown: `{"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock","unexpected":"x"}]}`, duplicateID: `{"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock"},{"symbol":"MSFT","displaySymbol":"MSFT","description":"Other","type":"Common Stock"}]}`},
+		}, path: "/search", valid: `{"count":1,"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock"}]}`, unknown: `{"count":1,"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock","unexpected":"x"}]}`, duplicateID: `{"count":2,"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock"},{"symbol":"MSFT","displaySymbol":"MSFT","description":"Other","type":"Common Stock"}]}`},
 		{name: "alpha_vantage", provider: ProviderAlphaVantage, client: func(base string) DiscoveryClient {
 			return NewAlphaVantageClient("fixture-secret", ClientOptions{BaseURL: base + "/query"})
 		}, path: "/query", valid: `{"bestMatches":[{"1. symbol":"7203.T","2. name":"Toyota","3. type":"Equity","4. region":"Japan","8. currency":"JPY"}]}`, unknown: `{"bestMatches":[{"1. symbol":"7203.T","2. name":"Toyota","3. type":"Equity","4. region":"Japan","8. currency":"JPY","unexpected":"x"}]}`, duplicateID: `{"bestMatches":[{"1. symbol":"7203.T","2. name":"Toyota","3. type":"Equity","4. region":"Japan","8. currency":"JPY"},{"1. symbol":"7203.T","2. name":"Other","3. type":"Equity","4. region":"Japan","8. currency":"JPY"}]}`},
@@ -115,7 +115,7 @@ func TestDiscoveryAdaptersRejectUntrustedSearchShapes(t *testing.T) {
 			if test.provider == ProviderCoinGecko {
 				tooMany.WriteString(`{"coins":[`)
 			} else if test.provider == ProviderFinnhub {
-				tooMany.WriteString(`{"result":[`)
+				fmt.Fprintf(&tooMany, `{"count":%d,"result":[`, maxDiscoveryCandidates+1)
 			} else {
 				tooMany.WriteString(`{"bestMatches":[`)
 			}
@@ -140,6 +140,78 @@ func TestDiscoveryAdaptersRejectUntrustedSearchShapes(t *testing.T) {
 			_, err := test.client(server.URL).Search(context.Background(), "MSFT")
 			if err == nil || !strings.Contains(err.Error(), "malformed_json") {
 				t.Fatalf("expected oversized record set error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestFinnhubSearchUsesStrictDocumentedContract(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "valid nonempty", body: `{"count":1,"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock"}]}`, want: 1},
+		{name: "valid zero", body: `{"count":0,"result":[]}`, want: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/v1/search" {
+					t.Fatalf("unexpected request path: %s", r.URL.Path)
+				}
+				if r.URL.Query().Get("q") != "MSFT" || r.URL.Query().Get("symbol") != "" {
+					t.Fatalf("unexpected lookup query: %s", r.URL.RawQuery)
+				}
+				if got := r.URL.Query().Get("token"); got != "fixture-secret" {
+					t.Fatalf("unexpected token query: %q", got)
+				}
+				if len(r.URL.Query()) != 2 {
+					t.Fatalf("unexpected public query fields: %s", r.URL.RawQuery)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			candidates, err := NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: server.URL + "/api/v1"}).Search(context.Background(), "MSFT")
+			if err != nil || len(candidates) != test.want {
+				t.Fatalf("candidates=%+v err=%v", candidates, err)
+			}
+		})
+	}
+}
+
+func TestFinnhubSearchRejectsInvalidCountAndStrictFields(t *testing.T) {
+	valid := `{"count":1,"result":[{"symbol":"MSFT","displaySymbol":"MSFT","description":"Microsoft","type":"Common Stock"}]}`
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "count mismatch", body: strings.Replace(valid, `"count":1`, `"count":0`, 1)},
+		{name: "missing count", body: strings.Replace(valid, `"count":1,`, "", 1)},
+		{name: "negative count", body: strings.Replace(valid, `"count":1`, `"count":-1`, 1)},
+		{name: "non-integer count", body: strings.Replace(valid, `"count":1`, `"count":1.0`, 1)},
+		{name: "duplicate top-level field", body: strings.Replace(valid, `"count":1,`, `"count":1,"count":1,`, 1)},
+		{name: "unknown top-level field", body: strings.Replace(valid, `"count":1,`, `"count":1,"unexpected":"x",`, 1)},
+		{name: "duplicate result field", body: strings.Replace(valid, `"symbol":"MSFT"`, `"symbol":"MSFT","symbol":"OTHER"`, 1)},
+		{name: "unknown result field", body: strings.Replace(valid, `"type":"Common Stock"`, `"type":"Common Stock","unexpected":"x"`, 1)},
+		{name: "trailing JSON", body: valid + ` {}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/v1/search" || r.URL.Query().Get("q") != "MSFT" || r.URL.Query().Get("symbol") != "" {
+					t.Fatalf("unexpected request: %s", r.URL.String())
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			candidates, err := NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: server.URL + "/api/v1"}).Search(context.Background(), "MSFT")
+			if err == nil || !strings.Contains(err.Error(), "malformed_json") || candidates != nil || strings.Contains(err.Error(), "fixture-secret") || len(err.Error()) > 256 {
+				t.Fatalf("expected bounded redacted rejection, candidates=%+v err=%v", candidates, err)
 			}
 		})
 	}
