@@ -53,6 +53,25 @@ type ProviderClient interface {
 	FX(context.Context, FXRequest) (domain.FXRate, error)
 }
 
+// DiscoveryClient is the credential-safe provider search boundary. Search
+// requests contain only the user's instrument symbol/query; provider clients
+// must never receive portfolio, account, lot, or valuation data.
+type DiscoveryClient interface {
+	ProviderClient
+	Search(context.Context, string) ([]DiscoveryCandidate, error)
+}
+
+type DiscoveryCandidate struct {
+	Identifier  string `json:"identifier"`
+	Symbol      string `json:"symbol,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Region      string `json:"region,omitempty"`
+	Exchange    string `json:"exchange,omitempty"`
+	Currency    string `json:"currency,omitempty"`
+}
+
 // BatchQuoteClient permits providers with a batch endpoint to make one bounded
 // request. The returned errors are keyed by instrument ID.
 type BatchQuoteClient interface {

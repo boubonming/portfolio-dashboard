@@ -31,6 +31,33 @@ type MarketDataSetup struct {
 	Instruments []MarketInstrumentView `json:"instruments"`
 }
 
+type MarketDiscoveryCandidate struct {
+	Provider    string `json:"provider"`
+	Identifier  string `json:"identifier"`
+	Symbol      string `json:"symbol,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Region      string `json:"region,omitempty"`
+	Exchange    string `json:"exchange,omitempty"`
+	Currency    string `json:"currency,omitempty"`
+}
+
+type MarketDiscoveryResult struct {
+	InstrumentID       string                     `json:"instrument_id"`
+	Status             string                     `json:"status"`
+	Provider           string                     `json:"provider,omitempty"`
+	AttemptedProviders []string                   `json:"attempted_providers"`
+	Candidates         []MarketDiscoveryCandidate `json:"candidates"`
+	Diagnostic         string                     `json:"diagnostic,omitempty"`
+}
+
+type MarketDiscoveryResponse struct {
+	PortfolioID string                  `json:"portfolio_id"`
+	ETag        string                  `json:"etag"`
+	Results     []MarketDiscoveryResult `json:"results"`
+}
+
 type MappingBatchItem struct {
 	InstrumentID      string `json:"instrument_id"`
 	Provider          string `json:"provider"`

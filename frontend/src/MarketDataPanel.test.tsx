@@ -44,7 +44,7 @@ afterEach(() => {
 })
 
 describe('MarketDataPanel', () => {
-  it('prefills conservative suggestions without making them confirmed or saveable', async () => {
+  it('does not prefill a guessed identifier before provider discovery returns metadata', async () => {
     const configuredSetup = setup({
       providers: [
         { name: 'coingecko', configured: true, public: true },
@@ -57,15 +57,15 @@ describe('MarketDataPanel', () => {
         { instrument_id: 'international-a', symbol: '7203', description: 'Toyota', currency: 'JPY', mappings: [] },
       ],
     })
-    const fetchMock = vi.fn(() => json(configuredSetup))
+    const fetchMock = vi.fn((input: RequestInfo | URL) => json(configuredSetup))
     renderPanel(fetchMock)
     await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(3))
-    expect(screen.getByDisplayValue('bitcoin')).toBeTruthy()
-    expect(screen.getByDisplayValue('MSFT')).toBeTruthy()
-    expect(screen.getByDisplayValue('7203')).toBeTruthy()
+    expect(screen.queryByDisplayValue('bitcoin')).toBeNull()
+    expect(screen.queryByDisplayValue('MSFT')).toBeNull()
+    expect(screen.queryByDisplayValue('7203')).toBeNull()
     expect(screen.getAllByRole('checkbox').every((checkbox) => !(checkbox as HTMLInputElement).checked)).toBe(true)
     expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getAllByText(/Suggested — verify the exact exchange\/listing before confirming/)).toHaveLength(3)
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/market-data/discover'))).toBe(true)
   })
 
   it('only sends a suggestion after explicit confirmation and preserves its provenance', async () => {
@@ -82,7 +82,11 @@ describe('MarketDataPanel', () => {
       ],
     })
     const outcomes = configuredSetup.instruments.map((instrument) => ({ instrument_id: instrument.instrument_id, status: 'saved', mapping: { id: `mapping-${instrument.instrument_id}`, instrument_id: instrument.instrument_id, provider: instrument.symbol === 'BTC' ? 'coingecko' : instrument.currency === 'USD' ? 'finnhub' : 'alpha_vantage', provider_symbol: instrument.symbol === 'BTC' ? 'bitcoin' : instrument.symbol, quote_currency: instrument.currency, active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'confirmed suggestion', created_at: '2026-01-01T00:00:00.000000000Z' } }))
-    const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => String(input).endsWith('/market-data/mappings') ? json({ status: 'saved', etag: '"setup-2"', outcomes }) : json(configuredSetup))
+    const discovery = { portfolio_id: configuredSetup.portfolio_id, etag: configuredSetup.etag, results: configuredSetup.instruments.map((instrument: { instrument_id: string; symbol: string; currency: string }) => {
+      const provider = instrument.symbol === 'BTC' ? 'coingecko' : instrument.currency === 'USD' ? 'finnhub' : 'alpha_vantage'
+      return { instrument_id: instrument.instrument_id, status: 'candidates', provider, attempted_providers: [provider], candidates: [{ provider, identifier: instrument.symbol === 'BTC' ? 'bitcoin' : instrument.symbol, symbol: instrument.symbol, name: instrument.symbol, ...(instrument.currency === 'JPY' ? { currency: 'JPY' } : {}) }], diagnostic: 'Provider candidates are unverified until explicitly confirmed.' }
+    }) }
+    const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => String(input).endsWith('/market-data/mappings') ? json({ status: 'saved', etag: '"setup-2"', outcomes }) : String(input).endsWith('/market-data/discover') ? json(discovery) : json(configuredSetup))
     renderPanel(fetchMock)
     await waitFor(() => expect(screen.getAllByRole('checkbox')).toHaveLength(3))
     for (const checkbox of screen.getAllByRole('checkbox')) fireEvent.click(checkbox)
@@ -92,7 +96,7 @@ describe('MarketDataPanel', () => {
     const call = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/market-data/mappings'))
     const body = JSON.parse(String(call?.[1]?.body)) as { mappings: Array<Record<string, string | boolean>> }
     expect(body.mappings.map((mapping) => mapping.provider_symbol)).toEqual(['bitcoin', 'MSFT', '7203'])
-    expect(body.mappings.every((mapping) => mapping.confirm_unverified === true && String(mapping.provenance).includes('Suggested — verify'))).toBe(true)
+    expect(body.mappings.every((mapping) => mapping.confirm_unverified === true && String(mapping.provenance).includes('unverified'))).toBe(true)
   })
 
   it.each(['', '   ', 'US', 'USDD', 'usd', 'U2D', 'U$D'])('blocks a mapping with invalid quote currency %j without a save request', async (quoteCurrency) => {

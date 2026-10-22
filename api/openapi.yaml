@@ -541,6 +541,33 @@ paths:
         '404': { description: Portfolio not found }
         '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
 
+  /api/v1/portfolios/{portfolioId}/market-data/discover:
+    post:
+      summary: Discover provider-backed market mapping candidates
+      description: >-
+        Contacts configured provider search APIs with only each unmapped
+        instrument's symbol/query. Candidate metadata is unverified and never
+        becomes authoritative until the owner explicitly confirms and saves it.
+        Provider credentials and portfolio details remain server-side; this
+        operation performs no mapping, audit, Activity, or revision writes.
+      operationId: discoverMarketData
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: If-Match, in: header, required: true, schema: { type: string } }
+        - { name: X-CSRF-Token, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, additionalProperties: false } } }
+      responses:
+        '200': { description: One result per active setup instrument, content: { application/json: { schema: { $ref: '#/components/schemas/MarketDiscoveryResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/UnauthorizedCookie' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Portfolio not found }
+        '412': { description: Mapping setup changed; reload before discovery }
+        '405': { $ref: '#/components/responses/MethodNotAllowedPost' }
+
   /api/v1/portfolios/{portfolioId}/market-data/mappings:
     post:
       summary: Save exact provider mappings as one revisioned batch
@@ -777,6 +804,39 @@ components:
         etag: { type: string, minLength: 1, maxLength: 256 }
         providers: { type: array, maxItems: 32, items: { $ref: '#/components/schemas/ProviderReadiness' } }
         instruments: { type: array, items: { $ref: '#/components/schemas/MarketInstrument' } }
+    MarketDiscoveryCandidate:
+      type: object
+      additionalProperties: false
+      required: [provider, identifier]
+      properties:
+        provider: { type: string, enum: [alpha_vantage, coingecko, finnhub] }
+        identifier: { type: string, minLength: 1, maxLength: 256 }
+        symbol: { type: string, maxLength: 256 }
+        name: { type: string, maxLength: 256 }
+        description: { type: string, maxLength: 256 }
+        type: { type: string, maxLength: 256 }
+        region: { type: string, maxLength: 256 }
+        exchange: { type: string, maxLength: 256 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+    MarketDiscoveryResult:
+      type: object
+      additionalProperties: false
+      required: [instrument_id, status, attempted_providers, candidates]
+      properties:
+        instrument_id: { $ref: '#/components/schemas/InstrumentId' }
+        status: { type: string, enum: [committed, candidates, no_result, unavailable, error] }
+        provider: { type: string, enum: [alpha_vantage, coingecko, finnhub] }
+        attempted_providers: { type: array, maxItems: 8, uniqueItems: true, items: { type: string, enum: [alpha_vantage, coingecko, finnhub] } }
+        candidates: { type: array, maxItems: 8, items: { $ref: '#/components/schemas/MarketDiscoveryCandidate' } }
+        diagnostic: { type: string, maxLength: 512 }
+    MarketDiscoveryResponse:
+      type: object
+      additionalProperties: false
+      required: [portfolio_id, etag, results]
+      properties:
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        etag: { type: string, minLength: 1, maxLength: 256 }
+        results: { type: array, items: { $ref: '#/components/schemas/MarketDiscoveryResult' } }
     MappingBatchItem:
       type: object
       additionalProperties: false

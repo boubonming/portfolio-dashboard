@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { APIError, getMarketDataSetup, refreshMarketData, saveMarketMappings, type MarketDataSetup, type MappingBatchItem } from './api'
+import { APIError, discoverMarketData, getMarketDataSetup, refreshMarketData, saveMarketMappings, type MarketDataSetup, type MappingBatchItem, type MarketDiscoveryCandidate } from './api'
 import { prefillMappingSuggestion } from './marketMappingSuggestions'
 
 function newRequestKey() {
@@ -7,7 +7,7 @@ function newRequestKey() {
   return `refresh-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
-type Draft = { provider: string; providerSymbol: string; quoteCurrency: string; provenance: string; confirmed: boolean; suggested: boolean; guidance: string }
+type Draft = { provider: string; providerSymbol: string; quoteCurrency: string; provenance: string; confirmed: boolean; suggested: boolean; guidance: string; candidates: MarketDiscoveryCandidate[] }
 
 function dependencyLabel(value: string, setup: MarketDataSetup | null): string {
   const quote = value.match(/^quote:([^:]+)$/)
@@ -34,6 +34,14 @@ function quoteCurrencyError(value: string | undefined): string {
   return value?.trim() ? 'Use a three-letter uppercase currency code, such as USD.' : 'Quote currency is required before saving this mapping.'
 }
 
+function normalizedSymbol(value: string | undefined): string {
+  return (value || '').trim().toUpperCase()
+}
+
+function candidateEvidence(candidate: MarketDiscoveryCandidate): string {
+  return [candidate.identifier, candidate.symbol, candidate.name, candidate.type, candidate.region, candidate.exchange, candidate.currency].filter(Boolean).join(' · ')
+}
+
 export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfToken, onUnauthorized, onReload }: { portfolioID: string; reportingCurrency: string; csrfToken?: string; onUnauthorized: () => void; onReload: () => void }) {
   const [setup, setSetup] = useState<MarketDataSetup | null>(null)
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
@@ -44,6 +52,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
   const [error, setError] = useState('')
   const [lastRefresh, setLastRefresh] = useState<Awaited<ReturnType<typeof refreshMarketData>> | null>(null)
   const controllerRef = useRef<AbortController | null>(null)
+  const discoveryControllerRef = useRef<AbortController | null>(null)
   const mutationControllerRef = useRef<AbortController | null>(null)
   const savingRef = useRef(false)
   const refreshingRef = useRef(false)
@@ -57,7 +66,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
 
   const load = () => {
     const generation = ++generationRef.current
-    controllerRef.current?.abort()
+    controllerRef.current?.abort(); discoveryControllerRef.current?.abort()
     const controller = new AbortController()
     controllerRef.current = controller
     setState('loading'); setError(''); setMessage(''); setLastRefresh(null)
@@ -67,9 +76,37 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       const nextDrafts: Record<string, Draft> = {}
       for (const instrument of next.instruments) {
         const seed = prefillMappingSuggestion(instrument, next.providers)
-        nextDrafts[instrument.instrument_id] = seed
+        nextDrafts[instrument.instrument_id] = { ...seed, candidates: [] }
       }
       setDrafts(nextDrafts); setState('ready')
+      const discoveryController = new AbortController()
+      discoveryControllerRef.current = discoveryController
+      setMessage('Contacting configured providers for unverified candidates…')
+      discoverMarketData(portfolioID, next.etag, csrfToken, discoveryController.signal, next).then((discovery) => {
+        if (discoveryController.signal.aborted || generation !== generationRef.current || scopeRef.current.portfolioID !== portfolioID) return
+        setDrafts((current) => {
+          const updated = { ...current }
+          for (const result of discovery.results) {
+            const instrument = next.instruments.find((item) => item.instrument_id === result.instrument_id)
+            const existing = updated[result.instrument_id]
+            if (!instrument || !existing || instrument.mappings.length > 0 || result.status === 'committed') continue
+            const exact = result.candidates.filter((candidate) => normalizedSymbol(candidate.symbol || candidate.identifier) === normalizedSymbol(instrument.symbol) && (!candidate.currency || candidate.currency === instrument.currency))
+            if (exact.length === 1) {
+              const candidate = exact[0]
+              const evidence = candidateEvidence(candidate)
+              updated[result.instrument_id] = { ...existing, provider: candidate.provider, providerSymbol: candidate.identifier, provenance: `Suggested by ${candidate.provider} — unverified. Provider-reported identity: ${evidence}`, confirmed: false, suggested: true, candidates: result.candidates, guidance: result.diagnostic || 'A unique exact provider candidate was returned; verify it before confirming.' }
+            } else {
+              updated[result.instrument_id] = { ...existing, candidates: result.candidates, guidance: exact.length > 1 ? 'Multiple exact provider candidates were returned. Choose one explicitly, then verify it.' : (result.diagnostic || 'No unique exact provider candidate was returned. Enter and verify the identifier manually.') }
+            }
+          }
+          return updated
+        })
+        setMessage('Provider discovery completed. Suggestions remain unverified until you confirm them.')
+      }).catch((reason: unknown) => {
+        if (discoveryController.signal.aborted || generation !== generationRef.current) return
+        if (reason instanceof APIError && reason.status === 401) { generationRef.current += 1; mutationControllerRef.current?.abort(); unauthorizedRef.current(); return }
+        setMessage('Provider discovery was unavailable. Enter and verify exact identifiers manually.')
+      })
     }).catch((reason: unknown) => {
       if (controller.signal.aborted || generation !== generationRef.current) return
       if (reason instanceof APIError && reason.status === 401) { generationRef.current += 1; mutationControllerRef.current?.abort(); unauthorizedRef.current(); return }
@@ -79,10 +116,11 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
 
   useEffect(() => {
     load()
-    return () => { generationRef.current += 1; controllerRef.current?.abort(); mutationControllerRef.current?.abort(); controllerRef.current = null; mutationControllerRef.current = null }
+    return () => { generationRef.current += 1; controllerRef.current?.abort(); discoveryControllerRef.current?.abort(); mutationControllerRef.current?.abort(); controllerRef.current = null; discoveryControllerRef.current = null; mutationControllerRef.current = null }
   }, [portfolioID, reportingCurrency])
 
   const update = (id: string, field: keyof Draft, value: string | boolean) => setDrafts((current) => ({ ...current, [id]: { ...current[id], [field]: value } }))
+  const manualUpdate = (id: string, field: 'provider' | 'providerSymbol' | 'provenance', value: string) => setDrafts((current) => ({ ...current, [id]: { ...current[id], [field]: value, ...(field === 'provider' || field === 'providerSymbol' ? { suggested: false, confirmed: false, provenance: 'Manual entry — owner must verify the exact provider identity.' } : {}) } }))
   const entries = useMemo(() => setup?.instruments || [], [setup])
   const mappings = entries.map((instrument): MappingBatchItem | null => {
     const draft = drafts[instrument.instrument_id]
@@ -164,7 +202,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
         const quoteCurrency = draft?.quoteCurrency ?? ''
         const quoteCurrencyID = `quote-currency-${instrument.instrument_id}`
         const quoteCurrencyValid = canonicalQuoteCurrency(quoteCurrency) !== null
-        return <tr key={instrument.instrument_id}><th scope="row"><strong>{instrument.symbol}</strong><span className="subline">{instrument.description || 'Description unavailable'} · {instrument.currency}</span>{instrument.mappings.length ? <span className="subline">Current / confirmed: {instrument.mappings.map((mapping) => `${mapping.provider} / ${mapping.provider_symbol}`).join(', ')}</span> : <><span className="subline">{draft?.guidance || 'No mapping suggestion is available.'}</span>{draft?.suggested && <span className="subline">Suggested value is unverified until you confirm it.</span>}</>}</th><td><select aria-label={`Provider for ${instrumentLabel}`} value={draft?.provider || ''} onChange={(event) => update(instrument.instrument_id, 'provider', event.target.value)}><option value="">Choose exact provider</option>{available.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></td><td><input aria-label={`Exact provider identifier for ${instrumentLabel}`} value={draft?.providerSymbol || ''} onChange={(event) => update(instrument.instrument_id, 'providerSymbol', event.target.value)} placeholder="Exact listing / coin ID" /></td><td><input aria-label={`Quote currency for ${instrumentLabel}`} aria-describedby={quoteCurrencyID} aria-invalid={!quoteCurrencyValid} value={quoteCurrency} onChange={(event) => update(instrument.instrument_id, 'quoteCurrency', event.target.value)} /><span id={quoteCurrencyID} className="subline">{quoteCurrencyValid ? 'Three-letter uppercase currency code.' : quoteCurrencyError(quoteCurrency)}</span></td><td><input aria-label={`Provenance for ${instrumentLabel}`} value={draft?.provenance || ''} onChange={(event) => update(instrument.instrument_id, 'provenance', event.target.value)} placeholder="Where you verified it" /><label className="checkbox-label"><input type="checkbox" checked={draft?.confirmed || false} onChange={(event) => update(instrument.instrument_id, 'confirmed', event.target.checked)} /> I confirmed this exact identifier for {instrumentLabel}</label></td></tr>
+        return <tr key={instrument.instrument_id}><th scope="row"><strong>{instrument.symbol}</strong><span className="subline">{instrument.description || 'Description unavailable'} · {instrument.currency}</span>{instrument.mappings.length ? <span className="subline">Current / confirmed: {instrument.mappings.map((mapping) => `${mapping.provider} / ${mapping.provider_symbol}`).join(', ')}</span> : <><span className="subline">{draft?.guidance || 'No mapping suggestion is available.'}</span>{draft?.suggested && <span className="subline">Suggested by {draft.provider} — unverified. Verify provider-reported identity before confirming.</span>}{draft?.candidates && draft.candidates.length > 0 && <fieldset className="candidate-list"><legend>Provider candidates — choose explicitly</legend>{draft.candidates.map((candidate) => <label className="candidate-choice" key={`${candidate.provider}:${candidate.identifier}`}><input type="radio" name={`candidate-${instrument.instrument_id}`} checked={draft.provider === candidate.provider && draft.providerSymbol === candidate.identifier} onChange={() => { update(instrument.instrument_id, 'provider', candidate.provider); update(instrument.instrument_id, 'providerSymbol', candidate.identifier); update(instrument.instrument_id, 'provenance', `Selected ${candidate.provider} candidate — unverified. Provider-reported identity: ${candidateEvidence(candidate)}`); update(instrument.instrument_id, 'confirmed', false) }} /> <span>{candidate.provider}: {candidate.identifier}{candidate.name ? ` — ${candidate.name}` : ''}{candidate.currency ? ` (${candidate.currency})` : ''}</span></label>)}</fieldset>}</>}</th><td><select aria-label={`Provider for ${instrumentLabel}`} value={draft?.provider || ''} onChange={(event) => manualUpdate(instrument.instrument_id, 'provider', event.target.value)}><option value="">Choose exact provider</option>{available.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></td><td><input aria-label={`Exact provider identifier for ${instrumentLabel}`} value={draft?.providerSymbol || ''} onChange={(event) => manualUpdate(instrument.instrument_id, 'providerSymbol', event.target.value)} placeholder="Exact listing / coin ID" /></td><td><input aria-label={`Quote currency for ${instrumentLabel}`} aria-describedby={quoteCurrencyID} aria-invalid={!quoteCurrencyValid} value={quoteCurrency} onChange={(event) => update(instrument.instrument_id, 'quoteCurrency', event.target.value)} /><span id={quoteCurrencyID} className="subline">{quoteCurrencyValid ? 'Three-letter uppercase currency code.' : quoteCurrencyError(quoteCurrency)}</span></td><td><input aria-label={`Provenance for ${instrumentLabel}`} value={draft?.provenance || ''} onChange={(event) => update(instrument.instrument_id, 'provenance', event.target.value)} placeholder="Where you verified it" /><label className="checkbox-label"><input type="checkbox" checked={draft?.confirmed || false} onChange={(event) => update(instrument.instrument_id, 'confirmed', event.target.checked)} /> I confirmed this exact identifier for {instrumentLabel}</label></td></tr>
       })}</tbody></table></div>
       <div className="market-actions"><button type="button" onClick={save} disabled={saving || refreshing || !canSave}>{saving ? 'Saving mappings…' : 'Save all mappings'}</button><button type="button" onClick={refresh} disabled={refreshing || saving}>{refreshing ? 'Refreshing prices…' : 'Refresh prices'}</button></div>
       <p className="muted">Save validates the whole batch before committing. Every row needs an exact editable identifier and explicit confirmation; unverified suggestions remain local until you confirm them. A stale setup is rejected rather than overwriting another revision.</p>

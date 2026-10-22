@@ -32,6 +32,39 @@ func NewFinnhub(apiKey, baseURL string) *FinnhubClient {
 }
 
 func (c *FinnhubClient) Name() Provider { return ProviderFinnhub }
+
+func (c *FinnhubClient) Search(ctx context.Context, query string) ([]DiscoveryCandidate, error) {
+	query, err := validateSearchQuery(query)
+	if err != nil {
+		return nil, providerErr(c.Name(), "invalid_request", "search query is invalid")
+	}
+	if c.apiKey == "" {
+		return nil, providerErr(c.Name(), "configuration", "FINNHUB_API_KEY is not configured")
+	}
+	var payload struct {
+		Result []struct {
+			Description   string `json:"description"`
+			DisplaySymbol string `json:"displaySymbol"`
+			Symbol        string `json:"symbol"`
+			Type          string `json:"type"`
+		} `json:"result"`
+	}
+	if err := searchRequest(ctx, c.http, c.Name(), c.baseURL+"/search", url.Values{"symbol": {query}, "token": {c.apiKey}}, &payload); err != nil {
+		return nil, err
+	}
+	candidates := make([]DiscoveryCandidate, 0, maxDiscoveryCandidates)
+	for _, item := range payload.Result {
+		identifier := item.Symbol
+		if strings.TrimSpace(identifier) == "" {
+			identifier = item.DisplaySymbol
+		}
+		if err := appendCandidate(&candidates, DiscoveryCandidate{Identifier: identifier, Symbol: item.DisplaySymbol, Name: item.Description, Description: item.Description, Type: item.Type}); err != nil {
+			return nil, providerErr(c.Name(), "malformed_json", "provider search candidate was malformed")
+		}
+	}
+	return candidates, nil
+}
+
 func (c *FinnhubClient) FX(context.Context, FXRequest) (domain.FXRate, error) {
 	return domain.FXRate{}, ErrUnsupportedOperation
 }
@@ -95,6 +128,45 @@ func NewAlphaVantage(apiKey, baseURL string) *AlphaVantageClient {
 	return NewAlphaVantageClient(apiKey, ClientOptions{BaseURL: baseURL})
 }
 func (c *AlphaVantageClient) Name() Provider { return ProviderAlphaVantage }
+
+func (c *AlphaVantageClient) Search(ctx context.Context, query string) ([]DiscoveryCandidate, error) {
+	query, err := validateSearchQuery(query)
+	if err != nil {
+		return nil, providerErr(c.Name(), "invalid_request", "search query is invalid")
+	}
+	if c.apiKey == "" {
+		return nil, providerErr(c.Name(), "configuration", "ALPHA_VANTAGE_API_KEY is not configured")
+	}
+	var payload struct {
+		Matches []struct {
+			Symbol   string `json:"1. symbol"`
+			Name     string `json:"2. name"`
+			Type     string `json:"3. type"`
+			Region   string `json:"4. region"`
+			Currency string `json:"8. currency"`
+		} `json:"bestMatches"`
+		Note        string `json:"Note"`
+		Information string `json:"Information"`
+		Error       string `json:"Error Message"`
+	}
+	if err := searchRequest(ctx, c.http, c.Name(), c.baseURL, url.Values{"function": {"SYMBOL_SEARCH"}, "keywords": {query}, "apikey": {c.apiKey}}, &payload); err != nil {
+		return nil, err
+	}
+	if payload.Note != "" || payload.Information != "" {
+		return nil, providerErr(c.Name(), "rate_limit", "provider returned a rate-limit notice")
+	}
+	if payload.Error != "" {
+		return nil, providerErr(c.Name(), "provider_error", "provider returned an error payload")
+	}
+	candidates := make([]DiscoveryCandidate, 0, maxDiscoveryCandidates)
+	for _, item := range payload.Matches {
+		if err := appendCandidate(&candidates, DiscoveryCandidate{Identifier: item.Symbol, Symbol: item.Symbol, Name: item.Name, Description: item.Name, Type: item.Type, Region: item.Region, Currency: item.Currency}); err != nil {
+			return nil, providerErr(c.Name(), "malformed_json", "provider search candidate was malformed")
+		}
+	}
+	return candidates, nil
+}
+
 func (c *AlphaVantageClient) FX(context.Context, FXRequest) (domain.FXRate, error) {
 	return domain.FXRate{}, ErrUnsupportedOperation
 }
