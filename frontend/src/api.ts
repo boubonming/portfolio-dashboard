@@ -422,6 +422,8 @@ function decodeMarketDiscovery(value: unknown, setup: MarketDataSetup): MarketDi
     const instrumentID = canonicalID(result.instrument_id, 'instrument_id', 'market-data discovery result')
     if (!instrumentIDs.has(instrumentID) || seen.has(instrumentID)) throw new APIError(200, 'Invalid market-data discovery response: foreign or duplicate instrument.')
     seen.add(instrumentID)
+    const setupInstrument = setup.instruments.find((instrument) => instrument.instrument_id === instrumentID)
+    if (!setupInstrument) throw new APIError(200, 'Invalid market-data discovery response: unknown instrument.')
     const status = stringField(result.status, 'status', 'market-data discovery result', 32) as MarketDiscoveryResult['status']
     if (!['committed', 'candidates', 'no_result', 'unavailable', 'error'].includes(status)) throw new APIError(200, 'Invalid market-data discovery response: status.')
     const attempted = uniqueStringArray(result.attempted_providers, 'attempted_providers', 'market-data discovery result', 8)
@@ -446,8 +448,18 @@ function decodeMarketDiscovery(value: unknown, setup: MarketDataSetup): MarketDi
       return { provider: candidateProvider, identifier: identifierValue, ...(symbol === undefined ? {} : { symbol }), ...(name === undefined ? {} : { name }), ...(description === undefined ? {} : { description }), ...(type === undefined ? {} : { type }), ...(region === undefined ? {} : { region }), ...(exchange === undefined ? {} : { exchange }), ...(currency === undefined ? {} : { currency }) }
     })
     const diagnostic = result.diagnostic === undefined ? undefined : stringField(result.diagnostic, 'diagnostic', 'market-data discovery result', 512)
-    if (status === 'committed' && (candidates.length !== 0 || provider !== undefined)) throw new APIError(200, 'Invalid market-data discovery response: committed result has candidates.')
-    if (status === 'candidates' && (candidates.length === 0 || provider === undefined)) throw new APIError(200, 'Invalid market-data discovery response: incomplete candidates.')
+    if (diagnostic === undefined) throw new APIError(200, 'Invalid market-data discovery response: missing diagnostic.')
+    if (setupInstrument.mappings.length !== 0) {
+      if (status !== 'committed' || attempted.length !== 0 || candidates.length !== 0 || provider !== undefined) throw new APIError(200, 'Invalid market-data discovery response: committed result has discovery data.')
+    } else if (status === 'committed') {
+      throw new APIError(200, 'Invalid market-data discovery response: uncommitted result is committed.')
+    }
+    if (status === 'candidates') {
+      if (candidates.length === 0 || provider === undefined || !candidates.some((candidate) => candidate.provider === provider)) throw new APIError(200, 'Invalid market-data discovery response: contradictory candidates.')
+    } else if (candidates.length !== 0 || provider !== undefined) {
+      throw new APIError(200, 'Invalid market-data discovery response: status has candidates.')
+    }
+    if (setupInstrument.mappings.length === 0 && attempted.length === 0) throw new APIError(200, 'Invalid market-data discovery response: missing attempted providers.')
     return { instrument_id: instrumentID, status, attempted_providers: attempted, candidates, ...(provider === undefined ? {} : { provider }), ...(diagnostic === undefined ? {} : { diagnostic }) }
   })
   if (seen.size !== instrumentIDs.size) throw new APIError(200, 'Invalid market-data discovery response: incomplete instrument set.')

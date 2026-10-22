@@ -69,7 +69,9 @@ func requestJSON(ctx context.Context, client HTTPDoer, provider Provider, reques
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, providerErr(provider, "timeout", "request timed out")
 		}
-		return nil, providerErr(provider, "transport", err.Error())
+		// Transport errors can contain the request URL, including credential
+		// query parameters. Never expose the underlying error at this boundary.
+		return nil, providerErr(provider, "transport", "provider request failed")
 	}
 	defer response.Body.Close()
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxProviderBody+1))
@@ -172,9 +174,87 @@ func parseProviderTimestamp(provider Provider, timestamp time.Time, now time.Tim
 }
 
 func decodeObject(body []byte, provider Provider, target any) error {
+	if err := decodeStrictObject(body, provider, target); err != nil {
+		return err
+	}
+	return nil
+}
+
+func decodeStrictObject(body []byte, provider Provider, target any) error {
+	if err := validateUniqueJSONKeys(body); err != nil {
+		return providerErr(provider, "malformed_json", "provider JSON schema was invalid")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return providerErr(provider, "malformed_json", "provider JSON schema was invalid")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return providerErr(provider, "malformed_json", "provider JSON schema had trailing data")
+	}
+	return nil
+}
+
+// validateUniqueJSONKeys walks the complete JSON value before decoding it into
+// Go structs. encoding/json otherwise keeps the last value for duplicate keys,
+// which would allow an upstream provider to smuggle contradictory metadata.
+func validateUniqueJSONKeys(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	var walk func() error
+	walk = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch delimiter := token.(type) {
+		case json.Delim:
+			switch delimiter {
+			case '{':
+				keys := make(map[string]struct{})
+				for decoder.More() {
+					keyToken, err := decoder.Token()
+					if err != nil {
+						return err
+					}
+					key, ok := keyToken.(string)
+					if !ok {
+						return errors.New("object key is not a string")
+					}
+					if _, exists := keys[key]; exists {
+						return errors.New("duplicate object key")
+					}
+					keys[key] = struct{}{}
+					if err := walk(); err != nil {
+						return err
+					}
+				}
+				closing, err := decoder.Token()
+				if err != nil || closing != json.Delim('}') {
+					return errors.New("object was not closed")
+				}
+			case '[':
+				for decoder.More() {
+					if err := walk(); err != nil {
+						return err
+					}
+				}
+				closing, err := decoder.Token()
+				if err != nil || closing != json.Delim(']') {
+					return errors.New("array was not closed")
+				}
+			default:
+				return errors.New("unexpected JSON delimiter")
+			}
+		}
+		return nil
+	}
+	if err := walk(); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return errors.New("trailing JSON")
 	}
 	return nil
 }

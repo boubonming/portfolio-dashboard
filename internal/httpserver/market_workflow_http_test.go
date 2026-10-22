@@ -119,6 +119,16 @@ func (p *fakeMarketProvider) FX(_ context.Context, request marketdata.FXRequest)
 	return domain.FXRate{ID: "fake-fx-" + request.BaseCurrency + "-" + request.QuoteCurrency, BaseCurrency: request.BaseCurrency, QuoteCurrency: request.QuoteCurrency, Rate: "1.5", Source: p.provider.String(), MarketAt: now, FetchedAt: now, Basis: "fake fixture", Provenance: "test provider"}, nil
 }
 
+type countingDiscoveryProvider struct {
+	fakeMarketProvider
+	searchCalls int
+}
+
+func (p *countingDiscoveryProvider) Search(context.Context, string) ([]marketdata.DiscoveryCandidate, error) {
+	p.searchCalls++
+	return []marketdata.DiscoveryCandidate{{Identifier: "fixture-id", Symbol: "HTTP", Name: "Fixture"}}, nil
+}
+
 func TestMarketWorkflowHTTPAuthETagAndAtomicBatch(t *testing.T) {
 	handler, database, cookie, csrf := marketHTTPFixture(t)
 	defer database.Close()
@@ -162,6 +172,36 @@ func TestMarketWorkflowHTTPAuthETagAndAtomicBatch(t *testing.T) {
 	var count int
 	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM instrument_provider_mappings`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("mapping count=%d err=%v", count, err)
+	}
+}
+
+func TestMarketDiscoveryRejectsInvalidEmptyObjectContractBeforeProviderOrStoreWork(t *testing.T) {
+	coingecko := &countingDiscoveryProvider{fakeMarketProvider: fakeMarketProvider{provider: marketdata.ProviderCoinGecko}}
+	finnhub := &countingDiscoveryProvider{fakeMarketProvider: fakeMarketProvider{provider: marketdata.ProviderFinnhub}}
+	handler, database, cookie, csrf := marketHTTPFixtureWithClients(t, map[marketdata.Provider]marketdata.ProviderClient{
+		marketdata.ProviderCoinGecko: coingecko,
+		marketdata.ProviderFinnhub:   finnhub,
+	})
+	defer database.Close()
+	var before int
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM instrument_provider_mappings`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{"", `null`, `[]`, `1`, `{"unexpected":1}`, `{} {}`, `{"unexpected":1,"unexpected":2}`} {
+		response := marketRequest(handler, cookie, csrf, http.MethodPost, "/api/v1/portfolios/portfolio-market-http/market-data/discover", body)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("body %q status=%d response=%s", body, response.Code, response.Body.String())
+		}
+		var after int
+		if err := database.DB.QueryRow(`SELECT COUNT(*) FROM instrument_provider_mappings`).Scan(&after); err != nil {
+			t.Fatal(err)
+		}
+		if after != before {
+			t.Fatalf("invalid body %q changed mapping count from %d to %d", body, before, after)
+		}
+	}
+	if coingecko.searchCalls != 0 || finnhub.searchCalls != 0 {
+		t.Fatalf("invalid bodies reached providers: coingecko=%d finnhub=%d", coingecko.searchCalls, finnhub.searchCalls)
 	}
 }
 

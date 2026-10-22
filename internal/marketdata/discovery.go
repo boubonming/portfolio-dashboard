@@ -3,9 +3,7 @@ package marketdata
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -40,15 +38,7 @@ func searchRequest(ctx context.Context, client HTTPDoer, provider Provider, endp
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return providerErr(provider, "malformed_json", "provider search response was not an object")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	if err := decoder.Decode(target); err != nil {
-		return providerErr(provider, "malformed_json", "provider search response was malformed")
-	}
-	var extra any
-	if trailingErr := decoder.Decode(&extra); trailingErr != io.EOF {
-		return providerErr(provider, "malformed_json", "provider search response had trailing data")
-	}
-	return nil
+	return decodeStrictObject(body, provider, target)
 }
 
 func boundedText(value, field string, required bool) (string, error) {
@@ -76,12 +66,13 @@ func appendCandidate(candidates *[]DiscoveryCandidate, candidate DiscoveryCandid
 	}
 	for _, existing := range *candidates {
 		if strings.EqualFold(existing.Identifier, candidate.Identifier) {
-			return nil
+			return errors.New("duplicate candidate identifier")
 		}
 	}
-	if len(*candidates) < maxDiscoveryCandidates {
-		*candidates = append(*candidates, candidate)
+	if len(*candidates) >= maxDiscoveryCandidates {
+		return errors.New("too many provider candidates")
 	}
+	*candidates = append(*candidates, candidate)
 	return nil
 }
 

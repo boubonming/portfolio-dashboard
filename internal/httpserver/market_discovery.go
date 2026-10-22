@@ -9,11 +9,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 	"github.com/boubonming/portfolio-dashboard/internal/marketdata"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 )
+
+const marketDiscoveryTotalTimeout = 10 * time.Second
 
 func (h *marketWorkflowEndpoint) discover(w http.ResponseWriter, r *http.Request, portfolioID string) {
 	body, err := readJSONBody(w, r, 8<<10)
@@ -21,12 +24,15 @@ func (h *marketWorkflowEndpoint) discover(w http.ResponseWriter, r *http.Request
 		err = errors.New("duplicate JSON key")
 	}
 	if err == nil {
-		var request map[string]json.RawMessage
+		trimmed := bytes.TrimSpace(body)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			err = errors.New("discovery request must be an object")
+		}
+		var request struct{}
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.DisallowUnknownFields()
-		err = decoder.Decode(&request)
-		if err == nil && request == nil {
-			err = errors.New("discovery request must be an object")
+		if err == nil {
+			err = decoder.Decode(&request)
 		}
 		if err == nil {
 			var extra any
@@ -53,6 +59,8 @@ func (h *marketWorkflowEndpoint) discover(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	discoveryContext, cancel := context.WithTimeout(r.Context(), marketDiscoveryTotalTimeout)
+	defer cancel()
 	response := domain.MarketDiscoveryResponse{PortfolioID: portfolioID, ETag: setup.ETag, Results: make([]domain.MarketDiscoveryResult, 0, len(setup.Instruments))}
 	cache := make(map[string]discoveryLookup)
 	for _, instrument := range setup.Instruments {
@@ -66,10 +74,16 @@ func (h *marketWorkflowEndpoint) discover(w http.ResponseWriter, r *http.Request
 		providers := discoveryProviders(instrument.Currency)
 		for _, provider := range providers {
 			result.AttemptedProviders = append(result.AttemptedProviders, provider.String())
+			if discoveryContext.Err() != nil {
+				if result.Diagnostic == "" {
+					result.Diagnostic = discoveryDiagnostic(provider, contextDeadlineError{})
+				}
+				continue
+			}
 			key := provider.String() + "\x00" + strings.ToLower(strings.TrimSpace(instrument.Symbol))
 			lookup, ok := cache[key]
 			if !ok {
-				lookup = h.lookupDiscovery(r.Context(), provider, instrument.Symbol)
+				lookup = h.lookupDiscovery(discoveryContext, provider, instrument.Symbol)
 				cache[key] = lookup
 			}
 			if lookup.err == nil {
@@ -117,22 +131,35 @@ func discoveryProviders(currency string) []marketdata.Provider {
 }
 
 func (h *marketWorkflowEndpoint) lookupDiscovery(ctx context.Context, provider marketdata.Provider, symbol string) discoveryLookup {
+	if ctx.Err() != nil {
+		return discoveryLookup{err: contextDeadlineError{}}
+	}
 	client, ok := h.clients[provider].(marketdata.DiscoveryClient)
 	if !ok || client == nil {
 		return discoveryLookup{err: fmt.Errorf("%s provider is not configured or unavailable", provider)}
 	}
 	candidates, err := client.Search(ctx, strings.TrimSpace(symbol))
 	if err != nil {
+		if ctx.Err() != nil {
+			return discoveryLookup{err: contextDeadlineError{}}
+		}
 		return discoveryLookup{err: err}
 	}
 	return discoveryLookup{candidates: candidates}
 }
+
+type contextDeadlineError struct{}
+
+func (contextDeadlineError) Error() string { return "discovery deadline exceeded" }
 
 func discoveryCandidateView(provider marketdata.Provider, candidate marketdata.DiscoveryCandidate) domain.MarketDiscoveryCandidate {
 	return domain.MarketDiscoveryCandidate{Provider: provider.String(), Identifier: candidate.Identifier, Symbol: candidate.Symbol, Name: candidate.Name, Description: candidate.Description, Type: candidate.Type, Region: candidate.Region, Exchange: candidate.Exchange, Currency: candidate.Currency}
 }
 
 func discoveryDiagnostic(provider marketdata.Provider, err error) string {
+	if _, ok := err.(contextDeadlineError); ok {
+		return fmt.Sprintf("%s search timed out; no suggestion was selected. Enter the identifier manually.", provider)
+	}
 	var providerError *marketdata.ProviderError
 	if errors.As(err, &providerError) {
 		switch providerError.Classification {

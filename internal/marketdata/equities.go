@@ -52,6 +52,9 @@ func (c *FinnhubClient) Search(ctx context.Context, query string) ([]DiscoveryCa
 	if err := searchRequest(ctx, c.http, c.Name(), c.baseURL+"/search", url.Values{"symbol": {query}, "token": {c.apiKey}}, &payload); err != nil {
 		return nil, err
 	}
+	if len(payload.Result) > maxDiscoveryCandidates {
+		return nil, providerErr(c.Name(), "malformed_json", "provider returned too many search candidates")
+	}
 	candidates := make([]DiscoveryCandidate, 0, maxDiscoveryCandidates)
 	for _, item := range payload.Result {
 		identifier := item.Symbol
@@ -139,11 +142,15 @@ func (c *AlphaVantageClient) Search(ctx context.Context, query string) ([]Discov
 	}
 	var payload struct {
 		Matches []struct {
-			Symbol   string `json:"1. symbol"`
-			Name     string `json:"2. name"`
-			Type     string `json:"3. type"`
-			Region   string `json:"4. region"`
-			Currency string `json:"8. currency"`
+			Symbol      string `json:"1. symbol"`
+			Name        string `json:"2. name"`
+			Type        string `json:"3. type"`
+			Region      string `json:"4. region"`
+			MarketOpen  string `json:"5. marketOpen"`
+			MarketClose string `json:"6. marketClose"`
+			Timezone    string `json:"7. timezone"`
+			Currency    string `json:"8. currency"`
+			MatchScore  string `json:"9. matchScore"`
 		} `json:"bestMatches"`
 		Note        string `json:"Note"`
 		Information string `json:"Information"`
@@ -157,6 +164,9 @@ func (c *AlphaVantageClient) Search(ctx context.Context, query string) ([]Discov
 	}
 	if payload.Error != "" {
 		return nil, providerErr(c.Name(), "provider_error", "provider returned an error payload")
+	}
+	if len(payload.Matches) > maxDiscoveryCandidates {
+		return nil, providerErr(c.Name(), "malformed_json", "provider returned too many search candidates")
 	}
 	candidates := make([]DiscoveryCandidate, 0, maxDiscoveryCandidates)
 	for _, item := range payload.Matches {
