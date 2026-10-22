@@ -244,7 +244,8 @@ latest timestamp, the mapping is reported as explicitly ambiguous and the
 instrument is not quoted until the mapping is resolved; provider ordering is
 never used as a tie-breaker.
 
-At process start, credentials are read only from `FINNHUB_API_KEY`,
+The authenticated browser setup also exposes `POST /api/v1/portfolios/{portfolioId}/market-data/discover`. It contacts configured CoinGecko `/api/v3/search`, Finnhub `/api/v1/search`, or Alpha Vantage `SYMBOL_SEARCH` endpoints with only the holding symbol/search query. Returned identifiers and metadata are bounded, unverified candidates: owners must choose or edit an exact listing and explicitly confirm the full batch before any mapping is saved. Discovery is setup- and ETag-bound, performs no mapping or audit writes, and never sends provider credentials to the browser or portfolio/lot data to provider search requests; provider authentication stays server-side.
+
 `ALPHA_VANTAGE_API_KEY`, and `OPEN_EXCHANGE_RATES_APP_ID`. CoinGecko uses its
 public free endpoint in this slice. Credentials are not persisted, printed,
 included in error messages, audit payloads, or frontend settings. Optional

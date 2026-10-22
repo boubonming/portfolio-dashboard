@@ -28,6 +28,37 @@ func NewCoinGecko(baseURL string) *CoinGeckoClient {
 	return NewCoinGeckoClient(ClientOptions{BaseURL: baseURL})
 }
 func (c *CoinGeckoClient) Name() Provider { return ProviderCoinGecko }
+
+func (c *CoinGeckoClient) Search(ctx context.Context, query string) ([]DiscoveryCandidate, error) {
+	query, err := validateSearchQuery(query)
+	if err != nil {
+		return nil, providerErr(c.Name(), "invalid_request", "search query is invalid")
+	}
+	var payload struct {
+		Coins []struct {
+			ID            string          `json:"id"`
+			Symbol        string          `json:"symbol"`
+			Name          string          `json:"name"`
+			MarketCapRank json.RawMessage `json:"market_cap_rank"`
+			Thumb         string          `json:"thumb"`
+			Large         string          `json:"large"`
+		} `json:"coins"`
+	}
+	if err := searchRequest(ctx, c.http, c.Name(), c.baseURL+"/api/v3/search", url.Values{"query": {query}}, &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Coins) > maxDiscoveryCandidates {
+		return nil, providerErr(c.Name(), "malformed_json", "provider returned too many search candidates")
+	}
+	candidates := make([]DiscoveryCandidate, 0, maxDiscoveryCandidates)
+	for _, item := range payload.Coins {
+		if err := appendCandidate(&candidates, DiscoveryCandidate{Identifier: item.ID, Symbol: item.Symbol, Name: item.Name}); err != nil {
+			return nil, providerErr(c.Name(), "malformed_json", "provider search candidate was malformed")
+		}
+	}
+	return candidates, nil
+}
+
 func (c *CoinGeckoClient) FX(context.Context, FXRequest) (domain.FXRate, error) {
 	return domain.FXRate{}, ErrUnsupportedOperation
 }

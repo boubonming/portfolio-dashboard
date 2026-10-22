@@ -73,6 +73,13 @@ func (h *marketWorkflowEndpoint) serveHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	switch parts[5] {
+	case "discover":
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+			return
+		}
+		h.discover(w, r, portfolioID)
 	case "mappings":
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)

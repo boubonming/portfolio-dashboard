@@ -123,6 +123,9 @@ export type MarketRefreshResult = {
 
 export type MappingBatchOutcome = { instrument_id: string; status: string; mapping?: { id: string; instrument_id: string; provider: string; provider_symbol: string; quote_currency: string; active_from: string; provenance: string; created_at: string }; error?: string }
 export type MappingBatchResult = { status: string; etag: string; outcomes: MappingBatchOutcome[] }
+export type MarketDiscoveryCandidate = { provider: string; identifier: string; symbol?: string; name?: string; description?: string; type?: string; region?: string; exchange?: string; currency?: string }
+export type MarketDiscoveryResult = { instrument_id: string; status: 'committed' | 'candidates' | 'no_result' | 'unavailable' | 'error'; provider?: string; attempted_providers: string[]; candidates: MarketDiscoveryCandidate[]; diagnostic?: string }
+export type MarketDiscoveryResponse = { portfolio_id: string; etag: string; results: MarketDiscoveryResult[] }
 
 type ObjectValue = Record<string, unknown>
 
@@ -401,6 +404,75 @@ function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDat
 export async function getMarketDataSetup(portfolioID: string, signal?: AbortSignal): Promise<MarketDataSetup> {
   const result = decodeMarketSetup(await jsonResponse<unknown>(await apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioID)}/market-data`, { signal })))
   if (result.portfolio_id !== portfolioID) throw new APIError(200, 'Invalid market-data setup response: stale portfolio scope.')
+  return result
+}
+
+function decodeMarketDiscovery(value: unknown, setup: MarketDataSetup): MarketDiscoveryResponse {
+  const body = objectResponse(value, 'market-data discovery')
+  exactKeys(body, ['portfolio_id', 'etag', 'results'], [], 'market-data discovery')
+  const portfolioID = canonicalID(body.portfolio_id, 'portfolio_id', 'market-data discovery')
+  const etag = stringField(body.etag, 'etag', 'market-data discovery', 256)
+  if (portfolioID !== setup.portfolio_id || etag !== setup.etag) throw new APIError(200, 'Invalid market-data discovery response: stale setup scope.')
+  if (!Array.isArray(body.results) || body.results.length !== setup.instruments.length) throw new APIError(200, 'Invalid market-data discovery response: result set.')
+  const instrumentIDs = new Set(setup.instruments.map((instrument) => instrument.instrument_id))
+  const seen = new Set<string>()
+  const results = body.results.map((raw, index) => {
+    const result = objectResponse(raw, `market-data discovery result ${index}`)
+    exactKeys(result, ['instrument_id', 'status', 'attempted_providers', 'candidates'], ['provider', 'diagnostic'], `market-data discovery result ${index}`)
+    const instrumentID = canonicalID(result.instrument_id, 'instrument_id', 'market-data discovery result')
+    if (!instrumentIDs.has(instrumentID) || seen.has(instrumentID)) throw new APIError(200, 'Invalid market-data discovery response: foreign or duplicate instrument.')
+    seen.add(instrumentID)
+    const setupInstrument = setup.instruments.find((instrument) => instrument.instrument_id === instrumentID)
+    if (!setupInstrument) throw new APIError(200, 'Invalid market-data discovery response: unknown instrument.')
+    const status = stringField(result.status, 'status', 'market-data discovery result', 32) as MarketDiscoveryResult['status']
+    if (!['committed', 'candidates', 'no_result', 'unavailable', 'error'].includes(status)) throw new APIError(200, 'Invalid market-data discovery response: status.')
+    const attempted = uniqueStringArray(result.attempted_providers, 'attempted_providers', 'market-data discovery result', 8)
+    const knownProviders = new Set(setup.providers.map((provider) => provider.name))
+    if (attempted.some((provider) => !knownProviders.has(provider))) throw new APIError(200, 'Invalid market-data discovery response: unknown provider.')
+    const provider = result.provider === undefined ? undefined : stringField(result.provider, 'provider', 'market-data discovery result', 64)
+    if (provider !== undefined && !attempted.includes(provider)) throw new APIError(200, 'Invalid market-data discovery response: contradictory provider.')
+    if (!Array.isArray(result.candidates) || result.candidates.length > 8) throw new APIError(200, 'Invalid market-data discovery response: candidates.')
+    const candidateIDs = new Set<string>()
+    const candidates = result.candidates.map((rawCandidate, candidateIndex) => {
+      const candidate = objectResponse(rawCandidate, `market-data discovery candidate ${index}.${candidateIndex}`)
+      exactKeys(candidate, ['provider', 'identifier'], ['symbol', 'name', 'description', 'type', 'region', 'exchange', 'currency'], `market-data discovery candidate ${index}.${candidateIndex}`)
+      const candidateProvider = stringField(candidate.provider, 'provider', 'market-data discovery candidate', 64)
+      if (!attempted.includes(candidateProvider)) throw new APIError(200, 'Invalid market-data discovery response: candidate provider was not attempted.')
+      const identifierValue = identifier(candidate.identifier, 'identifier', 'market-data discovery candidate')
+      const candidateKey = `${candidateProvider}\u0000${identifierValue}`
+      if (candidateIDs.has(candidateKey)) throw new APIError(200, 'Invalid market-data discovery response: duplicate candidate.')
+      candidateIDs.add(candidateKey)
+      const text = (field: string) => candidate[field] === undefined ? undefined : stringField(candidate[field], field, 'market-data discovery candidate')
+      const currency = candidate.currency === undefined ? undefined : currencyCode(candidate.currency, 'currency', 'market-data discovery candidate')
+      const symbol = text('symbol'); const name = text('name'); const description = text('description'); const type = text('type'); const region = text('region'); const exchange = text('exchange')
+      return { provider: candidateProvider, identifier: identifierValue, ...(symbol === undefined ? {} : { symbol }), ...(name === undefined ? {} : { name }), ...(description === undefined ? {} : { description }), ...(type === undefined ? {} : { type }), ...(region === undefined ? {} : { region }), ...(exchange === undefined ? {} : { exchange }), ...(currency === undefined ? {} : { currency }) }
+    })
+    const diagnostic = result.diagnostic === undefined ? undefined : stringField(result.diagnostic, 'diagnostic', 'market-data discovery result', 512)
+    if (diagnostic === undefined) throw new APIError(200, 'Invalid market-data discovery response: missing diagnostic.')
+    if (setupInstrument.mappings.length !== 0) {
+      if (status !== 'committed' || attempted.length !== 0 || candidates.length !== 0 || provider !== undefined) throw new APIError(200, 'Invalid market-data discovery response: committed result has discovery data.')
+    } else if (status === 'committed') {
+      throw new APIError(200, 'Invalid market-data discovery response: uncommitted result is committed.')
+    }
+    if (status === 'candidates') {
+      if (candidates.length === 0 || provider === undefined || !candidates.some((candidate) => candidate.provider === provider)) throw new APIError(200, 'Invalid market-data discovery response: contradictory candidates.')
+    } else if (candidates.length !== 0 || provider !== undefined) {
+      throw new APIError(200, 'Invalid market-data discovery response: status has candidates.')
+    }
+    if (setupInstrument.mappings.length === 0 && attempted.length === 0) throw new APIError(200, 'Invalid market-data discovery response: missing attempted providers.')
+    return { instrument_id: instrumentID, status, attempted_providers: attempted, candidates, ...(provider === undefined ? {} : { provider }), ...(diagnostic === undefined ? {} : { diagnostic }) }
+  })
+  if (seen.size !== instrumentIDs.size) throw new APIError(200, 'Invalid market-data discovery response: incomplete instrument set.')
+  return { portfolio_id: portfolioID, etag, results }
+}
+
+export async function discoverMarketData(portfolioID: string, etag: string, csrfToken?: string, signal?: AbortSignal, setup?: MarketDataSetup): Promise<MarketDiscoveryResponse> {
+  if (!setup) throw new APIError(200, 'Market-data setup is required for discovery validation.')
+  const response = await apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioID)}/market-data/discover`, {
+    method: 'POST', csrfToken, signal, headers: { 'Content-Type': 'application/json', 'If-Match': etag }, body: '{}',
+  })
+  const result = decodeMarketDiscovery(await jsonResponse<unknown>(response), setup)
+  if (result.portfolio_id !== portfolioID || result.etag !== etag) throw new APIError(200, 'Invalid market-data discovery response: stale portfolio scope.')
   return result
 }
 
