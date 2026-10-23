@@ -248,6 +248,8 @@ func safeActorCategory(actor string) string {
 		return "hermes"
 	case actor == "browser" || strings.HasPrefix(actor, "browser-"):
 		return "browser"
+	case actor == "machine" || strings.HasPrefix(actor, "machine-"):
+		return "machine"
 	default:
 		return "unknown"
 	}
@@ -270,6 +272,8 @@ func activitySummary(action string) (string, string, string) {
 		return "market", "FX rate recorded", "An FX rate observation was recorded."
 	case "market.mapping.added":
 		return "market", "Provider mapping added", "A provider instrument mapping was recorded."
+	case "market.mapping.batch_saved":
+		return "market", "Provider mapping saved", "A provider instrument mapping was saved."
 	case "market.refresh.completed":
 		return "market", "Market refresh completed", "A market-data refresh completed."
 	case "portfolio.snapshot.created":
