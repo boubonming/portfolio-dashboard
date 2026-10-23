@@ -510,6 +510,46 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByText('Break-even')).toBeNull()
   })
 
+  it('renders Unavailable for stale snapshots, no snapshots, and every affected freshness state', async () => {
+    let response: PortfolioOverview = {
+      ...pnlOverview,
+      snapshot: { ...pnlOverview.snapshot, state: 'stale', complete: true },
+    }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => response } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(screen.getAllByText('Unavailable')).toHaveLength(4)
+    expect(screen.queryByText('Gain')).toBeNull()
+    expect(screen.queryByText('Loss')).toBeNull()
+    expect(screen.queryByText('Break-even')).toBeNull()
+
+    response = {
+      ...pnlOverview,
+      snapshot: { state: 'no_snapshot', complete: false, subtotals: [] },
+    }
+    cleanup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(screen.getAllByText('Unavailable')).toHaveLength(4)
+    expect(screen.queryByText('Gain')).toBeNull()
+    expect(screen.queryByText('Loss')).toBeNull()
+    expect(screen.queryByText('Break-even')).toBeNull()
+
+    for (const freshness of ['stale', 'missing', 'future', 'invalid'] as const) {
+      response = {
+        ...pnlOverview,
+        holdings: [{ ...pnlOverview.holdings[0], unrealised_pnl: '10', freshness: { status: freshness } }],
+      }
+      cleanup()
+      render(<App />)
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+      expect(screen.getByText('Unavailable').className).toContain('pnl-unavailable')
+      expect(screen.queryByText('Gain')).toBeNull()
+      expect(screen.queryByText('Loss')).toBeNull()
+      expect(screen.queryByText('Break-even')).toBeNull()
+    }
+  })
+
   it('keeps the latest currency selection when requests resolve out of order', async () => {
     let resolveMYR: ((response: Response) => void) | undefined
     let resolveUSD: ((response: Response) => void) | undefined

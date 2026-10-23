@@ -143,7 +143,10 @@ func usableSnapshotPnL(value domain.LotValuation, holdingCurrency string) bool {
 	cost, costErr := domain.ParseDecimal(*value.CostBasis)
 	market, marketErr := domain.ParseDecimal(value.MarketValue)
 	pnl, pnlErr := domain.ParseDecimal(*value.UnrealisedPnL)
-	return costErr == nil && marketErr == nil && pnlErr == nil && cost.Sign() >= 0 && market.Sign() >= 0
+	if costErr != nil || marketErr != nil || pnlErr != nil || cost.Sign() < 0 || market.Sign() < 0 {
+		return false
+	}
+	return market.Sub(cost).Rat().Cmp(pnl.Rat()) == 0
 }
 
 func normalizeReportingCurrency(value string) (string, error) {
