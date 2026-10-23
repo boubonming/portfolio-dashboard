@@ -527,9 +527,18 @@ paths:
   /api/v1/portfolios/{portfolioId}/market-data:
     get:
       summary: Read authenticated market-data setup
-      description: Returns human-readable active portfolio instruments, explicit current mappings, and provider readiness booleans. Provider secrets are never returned.
+      description: >-
+        Returns human-readable active portfolio instruments, explicit current
+        mappings, and provider readiness booleans. Browser callers use the
+        existing session cookie; the machine alternative requires the exact
+        configured principal and portfolio, a valid bearer, both runtime
+        portfolio-read and holdings-write flags, and the persisted same-
+        principal portfolio-read plus holdings-write grant. Provider secrets
+        are never returned.
       operationId: getMarketDataSetup
-      security: [{ sessionCookie: [] }]
+      security:
+        - sessionCookie: []
+        - machineBearer: []
       parameters:
         - { name: portfolioId, in: path, required: true, schema: { type: string } }
       responses:
@@ -537,7 +546,8 @@ paths:
           description: Market-data setup and optimistic-concurrency tag.
           headers: { ETag: { schema: { type: string } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' } }
           content: { application/json: { schema: { $ref: '#/components/schemas/MarketDataSetup' } } }
-        '401': { $ref: '#/components/responses/UnauthorizedCookie' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { description: Portfolio not found }
         '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
 
@@ -550,19 +560,26 @@ paths:
         becomes authoritative until the owner explicitly confirms and saves it.
         Provider credentials and portfolio details remain server-side; this
         operation performs no mapping, audit, Activity, or revision writes.
+        Browser callers use the existing session plus CSRF contract. The
+        machine alternative uses the exact configured principal and portfolio,
+        both runtime portfolio-read and holdings-write flags, and the
+        persisted same-principal portfolio-read plus holdings-write grant.
       operationId: discoverMarketData
-      security: [{ sessionCookie: [] }]
+      security:
+        - sessionCookie: []
+        - machineBearer: []
       parameters:
         - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
         - { name: If-Match, in: header, required: true, schema: { type: string } }
-        - { name: X-CSRF-Token, in: header, required: true, schema: { type: string } }
+        - { name: Origin, in: header, required: false, description: Required for browser callers as a same-origin Origin or Referer and omitted by machine callers., schema: { type: string, format: uri } }
+        - { name: X-CSRF-Token, in: header, required: false, description: Required and session-bound for browser callers; forbidden for machine callers., schema: { type: string } }
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, additionalProperties: false } } }
       responses:
         '200': { description: One result per active setup instrument, content: { application/json: { schema: { $ref: '#/components/schemas/MarketDiscoveryResponse' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/UnauthorizedCookie' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { description: Portfolio not found }
         '412': { description: Mapping setup changed; reload before discovery }
@@ -571,20 +588,29 @@ paths:
   /api/v1/portfolios/{portfolioId}/market-data/mappings:
     post:
       summary: Save exact provider mappings as one revisioned batch
-      description: Atomic append-only mapping submission. Exact provider identity is required; symbols are never guessed or silently reused.
+      description: >-
+        Atomic append-only mapping submission. Exact provider identity is
+        required; symbols are never guessed or silently reused. The machine
+        alternative requires the exact configured principal and portfolio, both
+        runtime portfolio-read and holdings-write flags, and the persisted
+        same-principal portfolio-read plus holdings-write grant. Machine calls
+        omit browser CSRF; session calls retain the existing CSRF contract.
       operationId: saveMarketMappings
-      security: [{ sessionCookie: [] }]
+      security:
+        - sessionCookie: []
+        - machineBearer: []
       parameters:
         - { name: portfolioId, in: path, required: true, schema: { type: string } }
         - { name: If-Match, in: header, required: true, schema: { type: string } }
-        - { name: X-CSRF-Token, in: header, required: true, schema: { type: string } }
+        - { name: Origin, in: header, required: false, description: Required for browser callers as a same-origin Origin or Referer and omitted by machine callers., schema: { type: string, format: uri } }
+        - { name: X-CSRF-Token, in: header, required: false, description: Required and session-bound for browser callers; forbidden for machine callers., schema: { type: string } }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/MappingBatchRequest' } } }
       responses:
         '200': { description: Complete batch save, content: { application/json: { schema: { $ref: '#/components/schemas/MappingBatchResult' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/UnauthorizedCookie' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '412': { description: Mapping setup changed; reload before saving }
         '405': { $ref: '#/components/responses/MethodNotAllowedPost' }
@@ -601,19 +627,26 @@ paths:
         Incomplete values remain explicit and are never presented as zero or a
         complete total. Provider errors and quote/FX missing, stale, invalid or
         future dependencies are returned as human-diagnosable classifications.
+        The machine alternative requires the exact configured principal and
+        portfolio, both runtime portfolio-read and holdings-write flags, and
+        the persisted same-principal portfolio-read plus holdings-write grant;
+        its idempotency and audit/activity records retain the machine actor.
       operationId: refreshMarketData
-      security: [{ sessionCookie: [] }]
+      security:
+        - sessionCookie: []
+        - machineBearer: []
       parameters:
         - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
         - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' } }
-        - { name: X-CSRF-Token, in: header, required: true, schema: { type: string } }
+        - { name: Origin, in: header, required: false, description: Required for browser callers as a same-origin Origin or Referer and omitted by machine callers., schema: { type: string, format: uri } }
+        - { name: X-CSRF-Token, in: header, required: false, description: Required and session-bound for browser callers; forbidden for machine callers., schema: { type: string } }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/MarketRefreshRequest' } } }
       responses:
         '200': { description: Provider status and complete/incomplete immutable snapshot status, content: { application/json: { schema: { $ref: '#/components/schemas/MarketRefreshResult' } } } }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/UnauthorizedCookie' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '405': { $ref: '#/components/responses/MethodNotAllowedPost' }
         '409': { description: 'Same key with a different fingerprint, or an already-running receipt; no provider or snapshot success is claimed.' }
@@ -635,9 +668,11 @@ components:
         Opaque machine credential for the fixed Hermes principal. The token is
         injected into the Hermes environment, compared in constant time, and
         never stored in SQLite, returned, logged, placed in a URL, or exposed
-        to browser code. Holding mutations require the separately configured
-        holdings:write permission in addition to portfolio:read. It is disabled
-        by default and is not implied by reviews:write.
+        to browser code. Holding mutations and the market-data setup,
+        discovery, mapping, and refresh operations require the separately
+        configured portfolio:read plus holdings:write runtime scope and the
+        persisted same-principal, same-portfolio grants. It is disabled by
+        default and is not implied by reviews:write.
   headers:
     NoStore:
       description: Private responses are never stored by shared or browser caches.

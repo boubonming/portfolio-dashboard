@@ -127,6 +127,13 @@ func validateMappingBatch(items []domain.MappingBatchItem) error {
 }
 
 func (s *Store) AddProviderMappingsBatch(ctx context.Context, portfolioID, expectedETag string, items []domain.MappingBatchItem) (domain.MappingBatchResult, error) {
+	return s.AddProviderMappingsBatchAs(ctx, portfolioID, expectedETag, items, MutationActor{Category: "administrative", ID: "administrative-mapping"})
+}
+
+// AddProviderMappingsBatchAs preserves the exact actor for machine-authorized
+// mapping writes while retaining the legacy administrative actor for existing
+// callers of AddProviderMappingsBatch.
+func (s *Store) AddProviderMappingsBatchAs(ctx context.Context, portfolioID, expectedETag string, items []domain.MappingBatchItem, actor MutationActor) (domain.MappingBatchResult, error) {
 	if err := validateMappingBatch(items); err != nil {
 		return domain.MappingBatchResult{}, err
 	}
@@ -201,14 +208,14 @@ func (s *Store) AddProviderMappingsBatch(ctx context.Context, portfolioID, expec
 		}
 		inserted, _ := insert.RowsAffected()
 		if inserted > 0 {
-			if _, execErr = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, deterministicID("audit", "mapping", mapping.ID), "administrative-mapping", "market.mapping.batch_saved", "provider_mapping", mapping.ID, payload, now); execErr != nil {
+			if _, execErr = tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, deterministicID("audit", "mapping", mapping.ID), actor.ID, "market.mapping.batch_saved", "provider_mapping", mapping.ID, payload, now); execErr != nil {
 				return domain.MappingBatchResult{}, execErr
 			}
 			portfolioIDs, execErr := portfoliosForInstrument(ctx, tx, mapping.InstrumentID)
 			if execErr != nil {
 				return domain.MappingBatchResult{}, execErr
 			}
-			if execErr = s.recordActivityForPortfolios(ctx, tx, portfolioIDs, "administrative", "market.mapping.batch_saved", "provider_mapping", mapping.ID, now, deterministicID("audit", "mapping", mapping.ID)); execErr != nil {
+			if execErr = s.recordActivityForPortfolios(ctx, tx, portfolioIDs, actor.Category, "market.mapping.batch_saved", "provider_mapping", mapping.ID, now, deterministicID("audit", "mapping", mapping.ID)); execErr != nil {
 				return domain.MappingBatchResult{}, execErr
 			}
 		}

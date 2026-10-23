@@ -114,7 +114,7 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator, config
 		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings/{holdingId}", mutations)
 		overview := noStorePrivate(portfolioOverviewRoutes(database, authenticator))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/overview", overview)
-		market := noStorePrivate(authenticator.RequireAuth(portfolioCSRF(authenticator, newMarketWorkflowEndpoint(database, configuration, authenticator, clients))))
+		market := noStorePrivate(marketWorkflowRoutes(database, authenticator, newMarketWorkflowEndpoint(database, configuration, authenticator, clients)))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/market-data", market)
 		mux.Handle("/api/v1/portfolios/{portfolioId}/market-data/", market)
 	}
