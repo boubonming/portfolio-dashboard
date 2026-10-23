@@ -32,6 +32,16 @@ const decimalSortOverview: PortfolioOverview = {
   ],
 }
 
+const pnlOverview: PortfolioOverview = {
+  ...completeOverview,
+  holdings: [
+    { ...completeOverview.holdings[0], lot_id: 'lot-gain', symbol: 'GAIN', unrealised_pnl: '10.1' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-loss', symbol: 'LOSS', unrealised_pnl: '-10' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-zero', symbol: 'ZERO', unrealised_pnl: '0.00' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-unavailable', symbol: 'UNAVAILABLE', unrealised_pnl: undefined, freshness: { status: 'missing' } },
+  ],
+}
+
 const allocationOverview: PortfolioOverview = {
   ...completeOverview,
   allocation: {
@@ -466,6 +476,78 @@ describe('Portfolio Dashboard', () => {
     fireEvent.click(screen.getByRole('button', { name: /sort by reporting value/i }))
     expect(reportingValueHeader.getAttribute('aria-sort')).toBe('descending')
     expect(rowSymbols()).toEqual(['TWO', 'TEN', 'TEN02', 'TEN1'])
+  })
+
+  it('renders accessible P/L status and sorts signed exact decimals with unavailable values withheld', async () => {
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => pnlOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(screen.getByText('10.1 USD')).toBeTruthy()
+    expect(screen.getByText('Gain').className).toContain('subline')
+    expect(screen.getByText('-10 USD')).toBeTruthy()
+    expect(screen.getByText('Loss').className).toContain('subline')
+    expect(screen.getByText('0.00 USD')).toBeTruthy()
+    expect(screen.getByText('Break-even').className).toContain('subline')
+    expect(screen.getByText('Unavailable').className).toContain('pnl-unavailable')
+    expect(screen.queryByText('Unavailable')?.className).not.toMatch(/pnl-(gain|loss|break-even)/)
+
+    const holdingsTable = () => screen.getByRole('table', { name: 'Holdings' })
+    const rowSymbols = () => within(holdingsTable()).getAllByRole('row').slice(1).map((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent)
+    fireEvent.click(screen.getByRole('button', { name: /sort by unrealised p\/l/i }))
+    expect(rowSymbols()).toEqual(['UNAVAILABLE', 'LOSS', 'ZERO', 'GAIN'])
+    fireEvent.click(screen.getByRole('button', { name: /sort by unrealised p\/l/i }))
+    expect(rowSymbols()).toEqual(['GAIN', 'ZERO', 'LOSS', 'UNAVAILABLE'])
+  })
+
+  it('withholds P/L even when an incomplete response contains a candidate value', async () => {
+    const incomplete = { ...pnlOverview, snapshot: { ...pnlOverview.snapshot, state: 'incomplete' as const, complete: false } }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => incomplete } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(screen.getAllByText('Unavailable').length).toBe(4)
+    expect(screen.queryByText('Gain')).toBeNull()
+    expect(screen.queryByText('Loss')).toBeNull()
+    expect(screen.queryByText('Break-even')).toBeNull()
+  })
+
+  it('renders Unavailable for stale snapshots, no snapshots, and every affected freshness state', async () => {
+    let response: PortfolioOverview = {
+      ...pnlOverview,
+      snapshot: { ...pnlOverview.snapshot, state: 'stale', complete: true },
+    }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => response } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(screen.getAllByText('Unavailable')).toHaveLength(4)
+    expect(screen.queryByText('Gain')).toBeNull()
+    expect(screen.queryByText('Loss')).toBeNull()
+    expect(screen.queryByText('Break-even')).toBeNull()
+
+    response = {
+      ...pnlOverview,
+      snapshot: { state: 'no_snapshot', complete: false, subtotals: [] },
+    }
+    cleanup()
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(screen.getAllByText('Unavailable')).toHaveLength(4)
+    expect(screen.queryByText('Gain')).toBeNull()
+    expect(screen.queryByText('Loss')).toBeNull()
+    expect(screen.queryByText('Break-even')).toBeNull()
+
+    for (const freshness of ['stale', 'missing', 'future', 'invalid'] as const) {
+      response = {
+        ...pnlOverview,
+        holdings: [{ ...pnlOverview.holdings[0], unrealised_pnl: '10', freshness: { status: freshness } }],
+      }
+      cleanup()
+      render(<App />)
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+      expect(screen.getByText('Unavailable').className).toContain('pnl-unavailable')
+      expect(screen.queryByText('Gain')).toBeNull()
+      expect(screen.queryByText('Loss')).toBeNull()
+      expect(screen.queryByText('Break-even')).toBeNull()
+    }
   })
 
   it('keeps the latest currency selection when requests resolve out of order', async () => {

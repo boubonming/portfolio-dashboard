@@ -104,6 +104,7 @@ func TestPortfolioOverviewAPIIsScopedAndKeepsDecimalsAsStrings(t *testing.T) {
 			Quantity       string  `json:"quantity"`
 			LatestPrice    *string `json:"latest_price"`
 			ReportingValue *string `json:"reporting_value"`
+			UnrealisedPnL  *string `json:"unrealised_pnl"`
 		} `json:"holdings"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
@@ -112,7 +113,7 @@ func TestPortfolioOverviewAPIIsScopedAndKeepsDecimalsAsStrings(t *testing.T) {
 	if body.ReportingCurrency != "MYR" || body.Snapshot.State != "complete" || body.Snapshot.ReportingTotal != "69.440625" {
 		t.Fatalf("body=%+v", body)
 	}
-	if len(body.Holdings) != 1 || body.Holdings[0].Quantity != "0.125" || body.Holdings[0].LatestPrice == nil || *body.Holdings[0].LatestPrice != "123.45" || body.Holdings[0].ReportingValue == nil || *body.Holdings[0].ReportingValue != "69.440625" {
+	if len(body.Holdings) != 1 || body.Holdings[0].Quantity != "0.125" || body.Holdings[0].LatestPrice == nil || *body.Holdings[0].LatestPrice != "123.45" || body.Holdings[0].ReportingValue == nil || *body.Holdings[0].ReportingValue != "69.440625" || body.Holdings[0].UnrealisedPnL == nil || *body.Holdings[0].UnrealisedPnL != "15.28125" {
 		t.Fatalf("holding=%+v", body.Holdings)
 	}
 	if !contains(response.Body.String(), `"description":"Fixture instrument"`) || contains(response.Body.String(), `"name":"FIX"`) {
@@ -193,6 +194,9 @@ func TestPortfolioOverviewAPINoSnapshotIsExplicit(t *testing.T) {
 	if overview.Allocation.State != "unavailable" || overview.Allocation.Coverage.TotalLots != 1 || overview.Allocation.Coverage.ValuedLots != 0 || overview.Allocation.Coverage.MissingDependencies != 0 || overview.Allocation.Coverage.StaleDependencies != 0 || overview.Allocation.Coverage.InvalidDependencies != 0 {
 		t.Fatalf("no snapshot allocation = %+v", overview.Allocation)
 	}
+	if len(overview.Holdings) != 1 || overview.Holdings[0].UnrealisedPnL != nil {
+		t.Fatalf("no snapshot unexpectedly exposed unrealised P/L: %+v", overview.Holdings)
+	}
 	var wire map[string]json.RawMessage
 	if err := json.Unmarshal(response.Body.Bytes(), &wire); err != nil {
 		t.Fatal(err)
@@ -206,6 +210,83 @@ func TestPortfolioOverviewAPINoSnapshotIsExplicit(t *testing.T) {
 	}
 	if _, present := allocationWire["by_source_currency"]; present {
 		t.Fatalf("no snapshot unexpectedly emitted by_source_currency: %s", response.Body.String())
+	}
+}
+
+func TestPortfolioOverviewAPIPreservesLotIdentityAndOmitsIncompletePnL(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
+	for _, lot := range []struct {
+		id, portfolio, quantity, costBasis string
+	}{
+		{id: "lot-api-same-symbol", portfolio: "portfolio-api", quantity: "0.25", costBasis: "0.50"},
+		{id: "lot-api-other", portfolio: "portfolio-other", quantity: "99", costBasis: "1"},
+	} {
+		if lot.portfolio == "portfolio-other" {
+			if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, lot.portfolio, "Other portfolio", "MYR", now, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, lot.portfolio, "instrument-api", now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,cost_basis,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, lot.id, lot.portfolio, "instrument-api", lot.quantity, lot.costBasis, "USD", now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	when := time.Now().UTC()
+	status, err := database.CreateSnapshot(context.Background(), store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "MYR", AsOf: when, MaxAge: 2 * time.Hour})
+	if err != nil || !status.Complete {
+		t.Fatalf("complete snapshot=%+v err=%v", status, err)
+	}
+	handler := authenticatedAPIHandler(t, database)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("complete status=%d body=%s", response.Code, response.Body.String())
+	}
+	var complete domain.PortfolioOverview
+	if err := json.Unmarshal(response.Body.Bytes(), &complete); err != nil {
+		t.Fatal(err)
+	}
+	if len(complete.Holdings) != 2 || complete.Snapshot.State != "complete" {
+		t.Fatalf("complete overview=%+v", complete)
+	}
+	pnlByLot := map[string]string{}
+	for _, holding := range complete.Holdings {
+		if holding.UnrealisedPnL == nil {
+			t.Fatalf("complete holding omitted P/L: %+v", holding)
+		}
+		pnlByLot[holding.LotID] = *holding.UnrealisedPnL
+	}
+	if pnlByLot["lot-api"] != "15.28125" || pnlByLot["lot-api-same-symbol"] != "30.3625" {
+		t.Fatalf("same-instrument lot P/L=%v", pnlByLot)
+	}
+	if _, leaked := pnlByLot["lot-api-other"]; leaked {
+		t.Fatalf("cross-portfolio lot leaked: %v", pnlByLot)
+	}
+
+	staleStatus, err := database.CreateSnapshot(context.Background(), store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "MYR", AsOf: when, MaxAge: time.Minute})
+	if err != nil || staleStatus.Complete {
+		t.Fatalf("incomplete snapshot=%+v err=%v", staleStatus, err)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("incomplete status=%d body=%s", response.Code, response.Body.String())
+	}
+	var incomplete domain.PortfolioOverview
+	if err := json.Unmarshal(response.Body.Bytes(), &incomplete); err != nil {
+		t.Fatal(err)
+	}
+	if incomplete.Snapshot.State != "incomplete" || incomplete.Snapshot.Complete {
+		t.Fatalf("incomplete overview snapshot=%+v", incomplete.Snapshot)
+	}
+	for _, holding := range incomplete.Holdings {
+		if holding.UnrealisedPnL != nil {
+			t.Fatalf("incomplete holding exposed P/L: %+v", holding)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -77,7 +78,7 @@ func TestPortfolioOverviewExposesDerivedCostBasisAndSourceUnitCost(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Holdings) != 1 || view.Holdings[0].UnitCost == nil || *view.Holdings[0].UnitCost != "5" || view.Holdings[0].CostBasis == nil || *view.Holdings[0].CostBasis != "10" {
+	if len(view.Holdings) != 1 || view.Holdings[0].UnitCost == nil || *view.Holdings[0].UnitCost != "5" || view.Holdings[0].CostBasis == nil || *view.Holdings[0].CostBasis != "10" || view.Holdings[0].UnrealisedPnL == nil || *view.Holdings[0].UnrealisedPnL != "10" {
 		t.Fatalf("cost presentation = %+v", view.Holdings)
 	}
 }
@@ -114,4 +115,169 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestPortfolioOverviewPnLUsesLotIdentityAndFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "portfolio.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	nowText := canonicalSnapshotTime(now)
+	for _, portfolio := range []string{"portfolio-pnl", "portfolio-other", "portfolio-no-snapshot"} {
+		if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, portfolio, portfolio, "MYR", nowText, nowText); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "instrument-pnl", "SAME", "MYR", nowText); err != nil {
+		t.Fatal(err)
+	}
+	for _, portfolio := range []string{"portfolio-pnl", "portfolio-other", "portfolio-no-snapshot"} {
+		if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, portfolio, "instrument-pnl", nowText); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, lot := range []struct {
+		id, portfolio, quantity, unitCost string
+	}{
+		{id: "lot-pnl-a", portfolio: "portfolio-pnl", quantity: "2", unitCost: "5"},
+		{id: "lot-pnl-b", portfolio: "portfolio-pnl", quantity: "3", unitCost: "2"},
+		{id: "lot-other", portfolio: "portfolio-other", quantity: "99", unitCost: "1"},
+		{id: "lot-no-snapshot", portfolio: "portfolio-no-snapshot", quantity: "1", unitCost: "1"},
+	} {
+		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, lot.id, lot.portfolio, "instrument-pnl", lot.quantity, lot.unitCost, "MYR", nowText, nowText); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.AddQuote(ctx, QuoteInput{ID: "quote-pnl", InstrumentID: "instrument-pnl", Price: "10", Currency: "MYR", Source: "fixture", MarketAt: nowText, Basis: "close", Provenance: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "portfolio-pnl", ReportingCurrency: "MYR", AsOf: now, MaxAge: time.Hour})
+	if err != nil || !status.Complete {
+		t.Fatalf("target snapshot=%+v err=%v", status, err)
+	}
+	otherStatus, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "portfolio-other", ReportingCurrency: "MYR", AsOf: now, MaxAge: time.Hour})
+	if err != nil || !otherStatus.Complete {
+		t.Fatalf("other snapshot=%+v err=%v", otherStatus, err)
+	}
+
+	view, err := s.PortfolioOverview(ctx, "portfolio-pnl", "MYR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Holdings) != 2 {
+		t.Fatalf("target holdings=%d, want 2", len(view.Holdings))
+	}
+	gotPnL := map[string]string{}
+	for _, holding := range view.Holdings {
+		if holding.UnrealisedPnL == nil {
+			t.Fatalf("complete lot %s omitted P/L: %+v", holding.LotID, holding)
+		}
+		gotPnL[holding.LotID] = *holding.UnrealisedPnL
+	}
+	if gotPnL["lot-pnl-a"] != "10" || gotPnL["lot-pnl-b"] != "24" {
+		t.Fatalf("per-lot P/L=%v, want lot-pnl-a=10 and lot-pnl-b=24", gotPnL)
+	}
+	otherView, err := s.PortfolioOverview(ctx, "portfolio-other", "MYR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(otherView.Holdings) != 1 || otherView.Holdings[0].LotID != "lot-other" || otherView.Holdings[0].UnrealisedPnL == nil || *otherView.Holdings[0].UnrealisedPnL != "891" {
+		t.Fatalf("other portfolio view leaked or misidentified lots: %+v", otherView.Holdings)
+	}
+	noSnapshot, err := s.PortfolioOverview(ctx, "portfolio-no-snapshot", "MYR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noSnapshot.Holdings) != 1 || noSnapshot.Holdings[0].UnrealisedPnL != nil {
+		t.Fatalf("no-snapshot P/L=%+v", noSnapshot.Holdings)
+	}
+
+	if _, err := s.DB.Exec(`DROP TRIGGER snapshots_immutable_update`); err != nil {
+		t.Fatal(err)
+	}
+	var original snapshotPayload
+	var encoded []byte
+	if err := s.DB.QueryRow(`SELECT payload FROM snapshots WHERE id=?`, status.SnapshotID).Scan(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &original); err != nil {
+		t.Fatal(err)
+	}
+	setLot := func(payload *snapshotPayload, lotID string, update func(*domain.LotValuation)) {
+		for i := range payload.Valuation.Lots {
+			if payload.Valuation.Lots[i].LotID == lotID {
+				update(&payload.Valuation.Lots[i])
+				return
+			}
+		}
+		t.Fatalf("snapshot lot %s not found", lotID)
+	}
+	writePayload := func(payload snapshotPayload) {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.Exec(`UPDATE snapshots SET payload=? WHERE id=?`, encoded, status.SnapshotID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name   string
+		mutate func(*snapshotPayload)
+	}{
+		{name: "incomplete valuation", mutate: func(payload *snapshotPayload) { payload.Valuation.Complete = false }},
+		{name: "stale holdings revision", mutate: func(payload *snapshotPayload) { payload.Input.HoldingsRevision = 999 }},
+		{name: "missing cost", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.CostBasis = nil })
+		}},
+		{name: "missing pnl", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.UnrealisedPnL = nil })
+		}},
+		{name: "stale lot valuation", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.Freshness.Status = domain.Stale })
+		}},
+		{name: "missing lot valuation", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.Freshness.Status = domain.Missing })
+		}},
+		{name: "future lot valuation", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.Freshness.Status = domain.Future })
+		}},
+		{name: "invalid lot valuation", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.Freshness.Status = domain.Invalid })
+		}},
+		{name: "inconsistent pnl", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.UnrealisedPnL = stringPointer("999") })
+		}},
+		{name: "malformed pnl", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.UnrealisedPnL = stringPointer("not-a-decimal") })
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload snapshotPayload
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if tc.mutate != nil {
+				tc.mutate(&payload)
+			}
+			writePayload(payload)
+			view, err := s.PortfolioOverview(ctx, "portfolio-pnl", "MYR")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, holding := range view.Holdings {
+				if holding.LotID == "lot-pnl-a" && holding.UnrealisedPnL != nil {
+					t.Fatalf("%s exposed P/L for %s: %+v", tc.name, holding.LotID, holding)
+				}
+			}
+		})
+	}
 }

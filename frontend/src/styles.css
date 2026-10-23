@@ -66,6 +66,12 @@ th, td { border-bottom: 1px solid #2d4441; padding: .8rem .65rem; text-align: le
 thead th { background: #1a2524; position: sticky; top: 0; z-index: 1; }
 tbody th { font-weight: 500; }
 .numeric { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.pnl-gain, .pnl-loss, .pnl-break-even, .pnl-unavailable { display: inline-block; }
+.pnl-gain { color: #8ce6c5; }
+.pnl-loss { color: #ffadb8; }
+.pnl-break-even { color: #d9d9e4; }
+.pnl-unavailable { color: #b8cbc8; }
+.pnl-amount { display: block; }
 .sort-button { background: transparent; border: 0; color: inherit; font-weight: 700; padding: .2rem; text-align: left; white-space: nowrap; }
 .empty { color: #b8cbc8; padding: 1rem; }
 .activity-card { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; margin-top: 1.5rem; min-width: 0; padding: 1.25rem; }
