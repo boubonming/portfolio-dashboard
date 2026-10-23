@@ -25,7 +25,7 @@ func TestFinnhubHappyAndSecretRedaction(t *testing.T) {
 		if r.URL.Query().Get("symbol") != "NYSE:ABC" {
 			t.Errorf("symbol = %q", r.URL.Query().Get("symbol"))
 		}
-		_, _ = w.Write([]byte(`{"c":12.50,"t":1767355200}`))
+		_, _ = w.Write([]byte(`{"c":12.50,"d":0.50,"dp":4.17,"h":13,"l":11,"o":12,"pc":12,"t":1767355200}`))
 	}))
 	defer server.Close()
 	client := NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: server.URL, Now: fixtureNow})
@@ -157,7 +157,7 @@ func TestOpenExchangeRatesOneCallAndExactCrossRate(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		stamp := fixtureNow().Add(-time.Hour).Unix()
-		_, _ = fmt.Fprintf(w, `{"timestamp":%d,"base":"USD","rates":{"EUR":"2","MYR":"5"}}`, stamp)
+		_, _ = fmt.Fprintf(w, `{"disclaimer":"Usage subject to terms: https://openexchangerates.org/terms","license":"https://openexchangerates.org/license","timestamp":%d,"base":"USD","rates":{"EUR":"2","MYR":"5"}}`, stamp)
 	}))
 	defer server.Close()
 	client := NewOpenExchangeRatesClient("fixture-secret", ClientOptions{BaseURL: server.URL, Now: fixtureNow})
@@ -167,6 +167,57 @@ func TestOpenExchangeRatesOneCallAndExactCrossRate(t *testing.T) {
 	}
 	if rates["EUR/MYR"].Rate != "2.5" || rates["USD/MYR"].Rate != "5" {
 		t.Fatalf("rates = %+v", rates)
+	}
+}
+
+func TestFinnhubQuoteRejectsStrictPayloadViolations(t *testing.T) {
+	valid := `{"c":12.50,"d":0.50,"dp":4.17,"h":13,"l":11,"o":12,"pc":12,"t":1767355200}`
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "unknown_field", body: strings.TrimSuffix(valid, "}") + `,"unexpected":"x"}`},
+		{name: "duplicate_field", body: `{"c":12.50,"c":12.50,"t":1767355200}`},
+		{name: "trailing_data", body: valid + ` {}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(testCase.body))
+			}))
+			defer server.Close()
+			_, err := NewFinnhubClient("fixture-secret", ClientOptions{BaseURL: server.URL, Now: fixtureNow}).Quote(context.Background(), QuoteRequest{InstrumentID: "fixture", ProviderSymbol: "NYSE:FIX", Currency: "USD"})
+			if err == nil || !strings.Contains(err.Error(), "malformed_json") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenExchangeRatesRejectsStrictPayloadViolations(t *testing.T) {
+	valid := fmt.Sprintf(`{"disclaimer":"Usage subject to terms: https://openexchangerates.org/terms","license":"https://openexchangerates.org/license","timestamp":%d,"base":"USD","rates":{"EUR":"2","MYR":"5"}}`, fixtureNow().Add(-time.Hour).Unix())
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "unknown_field", body: strings.TrimSuffix(valid, "}") + `,"unexpected":"x"}`},
+		{name: "duplicate_field", body: strings.Replace(valid, `"base":"USD"`, `"base":"USD","base":"USD"`, 1)},
+		{name: "trailing_data", body: valid + ` {}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(testCase.body))
+			}))
+			defer server.Close()
+			_, failures := NewOpenExchangeRatesClient("fixture-secret", ClientOptions{BaseURL: server.URL, Now: fixtureNow}).FXBatch(context.Background(), []FXRequest{{BaseCurrency: "EUR", QuoteCurrency: "MYR"}})
+			err := failures["EUR/MYR"]
+			if err == nil || !strings.Contains(err.Error(), "malformed_json") {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 
