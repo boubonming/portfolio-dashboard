@@ -23,6 +23,7 @@ export type Holding = {
   cost_basis?: string
   latest_price?: string
   latest_value?: string
+  unrealised_pnl?: string
   reporting_value?: string
   quote_source?: string
   freshness: Freshness
@@ -107,7 +108,7 @@ export type ActivityPage = {
   has_more: boolean
 }
 
-type SortKey = 'symbol' | 'quantity' | 'currency' | 'cost_basis' | 'latest_price' | 'reporting_value' | 'freshness'
+type SortKey = 'symbol' | 'quantity' | 'currency' | 'cost_basis' | 'latest_price' | 'unrealised_pnl' | 'reporting_value' | 'freshness'
 type SortDirection = 'ascending' | 'descending'
 
 // Compare canonical decimal strings without Number, parseFloat, or lexical
@@ -137,6 +138,22 @@ export function compareDecimalStrings(left: string | undefined, right: string | 
   const bf = b.fraction.padEnd(width, '0')
   if (af === bf) return 0
   return sign * (af < bf ? -1 : 1)
+}
+
+type PnLStatus = 'gain' | 'loss' | 'break-even' | 'unavailable'
+
+function unrealisedPnLStatus(holding: Holding, snapshot: PortfolioOverview['snapshot']): PnLStatus {
+  const value = holding.unrealised_pnl
+  if (snapshot.state !== 'complete' || !snapshot.complete || value === undefined || !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) || holding.freshness.status !== 'fresh') return 'unavailable'
+  const comparison = compareDecimalStrings(value, '0')
+  return comparison > 0 ? 'gain' : comparison < 0 ? 'loss' : 'break-even'
+}
+
+function unrealisedPnLCell(holding: Holding, snapshot: PortfolioOverview['snapshot']) {
+  const status = unrealisedPnLStatus(holding, snapshot)
+  if (status === 'unavailable') return <span className="pnl-unavailable">Unavailable</span>
+  const label = status === 'gain' ? 'Gain' : status === 'loss' ? 'Loss' : 'Break-even'
+  return <span className={`pnl-${status}`}><span className="pnl-amount">{holding.unrealised_pnl} {holding.currency}</span><span className="subline">{label}</span></span>
 }
 
 function displayDate(value?: string) {
@@ -737,7 +754,12 @@ export default function App() {
       let comparison = 0
       if (sortKey === 'symbol' || sortKey === 'currency') comparison = (left[sortKey] || '').localeCompare(right[sortKey] || '')
       else if (sortKey === 'freshness') comparison = (left.freshness.status || '').localeCompare(right.freshness.status || '')
-      else comparison = compareDecimalStrings(left[sortKey], right[sortKey])
+      else {
+        const leftValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(left, data.snapshot) === 'unavailable' ? undefined : left.unrealised_pnl) : left[sortKey]
+        const rightValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(right, data.snapshot) === 'unavailable' ? undefined : right.unrealised_pnl) : right[sortKey]
+        comparison = compareDecimalStrings(leftValue, rightValue)
+      }
+      if (comparison === 0) comparison = left.lot_id.localeCompare(right.lot_id)
       return sortDirection === 'ascending' ? comparison : -comparison
     })
   }, [data, filter, sortDirection, sortKey])
@@ -838,6 +860,7 @@ export default function App() {
                   <th scope="col">Source unit cost</th>
                   {sortHeader('Cost basis', 'cost_basis')}
                   {sortHeader('Latest price', 'latest_price')}
+                  {sortHeader('Unrealised P/L', 'unrealised_pnl')}
                   {sortHeader('Reporting value', 'reporting_value')}
                   {sortHeader('Freshness', 'freshness')}
                   <th scope="col">Broker / date</th>
@@ -850,6 +873,7 @@ export default function App() {
                     <td className="numeric">{holding.unit_cost || '—'}</td>
                     <td className="numeric">{holding.cost_basis || '—'}</td>
                     <td className="numeric">{holding.latest_price || '—'}<span className="subline">{holding.latest_value || 'value unavailable'}</span></td>
+                    <td className="numeric">{unrealisedPnLCell(holding, data.snapshot)}</td>
                     <td className="numeric">{data.snapshot.complete ? (holding.reporting_value || '—') : 'Withheld'}</td>
                     <td><span className={`flag ${qualityClass(holding)}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
                     <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button><button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`}>View reviews</button></td>

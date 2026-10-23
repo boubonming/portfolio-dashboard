@@ -1414,6 +1414,7 @@ components:
         cost_basis: { $ref: '#/components/schemas/HoldingCostBasis' }
         latest_price: { type: string, description: Decimal string. }
         latest_value: { type: string, description: Decimal string. }
+        unrealised_pnl: { $ref: '#/components/schemas/DecimalString' }
         reporting_value: { type: string, description: Decimal string; only meaningful when the snapshot is complete. }
         quote_source: { type: string }
         freshness: { $ref: '#/components/schemas/Freshness' }

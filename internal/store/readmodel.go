@@ -91,6 +91,7 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 		view.Snapshot.State = "stale"
 		view.Snapshot.StaleDependencies = appendUnique(view.Snapshot.StaleDependencies, "holdings_revision")
 	}
+	currentSnapshot := view.Snapshot.State == "complete" && view.Snapshot.Complete
 	view.Allocation = domain.BuildAllocation(input, valuation)
 
 	values := make(map[string]domain.LotValuation, len(valuation.Lots))
@@ -122,6 +123,9 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 			if value.CostBasis != nil {
 				holding.CostBasis = value.CostBasis
 			}
+			if currentSnapshot && usableSnapshotPnL(value, holding.Currency) {
+				holding.UnrealisedPnL = value.UnrealisedPnL
+			}
 		}
 		if quote, ok := quotes[lot.InstrumentID]; ok {
 			holding.QuoteSource = quote.Source
@@ -130,6 +134,16 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 		addSourceFlags(holding)
 	}
 	return view, nil
+}
+
+func usableSnapshotPnL(value domain.LotValuation, holdingCurrency string) bool {
+	if value.UnrealisedPnL == nil || value.CostBasis == nil || value.MarketValue == "" || value.Freshness.Status != domain.Fresh || !strings.EqualFold(value.Currency, holdingCurrency) {
+		return false
+	}
+	cost, costErr := domain.ParseDecimal(*value.CostBasis)
+	market, marketErr := domain.ParseDecimal(value.MarketValue)
+	pnl, pnlErr := domain.ParseDecimal(*value.UnrealisedPnL)
+	return costErr == nil && marketErr == nil && pnlErr == nil && cost.Sign() >= 0 && market.Sign() >= 0
 }
 
 func normalizeReportingCurrency(value string) (string, error) {

@@ -76,6 +76,7 @@ type HoldingView struct {
 	CostBasis              *string   `json:"cost_basis,omitempty"`
 	LatestPrice            *string   `json:"latest_price,omitempty"`
 	LatestValue            *string   `json:"latest_value,omitempty"`
+	UnrealisedPnL          *string   `json:"unrealised_pnl,omitempty"`
 	ReportingValue         *string   `json:"reporting_value,omitempty"`
 	QuoteSource            string    `json:"quote_source,omitempty"`
 	Freshness              Freshness `json:"freshness"`

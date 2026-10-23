@@ -104,6 +104,7 @@ func TestPortfolioOverviewAPIIsScopedAndKeepsDecimalsAsStrings(t *testing.T) {
 			Quantity       string  `json:"quantity"`
 			LatestPrice    *string `json:"latest_price"`
 			ReportingValue *string `json:"reporting_value"`
+			UnrealisedPnL  *string `json:"unrealised_pnl"`
 		} `json:"holdings"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
@@ -112,7 +113,7 @@ func TestPortfolioOverviewAPIIsScopedAndKeepsDecimalsAsStrings(t *testing.T) {
 	if body.ReportingCurrency != "MYR" || body.Snapshot.State != "complete" || body.Snapshot.ReportingTotal != "69.440625" {
 		t.Fatalf("body=%+v", body)
 	}
-	if len(body.Holdings) != 1 || body.Holdings[0].Quantity != "0.125" || body.Holdings[0].LatestPrice == nil || *body.Holdings[0].LatestPrice != "123.45" || body.Holdings[0].ReportingValue == nil || *body.Holdings[0].ReportingValue != "69.440625" {
+	if len(body.Holdings) != 1 || body.Holdings[0].Quantity != "0.125" || body.Holdings[0].LatestPrice == nil || *body.Holdings[0].LatestPrice != "123.45" || body.Holdings[0].ReportingValue == nil || *body.Holdings[0].ReportingValue != "69.440625" || body.Holdings[0].UnrealisedPnL == nil || *body.Holdings[0].UnrealisedPnL != "15.28125" {
 		t.Fatalf("holding=%+v", body.Holdings)
 	}
 	if !contains(response.Body.String(), `"description":"Fixture instrument"`) || contains(response.Body.String(), `"name":"FIX"`) {
@@ -192,6 +193,9 @@ func TestPortfolioOverviewAPINoSnapshotIsExplicit(t *testing.T) {
 	}
 	if overview.Allocation.State != "unavailable" || overview.Allocation.Coverage.TotalLots != 1 || overview.Allocation.Coverage.ValuedLots != 0 || overview.Allocation.Coverage.MissingDependencies != 0 || overview.Allocation.Coverage.StaleDependencies != 0 || overview.Allocation.Coverage.InvalidDependencies != 0 {
 		t.Fatalf("no snapshot allocation = %+v", overview.Allocation)
+	}
+	if len(overview.Holdings) != 1 || overview.Holdings[0].UnrealisedPnL != nil {
+		t.Fatalf("no snapshot unexpectedly exposed unrealised P/L: %+v", overview.Holdings)
 	}
 	var wire map[string]json.RawMessage
 	if err := json.Unmarshal(response.Body.Bytes(), &wire); err != nil {

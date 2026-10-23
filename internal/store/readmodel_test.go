@@ -77,7 +77,7 @@ func TestPortfolioOverviewExposesDerivedCostBasisAndSourceUnitCost(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Holdings) != 1 || view.Holdings[0].UnitCost == nil || *view.Holdings[0].UnitCost != "5" || view.Holdings[0].CostBasis == nil || *view.Holdings[0].CostBasis != "10" {
+	if len(view.Holdings) != 1 || view.Holdings[0].UnitCost == nil || *view.Holdings[0].UnitCost != "5" || view.Holdings[0].CostBasis == nil || *view.Holdings[0].CostBasis != "10" || view.Holdings[0].UnrealisedPnL == nil || *view.Holdings[0].UnrealisedPnL != "10" {
 		t.Fatalf("cost presentation = %+v", view.Holdings)
 	}
 }
