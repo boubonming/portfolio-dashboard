@@ -246,6 +246,8 @@ never used as a tie-breaker.
 
 The authenticated browser setup also exposes `POST /api/v1/portfolios/{portfolioId}/market-data/discover`. It contacts configured CoinGecko `/api/v3/search`, Finnhub `/api/v1/search`, or Alpha Vantage `SYMBOL_SEARCH` endpoints with only the holding symbol/search query. Returned identifiers and metadata are bounded, unverified candidates: owners must choose or edit an exact listing and explicitly confirm the full batch before any mapping is saved. Discovery is setup- and ETag-bound, performs no mapping or audit writes, and never sends provider credentials to the browser or portfolio/lot data to provider search requests; provider authentication stays server-side.
 
+The same four market-data routes accept the explicitly scoped machine bearer alternative. It is limited to the exact configured principal and portfolio, a valid singleton bearer, `PORTFOLIO_MACHINE_PORTFOLIO_READ=true`, `PORTFOLIO_MACHINE_HOLDINGS_WRITE=true`, and the persisted portfolio-read plus holdings-write grant for that same principal and portfolio. Machine discovery remains read-only; mapping and refresh retain the machine principal in audit/activity and refresh idempotency records. Machine requests omit browser CSRF and never receive provider credentials, session secrets, or owner-session privileges; missing or revoked runtime/persisted grants fail closed.
+
 `ALPHA_VANTAGE_API_KEY`, and `OPEN_EXCHANGE_RATES_APP_ID`. CoinGecko uses its
 public free endpoint in this slice. Credentials are not persisted, printed,
 included in error messages, audit payloads, or frontend settings. Optional

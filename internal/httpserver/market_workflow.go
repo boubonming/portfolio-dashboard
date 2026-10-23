@@ -138,7 +138,17 @@ func (h *marketWorkflowEndpoint) saveMappings(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_mapping_batch"})
 		return
 	}
-	result, err := h.database.AddProviderMappingsBatch(r.Context(), portfolioID, r.Header.Get("If-Match"), request.Mappings)
+	requestAuth, ok := marketWorkflowAuthFromContext(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	var result domain.MappingBatchResult
+	if requestAuth.actor.Category == "machine" {
+		result, err = h.database.AddProviderMappingsBatchAs(r.Context(), portfolioID, r.Header.Get("If-Match"), request.Mappings, requestAuth.actor)
+	} else {
+		result, err = h.database.AddProviderMappingsBatch(r.Context(), portfolioID, r.Header.Get("If-Match"), request.Mappings)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "stale") {
 			writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": "stale_mapping_setup"})
@@ -234,13 +244,13 @@ func (h *marketWorkflowEndpoint) refresh(w http.ResponseWriter, r *http.Request,
 			missing = append(missing, fmt.Sprintf("%s (%s)", instrument.Symbol, instrument.Currency))
 		}
 	}
-	actorID, actorOK := h.auth.BrowserActorID(r)
+	requestAuth, actorOK := marketWorkflowAuthFromContext(r.Context())
 	if !actorOK {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 	response, _, err := h.database.RefreshMarketDataIdempotent(r.Context(), store.MarketRefreshIdempotencyOptions{
-		ActorCategory: "browser_user", ActorID: actorID, PortfolioID: portfolioID, IdempotencyKey: key, RequestFingerprint: fingerprint,
+		ActorCategory: requestAuth.actor.Category, ActorID: requestAuth.actor.ID, PortfolioID: portfolioID, IdempotencyKey: key, RequestFingerprint: fingerprint,
 		Refresh:  store.RefreshOptions{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, Clients: h.clients},
 		Snapshot: store.SnapshotRequest{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, MaxAge: domain.DefaultFreshness}, Missing: missing,
 	})

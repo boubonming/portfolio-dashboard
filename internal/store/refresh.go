@@ -199,10 +199,14 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 		}
 	}
 	auditID := deterministicID("audit", "refresh", result.RefreshID)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, auditID, "administrative-refresh", "market.refresh.completed", "refresh_run", result.RefreshID, payload, result.EndedAt); err != nil {
+	auditActor, activityActor := "administrative-refresh", "administrative"
+	if options.receipt != nil {
+		auditActor, activityActor = options.receipt.ActorID, options.receipt.ActorCategory
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, auditID, auditActor, "market.refresh.completed", "refresh_run", result.RefreshID, payload, result.EndedAt); err != nil {
 		return domain.RefreshResult{}, err
 	}
-	if err := recordActivity(ctx, tx, options.PortfolioID, "administrative", "market.refresh.completed", "market", "refresh_run", result.RefreshID, "Market refresh completed", "A market-data refresh completed.", result.EndedAt, auditID); err != nil {
+	if err := recordActivity(ctx, tx, options.PortfolioID, activityActor, "market.refresh.completed", "market", "refresh_run", result.RefreshID, "Market refresh completed", "A market-data refresh completed.", result.EndedAt, auditID); err != nil {
 		return domain.RefreshResult{}, err
 	}
 	if options.receipt != nil {
