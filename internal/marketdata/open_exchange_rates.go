@@ -85,11 +85,13 @@ func (c *OpenExchangeRatesClient) FXBatch(ctx context.Context, requests []FXRequ
 		return result, failures
 	}
 	var payload struct {
-		Timestamp int64                      `json:"timestamp"`
-		Base      string                     `json:"base"`
-		Rates     map[string]json.RawMessage `json:"rates"`
-		Error     bool                       `json:"error"`
-		Message   string                     `json:"description"`
+		Disclaimer string                     `json:"disclaimer"`
+		License    string                     `json:"license"`
+		Timestamp  int64                      `json:"timestamp"`
+		Base       string                     `json:"base"`
+		Rates      map[string]json.RawMessage `json:"rates"`
+		Error      bool                       `json:"error"`
+		Message    string                     `json:"description"`
 	}
 	if err := decodeObject(body, c.Name(), &payload); err != nil {
 		for key := range unique {

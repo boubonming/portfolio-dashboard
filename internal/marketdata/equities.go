@@ -103,9 +103,15 @@ func (c *FinnhubClient) Quote(ctx context.Context, request QuoteRequest) (domain
 		return domain.Quote{}, err
 	}
 	var payload struct {
-		Current json.RawMessage `json:"c"`
-		Epoch   json.RawMessage `json:"t"`
-		Error   string          `json:"error"`
+		Current       json.RawMessage `json:"c"`
+		Change        json.RawMessage `json:"d"`
+		PercentChange json.RawMessage `json:"dp"`
+		High          json.RawMessage `json:"h"`
+		Low           json.RawMessage `json:"l"`
+		Open          json.RawMessage `json:"o"`
+		PreviousClose json.RawMessage `json:"pc"`
+		Epoch         json.RawMessage `json:"t"`
+		Error         string          `json:"error"`
 	}
 	if err := decodeObject(body, c.Name(), &payload); err != nil {
 		return domain.Quote{}, err
