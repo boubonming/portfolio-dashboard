@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { apiFetch, APIError } from './api'
 import type { Holding } from './App'
@@ -179,14 +179,16 @@ type Props = {
   scopeKey: string
   onRefresh: () => Promise<string | void>
   onUnauthorized: () => void
+  children?: (renderHoldingActions: (holding: Holding) => ReactNode) => ReactNode
 }
 
 type Attempt = { operation: HoldingMutationOperation; portfolioId: string; scopeKey: string; targetSignature: string; key: string; body: string; etag: string; lotId?: string }
 type ArchiveBackground = { element: HTMLElement; inert: boolean; ariaHidden: string | null }
 type ArchiveContext = { portfolioId: string; scopeKey: string; lotId: string }
 
-export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, onRefresh, onUnauthorized }: Props) {
+export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, onRefresh, onUnauthorized, children }: Props) {
   const [formOpen, setFormOpen] = useState(false)
+  const [openMenuLotId, setOpenMenuLotId] = useState<string | null>(null)
   const [archivePickerOpen, setArchivePickerOpen] = useState(false)
   const [selectedArchiveLotId, setSelectedArchiveLotId] = useState('')
   const [draft, setDraft] = useState(emptyDraft)
@@ -209,6 +211,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const statusRef = useRef<HTMLParagraphElement>(null)
   const contentRef = useRef<HTMLElement>(null)
   const archiveTriggerRefs = useRef(new Map<string, HTMLButtonElement>())
+  const archiveMenuRefs = useRef(new Map<string, HTMLDivElement>())
   const archiveOriginRef = useRef<HTMLButtonElement | null>(null)
   const archiveRestoreRef = useRef<{ lotId: string; success: boolean } | null>(null)
   const archiveBackgroundRef = useRef<ArchiveBackground | null>(null)
@@ -245,7 +248,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     setArchiveLot(null)
     setError('')
     setStatus('')
-    if (resetForm) { setDraft(emptyDraft()); setFormOpen(false); setArchivePickerOpen(false); setSelectedArchiveLotId(''); setErrors({}) }
+    if (resetForm) { setDraft(emptyDraft()); setFormOpen(false); setOpenMenuLotId(null); setArchivePickerOpen(false); setSelectedArchiveLotId(''); setErrors({}) }
   }
   const authorityChanged = activeRef.current !== active || portfolioIdRef.current !== portfolioId || scopeRef.current !== scopeKey
   if (!active || authorityChanged) invalidateArchiveAuthority()
@@ -266,6 +269,50 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   }, [active, portfolioId, scopeKey])
   useEffect(() => { etagRef.current = overviewETag; scopeRef.current = scopeKey }, [overviewETag, scopeKey])
   useEffect(() => { if (formOpen) formHeadingRef.current?.focus() }, [formOpen])
+  useEffect(() => {
+    if (!formOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busyRef.current) {
+        event.preventDefault()
+        setFormOpen(false)
+        setErrors({})
+        setError('')
+        window.setTimeout(() => addButtonRef.current?.focus(), 0)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const dialog = dialogRef.current
+      const focusable = Array.from(dialog?.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [formOpen])
+  useEffect(() => {
+    if (!openMenuLotId) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (!archiveMenuRefs.current.get(openMenuLotId)?.contains(target) && !archiveTriggerRefs.current.get(openMenuLotId)?.contains(target)) setOpenMenuLotId(null)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      const trigger = archiveTriggerRefs.current.get(openMenuLotId)
+      setOpenMenuLotId(null)
+      window.setTimeout(() => trigger?.focus(), 0)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('pointerdown', onPointerDown); document.removeEventListener('keydown', onKeyDown) }
+  }, [openMenuLotId])
+  useLayoutEffect(() => {
+    if (!openMenuLotId) return
+    archiveMenuRefs.current.get(openMenuLotId)?.querySelector<HTMLButtonElement>('button')?.focus()
+  }, [openMenuLotId])
   useLayoutEffect(() => { if (archiveVisible) dialogHeadingRef.current?.focus() }, [archiveVisible])
   useLayoutEffect(() => {
     if (!archiveVisible) return
@@ -447,6 +494,35 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     await submit('remove', attempt, lotId, `/api/v1/portfolios/${encodeURIComponent(portfolioIdRef.current)}/holdings/${encodeURIComponent(lotId)}`, 'DELETE')
   }
 
+  const openArchive = (lot: Holding, origin: HTMLButtonElement) => {
+    if (busy || !active || (!mutationETagValid && !removeAttempt.current)) return
+    archiveOriginRef.current = origin
+    archiveContextRef.current = { portfolioId, scopeKey, lotId: lot.lot_id }
+    archiveLotRef.current = lot
+    setOpenMenuLotId(null)
+    setError('')
+    setStatus('')
+    setArchiveLot(lot)
+  }
+
+  const renderHoldingActions = (holding: Holding) => {
+    const menuOpen = openMenuLotId === holding.lot_id
+    return <div className="holding-row-actions">
+      <button ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} className="row-action-trigger" type="button" aria-label={`Actions for ${holding.symbol} lot ${holding.lot_id}`} aria-expanded={menuOpen} aria-haspopup="menu" data-archive-trigger-lot-id={holding.lot_id} onClick={() => setOpenMenuLotId(menuOpen ? null : holding.lot_id)} disabled={busy}>⋯</button>
+      {menuOpen && <div ref={(node) => { if (node) archiveMenuRefs.current.set(holding.lot_id, node); else archiveMenuRefs.current.delete(holding.lot_id) }} className="row-action-menu" role="menu" data-archive-menu-lot-id={holding.lot_id}>
+        <button type="button" role="menuitem" onClick={(event) => openArchive(holding, archiveTriggerRefs.current.get(holding.lot_id) || event.currentTarget)} disabled={busy || (!mutationETagValid && !removeAttempt.current)}>Archive holding</button>
+      </div>}
+    </div>
+  }
+
+  const closeForm = () => {
+    if (busy) return
+    setFormOpen(false)
+    setErrors({})
+    setError('')
+    window.setTimeout(() => addButtonRef.current?.focus(), 0)
+  }
+
   const continueToArchive = () => {
     if (busy || !selectedArchiveLotId) return
     const lot = holdings.find((holding) => holding.lot_id === selectedArchiveLotId)
@@ -462,20 +538,12 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   if (!active) return null
   const mutationETagValid = validatePortfolioETag(overviewETag, portfolioId) !== null
   return <>
-    <section ref={contentRef} className="holding-mutation-card" aria-labelledby="holding-mutation-title">
-      <div className="section-heading"><div><span className="eyebrow">Authenticated portfolio control</span><h2 id="holding-mutation-title">Manage holdings</h2></div><button ref={addButtonRef} type="button" onClick={() => { setFormOpen(true); setError(''); setStatus('') }} disabled={busy}>Add holding</button></div>
+    <section ref={contentRef} className="holding-mutation-card" aria-labelledby="manage-holdings-title">
+      <div className="holding-actions-bar"><div><span className="eyebrow">Holdings</span><h2 className="visually-hidden" id="manage-holdings-title">Manage holdings</h2></div><div className="holding-actions"><button ref={addButtonRef} type="button" onClick={() => { setFormOpen(true); setError(''); setStatus('') }} disabled={busy}>Add holding</button></div></div>
       {status && <p ref={statusRef} className="notice success" role="status" aria-live="polite" tabIndex={-1}>{status}</p>}
       {error && !archiveLot && <p className="notice error" role="alert">{error}</p>}
-      {formOpen && <form className="holding-form" onSubmit={create} aria-labelledby="holding-form-title">
-        <h3 id="holding-form-title" ref={formHeadingRef} tabIndex={-1}>Add one holding</h3>
-        <p className="muted">Use an existing portfolio instrument ID or define one new instrument. Financial values stay as exact text.</p>
-        <fieldset aria-describedby="instrument-mode-help"><legend>Instrument mode</legend><p id="instrument-mode-help" className="muted">Existing mode uses an immutable instrument ID. Inline mode creates one new instrument identity; Symbol is display and market-data text, never the identity.</p><label><input type="radio" name="instrument-mode" checked={draft.mode === 'existing'} onChange={() => update('mode', 'existing')} /> Existing instrument ID</label><label><input type="radio" name="instrument-mode" checked={draft.mode === 'inline'} onChange={() => update('mode', 'inline')} /> New inline instrument</label></fieldset>
-        {draft.mode === 'existing' ? <Field id="instrument-id" label="Instrument ID" help="This immutable ID selects the existing instrument; it is not replaced by its symbol." value={draft.instrumentId} error={errors.instrumentId} onChange={(value) => update('instrumentId', value)} /> : <div className="holding-fields"><Field id="symbol" label="Symbol" help="Display and market-data symbol only; it does not identify the instrument." value={draft.symbol} error={errors.symbol} onChange={(value) => update('symbol', value)} /><Field id="instrument-currency" label="Instrument currency" value={draft.instrumentCurrency} error={errors.instrumentCurrency} onChange={(value) => update('instrumentCurrency', value)} /><Field id="description" label="Description (optional)" value={draft.description} error={errors.description} onChange={(value) => update('description', value)} /><Field id="asset-type" label="Asset type (optional)" value={draft.assetType} error={errors.assetType} onChange={(value) => update('assetType', value)} /><Field id="exchange" label="Exchange (optional)" value={draft.exchange} error={errors.exchange} onChange={(value) => update('exchange', value)} /></div>}
-        <div className="holding-fields"><Field id="quantity" label="Quantity" value={draft.quantity} error={errors.quantity} onChange={(value) => update('quantity', value)} inputMode="decimal" maxLength={40} /><Field id="unit-cost" label="Unit cost" value={draft.unitCost} error={errors.unitCost} onChange={(value) => update('unitCost', value)} inputMode="decimal" maxLength={40} /><Field id="cost-basis" label="Cost basis" value={draft.costBasis} error={errors.costBasis} onChange={(value) => update('costBasis', value)} inputMode="decimal" maxLength={80} /><Field id="currency" label="Holding currency" value={draft.currency} error={errors.currency} onChange={(value) => update('currency', value)} /><Field id="account-id" label="Account ID (optional)" value={draft.accountId} error={errors.accountId} onChange={(value) => update('accountId', value)} /><Field id="acquisition-date" label="Acquisition date (optional)" value={draft.acquisitionDate} error={errors.acquisitionDate} onChange={(value) => update('acquisitionDate', value)} inputMode="numeric" /></div>
-        {errors.form && <p className="field-error" role="alert" aria-live="assertive">{errors.form}</p>}
-        <div className="holding-form-actions"><button type="submit" disabled={busy || (!mutationETagValid && !createAttempt.current)} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</button><button type="button" onClick={() => { setFormOpen(false); setErrors({}); setError(''); addButtonRef.current?.focus() }} disabled={busy}>Cancel</button></div>
-      </form>}
-      <div className="archive-controls">
+      {children?.(renderHoldingActions)}
+      {!children && <div className="archive-controls">
         <div className="section-heading"><div><h3>Archive a holding</h3><p className="muted">Archive is a logical removal only; history and audit records are preserved.</p></div><button type="button" onClick={() => { setArchivePickerOpen((open) => !open); setError(''); setStatus('') }} disabled={busy}>{archivePickerOpen ? 'Close archive controls' : 'Archive a holding'}</button></div>
         {archivePickerOpen && <div className="archive-picker">
           <label htmlFor="archive-holding">Holding to archive</label>
@@ -486,8 +554,17 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
           <p className="muted">Choose the exact lot. The archive confirmation will preserve its full audit identity.</p>
           <button id="archive-continue" type="button" onClick={continueToArchive} disabled={busy || !selectedArchiveLotId || !mutationETagValid} aria-busy={busy}>Continue to archive</button>
         </div>}
-      </div>
+      </div>}
     </section>
+      {formOpen && createPortal(<div className="confirmation-backdrop add-dialog-backdrop"><section ref={dialogRef} className="confirmation-dialog add-dialog" role="dialog" aria-modal="true" aria-labelledby="holding-form-title" aria-describedby="holding-form-description"><form className="holding-form" onSubmit={create}>
+        <h3 id="holding-form-title" ref={formHeadingRef} tabIndex={-1}>Add one holding</h3>
+        <p id="holding-form-description" className="muted">Use an existing portfolio instrument ID or define one new instrument. Financial values stay as exact text.</p>
+        <fieldset aria-describedby="instrument-mode-help"><legend>Instrument mode</legend><p id="instrument-mode-help" className="muted">Existing mode uses an immutable instrument ID. Inline mode creates one new instrument identity; Symbol is display and market-data text, never the identity.</p><label><input type="radio" name="instrument-mode" checked={draft.mode === 'existing'} onChange={() => update('mode', 'existing')} /> Existing instrument ID</label><label><input type="radio" name="instrument-mode" checked={draft.mode === 'inline'} onChange={() => update('mode', 'inline')} /> New inline instrument</label></fieldset>
+        {draft.mode === 'existing' ? <Field id="instrument-id" label="Instrument ID" help="This immutable ID selects the existing instrument; it is not replaced by its symbol." value={draft.instrumentId} error={errors.instrumentId} onChange={(value) => update('instrumentId', value)} /> : <div className="holding-fields"><Field id="symbol" label="Symbol" help="Display and market-data symbol only; it does not identify the instrument." value={draft.symbol} error={errors.symbol} onChange={(value) => update('symbol', value)} /><Field id="instrument-currency" label="Instrument currency" value={draft.instrumentCurrency} error={errors.instrumentCurrency} onChange={(value) => update('instrumentCurrency', value)} /><Field id="description" label="Description (optional)" value={draft.description} error={errors.description} onChange={(value) => update('description', value)} /><Field id="asset-type" label="Asset type (optional)" value={draft.assetType} error={errors.assetType} onChange={(value) => update('assetType', value)} /><Field id="exchange" label="Exchange (optional)" value={draft.exchange} error={errors.exchange} onChange={(value) => update('exchange', value)} /></div>}
+        <div className="holding-fields"><Field id="quantity" label="Quantity" value={draft.quantity} error={errors.quantity} onChange={(value) => update('quantity', value)} inputMode="decimal" maxLength={40} /><Field id="unit-cost" label="Unit cost" value={draft.unitCost} error={errors.unitCost} onChange={(value) => update('unitCost', value)} inputMode="decimal" maxLength={40} /><Field id="cost-basis" label="Cost basis" value={draft.costBasis} error={errors.costBasis} onChange={(value) => update('costBasis', value)} inputMode="decimal" maxLength={80} /><Field id="currency" label="Holding currency" value={draft.currency} error={errors.currency} onChange={(value) => update('currency', value)} /><Field id="account-id" label="Account ID (optional)" value={draft.accountId} error={errors.accountId} onChange={(value) => update('accountId', value)} /><Field id="acquisition-date" label="Acquisition date (optional)" value={draft.acquisitionDate} error={errors.acquisitionDate} onChange={(value) => update('acquisitionDate', value)} inputMode="numeric" /></div>
+        {errors.form && <p className="field-error" role="alert" aria-live="assertive">{errors.form}</p>}
+        <div className="holding-form-actions"><button type="submit" disabled={busy || (!mutationETagValid && !createAttempt.current)} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</button><button type="button" onClick={closeForm} disabled={busy}>Cancel</button></div>
+      </form></section></div>, document.body)}
     {archiveVisible && archiveLot && createPortal(<div className="confirmation-backdrop"><section ref={dialogRef} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title" aria-describedby={error ? 'archive-dialog-description archive-dialog-error' : 'archive-dialog-description'}><h2 id="archive-dialog-title" ref={dialogHeadingRef} tabIndex={-1}>Archive {archiveLot.symbol} holding?</h2><p id="archive-dialog-description">You are archiving <strong>{holdingDisplayLabel(archiveLot)}</strong>. This is a logical removal only; it does not sell, trade, or permanently delete the holding. Its financial history, reviews, thesis and audit records remain preserved.</p><p className="subline" title={archiveLot.lot_id}>Lot ID: {shortenedLotID(archiveLot.lot_id)} <span className="visually-hidden">Full lot ID: {archiveLot.lot_id}</span></p>{error && <p ref={archiveErrorRef} id="archive-dialog-error" className="notice error" role="alert" aria-live="assertive" tabIndex={-1}>{error}</p>}<div className="holding-form-actions"><button type="button" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving holding…' : 'Confirm archive holding'}</button><button type="button" onClick={() => { archiveRestoreRef.current = { lotId: archiveLot.lot_id, success: false }; setArchiveLot(null) }} disabled={busy}>Cancel archive</button></div></section></div>, document.body)}
   </>
 }

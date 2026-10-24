@@ -873,19 +873,18 @@ export default function App() {
 
   return (
     <main className="shell">
-      <header className="brand">
-        <span className="eyebrow">Private workspace</span>
-        <h1>Portfolio Dashboard</h1>
-        <p className="muted">Read-only holdings and immutable valuation snapshots.</p>
-        <button type="button" onClick={logout}>Sign out</button>
+      <header className="app-header">
+        <a className="app-brand" href="#portfolio-content" aria-label="Portfolio Dashboard home">Portfolio Dashboard</a>
+        <nav className="view-nav" aria-label="Portfolio views">
+          <button type="button" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Overview</button>
+          <button type="button" aria-current={view === 'holdings' ? 'page' : undefined} onClick={() => setView('holdings')}>Holdings</button>
+          <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
+          <button type="button" aria-label="Reviews" aria-current={view === 'reviews' ? 'page' : undefined} onClick={() => { setReviewsHoldingId(undefined); setView('reviews') }}>Review</button>
+          <button type="button" aria-label="Market data" aria-current={view === 'market' ? 'page' : undefined} onClick={() => setView('market')}>Market Data</button>
+          <a className="machine-entry" href="/machine" aria-label="Machine entry">Machine</a>
+        </nav>
+        <button className="sign-out" type="button" onClick={logout}>Sign out</button>
       </header>
-      <nav className="view-nav" aria-label="Portfolio views">
-        <button type="button" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Overview</button>
-        <button type="button" aria-current={view === 'holdings' ? 'page' : undefined} onClick={() => setView('holdings')}>Holdings</button>
-        <button type="button" aria-current={view === 'market' ? 'page' : undefined} onClick={() => setView('market')}>Market data</button>
-        <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
-        <button type="button" aria-current={view === 'reviews' ? 'page' : undefined} onClick={() => { setReviewsHoldingId(undefined); setView('reviews') }}>Reviews</button>
-      </nav>
 
       {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} /> : <>
       {(view === 'overview' || view === 'holdings') && <>
@@ -913,7 +912,8 @@ export default function App() {
 
       {state === 'ready' && data && (
         <>
-          {view === 'holdings' && <section className="holdings-page-heading" aria-labelledby="holdings-page-title"><span className="eyebrow">Holdings</span><h2 id="holdings-page-title">{data.portfolio.name}</h2><p className="muted">Canonical active lots in {data.reporting_currency}. Use Overview for valuation and allocation.</p></section>}
+          <div id="portfolio-content" tabIndex={-1} />
+          {view !== 'overview' && <h1 className="visually-hidden">{data.portfolio.name}</h1>}
           {view === 'overview' && <section className="overview" aria-labelledby="overview-title">
             <div>
               <span className="eyebrow">Overview</span>
@@ -937,7 +937,8 @@ export default function App() {
 
           {view === 'overview' && <AllocationSection data={data} />}
 
-          {view === 'holdings' && <section className="table-card" aria-labelledby="holdings-title">
+          {view === 'holdings' && <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized}>
+            {(holdingActions) => <section className="table-card holdings-surface" aria-labelledby="holdings-title">
             <div className="section-heading"><div><span className="eyebrow">Canonical active lots</span><h2 id="holdings-title">Holdings</h2></div><span className="muted">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</span></div>
             <div className="table-scroll">
               <table>
@@ -953,6 +954,7 @@ export default function App() {
                   {sortHeader('Reporting value', 'reporting_value')}
                   {sortHeader('Freshness', 'freshness')}
                   <th scope="col">Broker / date</th>
+                  <th scope="col"><span className="visually-hidden">Holding actions</span></th>
                 </tr></thead>
                 <tbody>
                   {visibleHoldings.map((holding) => <tr key={holding.lot_id}>
@@ -966,14 +968,14 @@ export default function App() {
                     <td className="numeric">{data.snapshot.complete ? (holding.reporting_value || '—') : 'Withheld'}</td>
                     <td><span className={`flag ${qualityClass(holding)}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
                     <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button><button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`}>View reviews</button></td>
+                    <td>{holdingActions(holding)}</td>
                   </tr>)}
                 </tbody>
               </table>
               {!visibleHoldings.length && <p className="empty">No holdings match this filter.</p>}
             </div>
           </section>}
-
-          {view === 'holdings' && <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized} />}
+          </HoldingMutations>}
         </>
       )}
       </>}

@@ -431,14 +431,32 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('heading', { name: 'Holdings' })).toBeNull()
   })
 
-  it('renders the canonical Holdings table before compact management controls', async () => {
+  it('keeps the holdings table and actions in one compact surface', async () => {
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
     render(<App />)
     await waitFor(() => expect(screen.getByRole('table', { name: 'Holdings' })).toBeTruthy())
     const table = screen.getByRole('table', { name: 'Holdings' })
-    const management = screen.getByRole('heading', { name: 'Manage holdings' })
-    expect(Boolean(table.compareDocumentPosition(management) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
+    expect(table.closest('.holdings-surface')?.querySelector('button[aria-label="Actions for AAA lot lot-a"]')).toBeTruthy()
     expect(screen.queryByRole('button', { name: /Archive lot/i })).toBeNull()
+  })
+
+  it('uses the compact authenticated header and binds each row menu to its lot identity', async () => {
+    const duplicateLots = { ...completeOverview, holdings: [
+      { ...completeOverview.holdings[0], lot_id: 'lot-first', symbol: 'SAME' },
+      { ...completeOverview.holdings[0], lot_id: 'lot-second', symbol: 'SAME' },
+    ] }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => duplicateLots } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /Actions for SAME lot/ })).toHaveLength(2))
+    expect(screen.queryByText('Private workspace')).toBeNull()
+    expect(screen.queryByText('Read-only holdings and immutable valuation snapshots.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeTruthy()
+    const triggers = screen.getAllByRole('button', { name: /Actions for SAME lot/ })
+    fireEvent.click(triggers[1])
+    expect(screen.getByRole('menu').getAttribute('data-archive-menu-lot-id')).toBe('lot-second')
+    expect(screen.getByRole('menuitem', { name: 'Archive holding' })).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(document.activeElement).toBe(triggers[1]))
   })
 
   it('tears down holding mutation controls when navigating away and remounts them on Holdings', async () => {
@@ -452,6 +470,19 @@ describe('Portfolio Dashboard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Holdings' }))
     expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'Add one holding' })).toBeNull()
+  })
+
+  it('opens Add holding in a transient dialog and restores focus on Escape', async () => {
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    const add = screen.getByRole('button', { name: 'Add holding' })
+    fireEvent.click(add)
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Add one holding' }))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await waitFor(() => expect(document.activeElement).toBe(add))
   })
 
   it('renders complete snapshots, flags, filtering and currency changes', async () => {
