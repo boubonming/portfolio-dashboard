@@ -108,6 +108,98 @@ func TestDependencyFlagsUseExactLotAndDependencyIdentity(t *testing.T) {
 	}
 }
 
+func TestPortfolioOverviewIncompleteSnapshotKeepsUnaffectedLotPnL(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "portfolio.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	nowText := canonicalSnapshotTime(now)
+	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-partial", "Partial fixture", "MYR", nowText, nowText); err != nil {
+		t.Fatal(err)
+	}
+	for _, instrument := range []struct{ id, symbol string }{{"instrument-good", "GOOD"}, {"instrument-missing", "MISSING"}} {
+		if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, instrument.id, instrument.symbol, "MYR", nowText); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-partial", instrument.id, nowText); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, lot := range []struct{ id, instrument, quantity, unitCost string }{
+		{"lot-good", "instrument-good", "2", "5"},
+		{"lot-missing", "instrument-missing", "3", "2"},
+	} {
+		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, lot.id, "portfolio-partial", lot.instrument, lot.quantity, lot.unitCost, "MYR", nowText, nowText); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.AddQuote(ctx, QuoteInput{ID: "quote-good", InstrumentID: "instrument-good", Currency: "MYR", Price: "10", Source: "fixture", MarketAt: nowText, Basis: "close", Provenance: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "portfolio-partial", ReportingCurrency: "MYR", AsOf: now, MaxAge: time.Hour})
+	if err != nil || status.Complete {
+		t.Fatalf("partial snapshot=%+v err=%v", status, err)
+	}
+	view, err := s.PortfolioOverview(ctx, "portfolio-partial", "MYR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Snapshot.State != "incomplete" || len(view.Holdings) != 2 {
+		t.Fatalf("partial overview=%+v", view)
+	}
+	byLot := make(map[string]domain.HoldingView, len(view.Holdings))
+	for _, holding := range view.Holdings {
+		byLot[holding.LotID] = holding
+	}
+	good := byLot["lot-good"]
+	if good.LatestPrice == nil || *good.LatestPrice != "10" || good.LatestValue == nil || *good.LatestValue != "20" || good.UnrealisedPnL == nil || *good.UnrealisedPnL != "10" {
+		t.Fatalf("unaffected lot lost exact source valuation: %+v", good)
+	}
+	if byLot["lot-missing"].UnrealisedPnL != nil {
+		t.Fatalf("affected lot exposed P/L: %+v", byLot["lot-missing"])
+	}
+}
+
+func TestPortfolioOverviewReportingFXOnlyIncompleteStillExposesSourcePnL(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "portfolio.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	nowText := canonicalSnapshotTime(now)
+	if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-fx-missing", "FX fixture", "MYR", nowText, nowText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES(?,?,?,?)`, "instrument-fx-missing", "USDLOT", "USD", nowText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-fx-missing", "instrument-fx-missing", nowText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-fx-missing", "portfolio-fx-missing", "instrument-fx-missing", "2", "5", "USD", nowText, nowText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddQuote(ctx, QuoteInput{ID: "quote-fx-missing", InstrumentID: "instrument-fx-missing", Currency: "USD", Price: "10", Source: "fixture", MarketAt: nowText, Basis: "close", Provenance: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "portfolio-fx-missing", ReportingCurrency: "MYR", AsOf: now, MaxAge: time.Hour})
+	if err != nil || status.Complete {
+		t.Fatalf("missing FX snapshot=%+v err=%v", status, err)
+	}
+	view, err := s.PortfolioOverview(ctx, "portfolio-fx-missing", "MYR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Holdings) != 1 || view.Holdings[0].UnrealisedPnL == nil || *view.Holdings[0].UnrealisedPnL != "10" || view.Holdings[0].ReportingValue != nil {
+		t.Fatalf("source P/L was not preserved when only reporting FX was incomplete: %+v", view.Holdings)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -236,6 +328,9 @@ func TestPortfolioOverviewPnLUsesLotIdentityAndFailsClosed(t *testing.T) {
 		{name: "missing pnl", mutate: func(payload *snapshotPayload) {
 			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.UnrealisedPnL = nil })
 		}},
+		{name: "missing price", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.Price = "" })
+		}},
 		{name: "stale lot valuation", mutate: func(payload *snapshotPayload) {
 			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.Freshness.Status = domain.Stale })
 		}},
@@ -274,7 +369,11 @@ func TestPortfolioOverviewPnLUsesLotIdentityAndFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, holding := range view.Holdings {
-				if holding.LotID == "lot-pnl-a" && holding.UnrealisedPnL != nil {
+				if tc.name == "incomplete valuation" {
+					if holding.UnrealisedPnL == nil {
+						t.Fatalf("%s omitted exact P/L for %s: %+v", tc.name, holding.LotID, holding)
+					}
+				} else if holding.LotID == "lot-pnl-a" && holding.UnrealisedPnL != nil {
 					t.Fatalf("%s exposed P/L for %s: %+v", tc.name, holding.LotID, holding)
 				}
 			}

@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App, { compareDecimalStrings, isCSVContentType, safeCSVFilename, type PortfolioOverview } from './App'
+import * as api from './api'
 
 const completeOverview: PortfolioOverview = {
   portfolio: { id: 'portfolio-default', name: 'Personal Portfolio', default_reporting_currency: 'MYR' },
@@ -11,6 +12,53 @@ const completeOverview: PortfolioOverview = {
     { lot_id: 'lot-a', symbol: 'AAA', name: 'AAA Fund', description: 'Distinct AAA instrument description', quantity: '2', currency: 'USD', unit_cost: '5', cost_basis: '10', latest_price: '50.5', latest_value: '101', reporting_value: '100.5', quote_source: 'fixture', freshness: { status: 'fresh' }, data_quality: [], missing_broker: false, missing_acquisition_date: false },
     { lot_id: 'lot-b', symbol: 'BBB', name: 'BBB Fund', quantity: '10', currency: 'SGD', unit_cost: '1', latest_price: '2', latest_value: '20', reporting_value: '20', freshness: { status: 'stale' }, data_quality: ['stale_dependency'], missing_broker: true, missing_acquisition_date: true },
   ],
+}
+
+const marketSetup = {
+  portfolio_id: 'portfolio-default',
+  etag: '\"setup-1\"',
+  providers: [{ name: 'finnhub', configured: true, public: false }],
+  instruments: [],
+}
+
+const strictMarketSetup = {
+  portfolio_id: 'portfolio-default',
+  etag: '\"strict-setup-1\"',
+  providers: [{ name: 'coingecko', configured: true, public: true }, { name: 'open_exchange_rates', configured: true, public: false }],
+  instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', currency: 'USD', mappings: [{ provider: 'coingecko', provider_symbol: 'aaa', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z' }] }],
+}
+
+function strictCompleteRefresh(): any {
+  return {
+    refresh: { refresh_id: 'refresh-1', portfolio_id: 'portfolio-default', status: 'complete', started_at: '2026-01-01T00:00:00.000000000Z', ended_at: '2026-01-01T00:00:01.000000000Z', observation_ids: ['quote-observation', 'fx-observation'], quote_observations: [{ id: 'quote-observation', instrument_id: 'instrument-a', symbol: 'AAA', currency: 'USD', source: 'coingecko' }], fx_observations: [{ id: 'fx-observation', base_currency: 'USD', quote_currency: 'MYR', source: 'open_exchange_rates' }], providers: [
+      { provider: 'coingecko', status: 'complete', request_count: 1, succeeded_count: 1, failed_count: 0, missing_mapping_count: 0, observation_ids: ['quote-observation'], quote_observations: [{ id: 'quote-observation', instrument_id: 'instrument-a', symbol: 'AAA', currency: 'USD', source: 'coingecko' }], fx_observations: [], errors: [] },
+      { provider: 'open_exchange_rates', status: 'complete', request_count: 1, succeeded_count: 1, failed_count: 0, missing_mapping_count: 0, observation_ids: ['fx-observation'], quote_observations: [], fx_observations: [{ id: 'fx-observation', base_currency: 'USD', quote_currency: 'MYR', source: 'open_exchange_rates' }], errors: [] },
+    ] },
+    snapshot: { snapshot_id: 'snapshot-1', portfolio_id: 'portfolio-default', calculation_version: 'phase-b.decimal.v1', created_at: '2026-01-01T00:00:02.000000000Z', as_of: '2026-01-01T00:00:01.000000000Z', complete: true, reporting_currency: 'MYR', reporting_total: '12', currencies: ['USD'], subtotals: [{ currency: 'USD', market_value: '10', cost_basis: '8', unrealised_pnl: '2' }], missing_count: 0, stale_count: 0, future_count: 0, invalid_count: 0, missing_dependencies: [], stale_dependencies: [], future_dependencies: [], invalid_dependencies: [], quote_ids: ['quote-observation'], fx_ids: ['fx-observation'], quote_observations: [{ id: 'quote-observation', instrument_id: 'instrument-a', symbol: 'AAA', currency: 'USD', source: 'coingecko' }], fx_observations: [{ id: 'fx-observation', base_currency: 'USD', quote_currency: 'MYR', source: 'open_exchange_rates' }], source_timestamps: ['2026-01-01T00:00:00.000000000Z', '2026-01-01T00:00:00.000000000Z'], presentation_timezone: 'Asia/Singapore' },
+    complete: true, freshness_policy: 'quotes and FX must be no older than the configured 36h freshness window; incomplete data never becomes zero', missing_instruments: [],
+  }
+}
+
+function strictIncompleteRefresh(): any {
+  const response = strictCompleteRefresh()
+  response.complete = false
+  response.refresh.status = 'incomplete'
+  response.refresh.providers[0].status = 'incomplete'
+  response.refresh.providers[0].failed_count = 1
+  response.refresh.providers[0].succeeded_count = 0
+  response.refresh.providers[0].observation_ids = []
+  response.refresh.providers[0].quote_observations = []
+  response.refresh.providers[0].errors = ['missing mapping']
+  response.refresh.observation_ids = ['fx-observation']
+  response.refresh.quote_observations = []
+  response.snapshot.complete = false
+  delete response.snapshot.reporting_total
+  response.snapshot.missing_count = 1
+  response.snapshot.missing_dependencies = ['missing quote:instrument-a']
+  response.snapshot.quote_ids = []
+  response.snapshot.quote_observations = []
+  response.snapshot.source_timestamps = ['2026-01-01T00:00:00.000000000Z']
+  return response
 }
 
 const appReview = {
@@ -35,7 +83,7 @@ const decimalSortOverview: PortfolioOverview = {
 const pnlOverview: PortfolioOverview = {
   ...completeOverview,
   holdings: [
-    { ...completeOverview.holdings[0], lot_id: 'lot-gain', symbol: 'GAIN', unrealised_pnl: '10.1' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-gain', symbol: 'GAIN', latest_price: undefined, unrealised_pnl: '10.1' },
     { ...completeOverview.holdings[0], lot_id: 'lot-loss', symbol: 'LOSS', unrealised_pnl: '-10' },
     { ...completeOverview.holdings[0], lot_id: 'lot-zero', symbol: 'ZERO', unrealised_pnl: '0.00' },
     { ...completeOverview.holdings[0], lot_id: 'lot-unavailable', symbol: 'UNAVAILABLE', unrealised_pnl: undefined, freshness: { status: 'missing' } },
@@ -490,6 +538,14 @@ describe('Portfolio Dashboard', () => {
     expect(screen.getByText('Break-even').className).toContain('subline')
     expect(screen.getByText('Unavailable').className).toContain('pnl-unavailable')
     expect(screen.queryByText('Unavailable')?.className).not.toMatch(/pnl-(gain|loss|break-even)/)
+    const holdingsRows = within(screen.getByRole('table', { name: 'Holdings' })).getAllByRole('row').slice(1)
+    const rowFor = (symbol: string) => holdingsRows.find((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent === symbol)
+    expect(rowFor('GAIN')?.querySelector('.pnl-gain')).toBeTruthy()
+    expect(rowFor('GAIN')?.querySelectorAll('td')[4]?.querySelector('.pnl-gain, .pnl-loss, .pnl-break-even')).toBeNull()
+    expect(rowFor('GAIN')?.querySelectorAll('td')[5]?.querySelector('.pnl-gain')).toBeTruthy()
+    expect(rowFor('LOSS')?.querySelector('.pnl-loss')).toBeTruthy()
+    expect(rowFor('ZERO')?.querySelector('.pnl-break-even')).toBeTruthy()
+    expect(rowFor('UNAVAILABLE')?.querySelector('.pnl-gain')).toBeNull()
 
     const holdingsTable = () => screen.getByRole('table', { name: 'Holdings' })
     const rowSymbols = () => within(holdingsTable()).getAllByRole('row').slice(1).map((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent)
@@ -499,20 +555,233 @@ describe('Portfolio Dashboard', () => {
     expect(rowSymbols()).toEqual(['GAIN', 'ZERO', 'LOSS', 'UNAVAILABLE'])
   })
 
-  it('withholds P/L even when an incomplete response contains a candidate value', async () => {
+  it('renders exact per-lot P/L even when the global response is incomplete', async () => {
     const incomplete = { ...pnlOverview, snapshot: { ...pnlOverview.snapshot, state: 'incomplete' as const, complete: false } }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => incomplete } as Response)))
     render(<App />)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
-    expect(screen.getAllByText('Unavailable').length).toBe(4)
-    expect(screen.queryByText('Gain')).toBeNull()
-    expect(screen.queryByText('Loss')).toBeNull()
-    expect(screen.queryByText('Break-even')).toBeNull()
+    expect(screen.getAllByText('Unavailable')).toHaveLength(1)
+    expect(screen.getAllByText(/Gain/)).toHaveLength(1)
+    expect(screen.getAllByText(/Loss/)).toHaveLength(2)
+    expect(screen.getAllByText(/Break-even/)).toHaveLength(2)
+  })
+
+  it('reloads Holdings after a successfully committed incomplete refresh', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => String(input).endsWith('/market-data') ? marketSetup : completeOverview } as Response))
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: false,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const overviewCallsBefore = fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText(/valuation is incomplete; usable per-lot values were loaded/i)).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    expect(refreshSpy.mock.calls[0]?.[0]).toBe('portfolio-default')
+    expect(refreshSpy.mock.calls[0]?.[5]).toEqual(marketSetup)
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/portfolios/portfolio-default/market-data'))).toBe(true)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore + 1)
+    fireEvent.click(screen.getByRole('button', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market data' })).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Refresh prices' })).toBeNull()
+  })
+
+  it('reloads Holdings and announces a complete refresh', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => String(input).endsWith('/market-data') ? marketSetup : completeOverview } as Response))
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: true,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(screen.getAllByRole('button', { name: 'Refresh prices' })).toHaveLength(1)
+    const overviewCallsBefore = fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    expect(refreshSpy.mock.calls[0]?.[0]).toBe('portfolio-default')
+    expect(refreshSpy.mock.calls[0]?.[5]).toEqual(marketSetup)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore + 1)
+    fireEvent.click(screen.getByRole('button', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market data' })).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Refresh prices' })).toBeNull()
+  })
+
+  it.each([
+    ['a foreign quote witness', (response: ReturnType<typeof strictCompleteRefresh>) => { response.refresh.providers[0].quote_observations[0].instrument_id = 'instrument-foreign' }],
+    ['a foreign FX witness', (response: ReturnType<typeof strictCompleteRefresh>) => { response.refresh.providers[1].fx_observations[0].base_currency = 'EUR' }],
+    ['a foreign missing instrument', (response: ReturnType<typeof strictCompleteRefresh>) => { response.complete = false; response.refresh.status = 'incomplete'; response.refresh.providers[0].status = 'incomplete'; response.refresh.providers[0].failed_count = 1; response.refresh.providers[0].succeeded_count = 0; response.refresh.providers[0].observation_ids = []; response.refresh.providers[0].quote_observations = []; response.refresh.providers[0].errors = ['missing mapping']; response.refresh.observation_ids = ['fx-observation']; response.refresh.quote_observations = []; response.snapshot.complete = false; delete response.snapshot.reporting_total; response.snapshot.missing_count = 1; response.snapshot.missing_dependencies = ['missing quote:instrument-a']; response.snapshot.quote_ids = []; response.snapshot.quote_observations = []; response.snapshot.source_timestamps = ['2026-01-01T00:00:00.000000000Z']; response.missing_instruments = ['FOREIGN (USD)'] }],
+  ])('rejects a setup-bound refresh response containing %s before reload or success', async (_name, mutate) => {
+    const response = strictCompleteRefresh()
+    mutate(response)
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.endsWith('/market-data') ? strictMarketSetup : url.includes('/market-data/refresh') ? response : completeOverview
+      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const overviewCallsBefore = fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Invalid market refresh response/))
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/portfolios/portfolio-default/market-data'))).toBe(true)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/market-data/refresh'))).toHaveLength(1)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore)
+    expect(screen.queryByText(/Prices refreshed/)).toBeNull()
+  })
+
+  it('accepts a valid setup-bound complete refresh through the production Holdings path', async () => {
+    const response = strictCompleteRefresh()
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.endsWith('/market-data') ? strictMarketSetup : url.includes('/market-data/refresh') ? response : completeOverview
+      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const overviewCallsBefore = fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore + 1)
+  })
+
+  it('accepts a valid setup-bound incomplete refresh through the production Holdings path', async () => {
+    const response = strictIncompleteRefresh()
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.endsWith('/market-data') ? strictMarketSetup : url.includes('/market-data/refresh') ? response : completeOverview
+      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText(/valuation is incomplete; usable per-lot values were loaded/i)).toBeTruthy())
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview'))).toHaveLength(2)
+  })
+
+  it('does not refresh or reload when setup scope validation fails', async () => {
+    const foreignSetup = { ...strictMarketSetup, portfolio_id: 'portfolio-foreign' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.endsWith('/market-data') ? foreignSetup : completeOverview
+      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const overviewCallsBefore = fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/stale portfolio scope/i))
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/market-data/refresh'))).toHaveLength(0)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore)
+  })
+
+  it('ignores a second activation while a Holdings refresh is in flight', async () => {
+    let resolveRefresh: ((value: Awaited<ReturnType<typeof api.refreshMarketData>>) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => String(input).endsWith('/market-data') ? marketSetup : completeOverview } as Response))
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockImplementation(() => new Promise((resolve) => { resolveRefresh = resolve }))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const refreshButton = screen.getByRole('button', { name: 'Refresh prices' })
+    fireEvent.click(refreshButton)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refreshing prices…' })).toHaveProperty('disabled', true))
+    fireEvent.click(refreshButton)
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    resolveRefresh?.({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: true,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+  })
+
+  it('keeps Holdings usable and announces a refresh error', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => String(input).endsWith('/market-data') ? marketSetup : completeOverview } as Response))
+    vi.spyOn(api, 'refreshMarketData').mockRejectedValue(new Error('provider unavailable'))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('provider unavailable'))
+    expect(screen.getByRole('table', { name: 'Holdings' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Refresh prices' })).toHaveProperty('disabled', false)
+    expect(screen.getByText('Price refresh failed.')).toBeTruthy()
+  })
+
+  it('clears private state and returns to login after a refresh 401', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => String(input).endsWith('/market-data') ? marketSetup : completeOverview } as Response))
+    vi.spyOn(api, 'refreshMarketData').mockRejectedValue(new api.APIError(401))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+  })
+
+  it('invalidates a late refresh when switching views', async () => {
+    let resolveRefresh: ((value: Awaited<ReturnType<typeof api.refreshMarketData>>) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.spyOn(api, 'refreshMarketData').mockImplementation(() => new Promise((resolve) => { resolveRefresh = resolve }))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const overviewCallsBefore = fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refreshing prices…' })).toHaveProperty('disabled', true))
+    fireEvent.click(screen.getByRole('button', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market data' })).toBeTruthy())
+    resolveRefresh?.({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: true,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    await flushEffects()
+    fireEvent.click(screen.getByRole('button', { name: 'Holdings' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore)
+    expect(screen.queryByText(/Prices refreshed/)).toBeNull()
+  })
+
+  it('invalidates a late refresh when changing reporting currency', async () => {
+    let resolveRefresh: ((value: Awaited<ReturnType<typeof api.refreshMarketData>>) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.spyOn(api, 'refreshMarketData').mockImplementation(() => new Promise((resolve) => { resolveRefresh = resolve }))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refreshing prices…' })).toHaveProperty('disabled', true))
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('currency=USD'), expect.anything()))
+    resolveRefresh?.({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: true,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    await flushEffects()
+    expect(screen.queryByText(/Prices refreshed/)).toBeNull()
+    expect(screen.queryByText(/Refreshing prices/)).toBeNull()
   })
 
   it('renders Unavailable for stale snapshots, no snapshots, and every affected freshness state', async () => {
     let response: PortfolioOverview = {
       ...pnlOverview,
+      holdings: pnlOverview.holdings.map((holding) => ({ ...holding, unrealised_pnl: undefined })),
       snapshot: { ...pnlOverview.snapshot, state: 'stale', complete: true },
     }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => response } as Response)))
@@ -525,6 +794,7 @@ describe('Portfolio Dashboard', () => {
 
     response = {
       ...pnlOverview,
+      holdings: pnlOverview.holdings.map((holding) => ({ ...holding, unrealised_pnl: undefined })),
       snapshot: { state: 'no_snapshot', complete: false, subtotals: [] },
     }
     cleanup()

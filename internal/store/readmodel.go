@@ -91,7 +91,12 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 		view.Snapshot.State = "stale"
 		view.Snapshot.StaleDependencies = appendUnique(view.Snapshot.StaleDependencies, "holdings_revision")
 	}
-	currentSnapshot := view.Snapshot.State == "complete" && view.Snapshot.Complete
+	// A snapshot can be globally incomplete because another lot or reporting
+	// currency is missing data. That must not hide an otherwise exact,
+	// source-currency valuation for this lot. Holdings revision freshness is a
+	// separate authority check: once holdings change, every snapshot valuation
+	// is stale and P/L must be withheld.
+	currentSnapshot := payload.Input.HoldingsRevision == currentRevision
 	view.Allocation = domain.BuildAllocation(input, valuation)
 
 	values := make(map[string]domain.LotValuation, len(valuation.Lots))
@@ -137,13 +142,14 @@ func (s *Store) PortfolioOverview(ctx context.Context, portfolioID, reportingCur
 }
 
 func usableSnapshotPnL(value domain.LotValuation, holdingCurrency string) bool {
-	if value.UnrealisedPnL == nil || value.CostBasis == nil || value.MarketValue == "" || value.Freshness.Status != domain.Fresh || !strings.EqualFold(value.Currency, holdingCurrency) {
+	if value.UnrealisedPnL == nil || value.CostBasis == nil || value.Price == "" || value.MarketValue == "" || value.Freshness.Status != domain.Fresh || !strings.EqualFold(value.Currency, holdingCurrency) {
 		return false
 	}
+	price, priceErr := domain.ParseDecimal(value.Price)
 	cost, costErr := domain.ParseDecimal(*value.CostBasis)
 	market, marketErr := domain.ParseDecimal(value.MarketValue)
 	pnl, pnlErr := domain.ParseDecimal(*value.UnrealisedPnL)
-	if costErr != nil || marketErr != nil || pnlErr != nil || cost.Sign() < 0 || market.Sign() < 0 {
+	if priceErr != nil || price.Sign() <= 0 || costErr != nil || marketErr != nil || pnlErr != nil || cost.Sign() < 0 || market.Sign() < 0 {
 		return false
 	}
 	return market.Sub(cost).Rat().Cmp(pnl.Rat()) == 0

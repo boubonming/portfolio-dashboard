@@ -290,6 +290,87 @@ func TestPortfolioOverviewAPIPreservesLotIdentityAndOmitsIncompletePnL(t *testin
 	}
 }
 
+func TestPortfolioOverviewAPIIncompleteSnapshotPreservesUnaffectedLotPnL(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	now := canonicalReviewFixtureTimestamp(time.Now().UTC())
+	if _, err := database.DB.Exec(`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`, "instrument-api-missing", "MISSING", "Missing fixture instrument", "USD", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`, "portfolio-api", "instrument-api-missing", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,unit_cost,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?,?)`, "lot-api-missing", "portfolio-api", "instrument-api-missing", "3", "2", "USD", now, now); err != nil {
+		t.Fatal(err)
+	}
+	status, err := database.CreateSnapshot(context.Background(), store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "MYR", AsOf: time.Now().UTC(), MaxAge: 2 * time.Hour})
+	if err != nil || status.Complete {
+		t.Fatalf("incomplete snapshot=%+v err=%v", status, err)
+	}
+	handler := authenticatedAPIHandler(t, database)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview?currency=MYR", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Snapshot struct {
+			State    string `json:"state"`
+			Complete bool   `json:"complete"`
+		} `json:"snapshot"`
+		Holdings []struct {
+			LotID         string  `json:"lot_id"`
+			UnrealisedPnL *string `json:"unrealised_pnl"`
+		} `json:"holdings"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Snapshot.State != "incomplete" || body.Snapshot.Complete || len(body.Holdings) != 2 {
+		t.Fatalf("overview=%+v", body)
+	}
+	pnlByLot := make(map[string]*string, len(body.Holdings))
+	for _, holding := range body.Holdings {
+		pnlByLot[holding.LotID] = holding.UnrealisedPnL
+	}
+	if pnlByLot["lot-api"] == nil || *pnlByLot["lot-api"] != "15.28125" {
+		t.Fatalf("unaffected lot P/L missing from wire response: %+v", pnlByLot)
+	}
+	if pnlByLot["lot-api-missing"] != nil {
+		t.Fatalf("affected lot P/L leaked into wire response: %+v", pnlByLot)
+	}
+}
+
+func TestPortfolioOverviewAPIReportingFXOnlyIncompletePreservesSourcePnL(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	status, err := database.CreateSnapshot(context.Background(), store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "JPY", AsOf: time.Now().UTC(), MaxAge: 2 * time.Hour})
+	if err != nil || status.Complete {
+		t.Fatalf("missing FX snapshot=%+v err=%v", status, err)
+	}
+	handler := authenticatedAPIHandler(t, database)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/portfolios/portfolio-api/overview?currency=JPY", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Snapshot struct {
+			State string `json:"state"`
+		} `json:"snapshot"`
+		Holdings []struct {
+			UnrealisedPnL  *string `json:"unrealised_pnl"`
+			ReportingValue *string `json:"reporting_value"`
+		} `json:"holdings"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Snapshot.State != "incomplete" || len(body.Holdings) != 1 || body.Holdings[0].UnrealisedPnL == nil || *body.Holdings[0].UnrealisedPnL != "15.28125" || body.Holdings[0].ReportingValue != nil {
+		t.Fatalf("source P/L missing or reporting value leaked: %+v", body)
+	}
+}
+
 func TestPortfolioOverviewAPIReadsAllLotsWithoutCrossPortfolioLeakage(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "dashboard.sqlite"))
