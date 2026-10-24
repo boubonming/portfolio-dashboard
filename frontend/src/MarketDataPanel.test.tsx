@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import MarketDataPanel from './MarketDataPanel'
+import { hasMatchingDeclaration, installCommittedStyles } from './cssTestUtils'
 
 const providers = [
   { name: 'coingecko', configured: true, public: true },
@@ -44,6 +45,29 @@ afterEach(() => {
 })
 
 describe('MarketDataPanel', () => {
+  it('binds real market-data controls and raw table cells to scoped legacy rules', async () => {
+    const removeStyles = installCommittedStyles()
+    const fetchMock = vi.fn(() => json(setup()))
+    try {
+      renderPanel(fetchMock)
+      const provider = await waitFor(() => screen.getAllByRole('combobox')[0])
+      const identifier = screen.getAllByPlaceholderText('Exact listing / coin ID')[0]
+      const save = screen.getByRole('button', { name: 'Save all mappings' })
+      expect(hasMatchingDeclaration(provider, 'background', '#172322')).toBe(true)
+      expect(hasMatchingDeclaration(identifier, 'background', '#172322')).toBe(true)
+      provider.focus()
+      expect(hasMatchingDeclaration(provider, 'outline', '3px', 'focus-visible')).toBe(true)
+      expect((save as HTMLButtonElement).disabled).toBe(true)
+      expect(hasMatchingDeclaration(save, 'opacity', '.65', 'disabled')).toBe(true)
+      const tableCells = Array.from(document.querySelectorAll('.market-data-table th, .market-data-table td'))
+      expect(tableCells.length).toBeGreaterThan(0)
+      expect(tableCells.every((cell) => hasMatchingDeclaration(cell, 'border', '1px'))).toBe(true)
+
+    } finally {
+      removeStyles()
+    }
+  })
+
   it('does not prefill a guessed identifier before provider discovery returns metadata', async () => {
     const configuredSetup = setup({
       providers: [

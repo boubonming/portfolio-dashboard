@@ -88,10 +88,10 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .allocation-table {
   border-collapse: collapse;
   min-width: 0;
-  table-layout: fixed;
   width: 100%;
 }
-.allocation-table :is(th, td) { border: 1px solid #31514e; padding: .65rem .75rem; text-align: left; vertical-align: top; }
+.allocation-table :is(th, td) { border: 1px solid #31514e; min-width: 0; overflow-wrap: anywhere; padding: .65rem .75rem; text-align: left; vertical-align: top; word-break: break-word; }
+.allocation-table .numeric { overflow-wrap: anywhere; white-space: normal; word-break: break-word; }
 .allocation-table thead th { background: #172322; position: sticky; top: 0; z-index: 1; }
 .allocation-table th[scope="row"] { font-weight: 700; }
 .allocation-table caption { color: #a9c1bd; font-weight: 700; padding: .5rem; text-align: left; }

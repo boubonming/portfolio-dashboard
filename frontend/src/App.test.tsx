@@ -1,12 +1,9 @@
-// @ts-expect-error Vitest executes this test in Node, while the app tsconfig omits Node typings.
-import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App, { compareDecimalStrings, formatDecimalForDisplay, isCSVContentType, safeCSVFilename, type PortfolioOverview } from './App'
 import * as api from './api'
-
-const committedStyles = readFileSync('src/styles.css', 'utf8')
+import { committedStyleRules, committedStyleSelectors, hasMatchingDeclaration, matchingStyleRules, installCommittedStyles } from './cssTestUtils'
 
 const completeOverview: PortfolioOverview = {
   portfolio: { id: 'portfolio-default', name: 'Personal Portfolio', default_reporting_currency: 'MYR' },
@@ -444,36 +441,65 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('button', { name: /Archive lot/i })).toBeNull()
   })
 
-  it('keeps unmigrated native controls and raw tables scoped away from MUI primitives', () => {
-    expect(committedStyles).toMatch(/\.activity-card[\s\S]*\.confirmation-dialog[\s\S]*:is\(button, input, select, textarea\)/)
-    expect(committedStyles).toMatch(/:not\(\.MuiButtonBase-root\):not\(\.MuiInputBase-input\)/)
-    expect(committedStyles).toMatch(/background:\s*#172322/)
-    expect(committedStyles).toMatch(/border:\s*1px solid #41615d/)
-    expect(committedStyles).toMatch(/padding:\s*\.55rem \.7rem/)
-    expect(committedStyles).toMatch(/:focus-visible[\s\S]*outline:\s*3px solid #75d5c7/)
-    expect(committedStyles).toMatch(/\.allocation-table\s*\{[\s\S]*border-collapse:\s*collapse[\s\S]*min-width:\s*0[\s\S]*table-layout:\s*fixed[\s\S]*width:\s*100%/)
-    expect(committedStyles).toMatch(/\.market-data-table\s*\{[\s\S]*border-collapse:\s*collapse[\s\S]*min-width:\s*62rem[\s\S]*width:\s*100%/)
-    expect(committedStyles).toMatch(/\.allocation-table[\s\S]*\.market-data-table[\s\S]*:is\(th, td\)[\s\S]*border:\s*1px solid #31514e/)
-    expect(committedStyles).not.toMatch(/(?:^|\n)\s*(?:table|thead|tbody|tr|th|td)\s*\{/)
-    expect(committedStyles).not.toMatch(/(?:^|\n)\s*(?:button|input|select|textarea)\s*\{\s*(?:background|border|padding|outline)/)
+  it('keeps the committed stylesheet scoped and selector-aware', () => {
+    const removeStyles = installCommittedStyles()
+    try {
+      const selectors = committedStyleSelectors()
+      expect(selectors.some((selector) => /^(?:table|thead|tbody|tr|th|td)$/.test(selector.trim()))).toBe(false)
+      expect(committedStyleRules().some(({ selectorText, cssText }) => /^(?:button|input|select|textarea)$/.test(selectorText.trim()) && /(?:background|border|padding|outline)\s*:/.test(cssText))).toBe(false)
+      expect(selectors.some((selector) => selector.includes('.activity-card') && selector.includes(':not(.MuiButtonBase-root)'))).toBe(true)
+      expect(selectors.some((selector) => selector.includes('.allocation-table') && selector.includes(':is(th, td)'))).toBe(true)
+      expect(selectors.some((selector) => selector.includes('.market-data-table') && selector.includes(':is(th, td)'))).toBe(true)
+      const allocationTable = document.createElement('table')
+      allocationTable.className = 'allocation-table'
+      const allocationRules = matchingStyleRules(allocationTable)
+      expect(allocationRules.some(({ cssText }) => cssText.includes('border-collapse'))).toBe(true)
+      expect(allocationRules.some(({ cssText }) => cssText.includes('table-layout'))).toBe(false)
+    } finally {
+      removeStyles()
+    }
   })
 
-  it('keeps the scoped stylesheet selectors attached to rendered raw surfaces', async () => {
+  it('binds raw controls and long allocation values to scoped rules while excluding MUI primitives', async () => {
+    const removeStyles = installCommittedStyles()
+    const allocation = allocationOverview.allocation!
     const fetchMock = authenticatedFetch((input) => String(input).includes('/activity')
       ? activityResponse([activityItem('style-activity')], true, activityCursor)
-      : Promise.resolve({ ok: true, status: 200, json: async () => allocationOverview } as Response))
+      : Promise.resolve({ ok: true, status: 200, json: async () => ({ ...allocationOverview, allocation: { ...allocation, by_instrument: [{ ...allocation.by_instrument![0]!, symbol: 'LONG-SYMBOL-'.repeat(12), value: '1234567890.123456789012345678901234567890', percentage: '80.250000000000000000000000000000' }], by_source_currency: [{ ...allocation.by_source_currency![0]!, value: '9876543210.987654321098765432109876543210', percentage: '19.750000000000000000000000000000' }] } }) } as Response))
     vi.stubGlobal('fetch', fetchMock)
-    render(<App />)
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
-    fireEvent.click(screen.getByRole('tab', { name: 'Overview' }))
-    await waitFor(() => expect(screen.getByRole('table', { name: 'Allocation detail, also available without color' })).toBeTruthy())
-    expect(document.querySelector('.allocation-table')).toBeTruthy()
-    expect(committedStyles).toContain('.allocation-table')
-    fireEvent.click(screen.getByRole('tab', { name: 'Activity' }))
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Activity' })).toBeTruthy())
-    expect(document.querySelector('.activity-card')).toBeTruthy()
-    expect(document.querySelector('.activity-card button')).toBeTruthy()
-    expect(committedStyles).toContain('.activity-card')
+    try {
+      render(<App />)
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+      fireEvent.click(screen.getByRole('tab', { name: 'Overview' }))
+      await waitFor(() => expect(screen.getAllByRole('table', { name: 'Allocation detail, also available without color' })).toHaveLength(1))
+      const allocationTables = document.querySelectorAll<HTMLTableElement>('.allocation-table')
+      expect(allocationTables).toHaveLength(2)
+      const allocationCells = Array.from(document.querySelectorAll('.allocation-table th, .allocation-table td'))
+      expect(allocationCells.some((cell) => cell.textContent?.includes('LONG-SYMBOL-'.repeat(12)))).toBe(true)
+      expect(allocationCells.filter((cell) => cell.classList.contains('numeric')).every((cell) => hasMatchingDeclaration(cell, 'overflow-wrap', 'anywhere'))).toBe(true)
+      expect(allocationCells.filter((cell) => cell.classList.contains('numeric')).every((cell) => hasMatchingDeclaration(cell, 'white-space', 'normal'))).toBe(true)
+      expect(allocationCells.every((cell) => hasMatchingDeclaration(cell, 'border', '1px'))).toBe(true)
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Activity' }))
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Activity' })).toBeTruthy())
+      const activityButton = screen.getByRole('button', { name: 'Load more activity' })
+      expect(hasMatchingDeclaration(activityButton, 'background', '#172322')).toBe(true)
+      activityButton.focus()
+      expect(hasMatchingDeclaration(activityButton, 'outline', '3px', 'focus-visible')).toBe(true)
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+      await waitFor(() => expect(screen.getByRole('table', { name: 'Holdings' })).toBeTruthy())
+      const muiElements = [
+        document.querySelector('.MuiToolbar-root'),
+        screen.getByRole('button', { name: 'Add holding' }),
+        screen.getByRole('tab', { name: 'Holdings' }),
+        screen.getByRole('textbox', { name: /filter holdings/i }),
+        screen.getByRole('table', { name: 'Holdings' }).querySelector('td'),
+      ].filter((element): element is Element => Boolean(element))
+      expect(muiElements.every((element) => matchingStyleRules(element).every(({ selectorText }) => !/(?:activity-card|reviews-card|review-detail|thesis-surface|market-data-card|holding-mutation-card|confirmation-dialog|allocation-table|market-data-table)/.test(selectorText)))).toBe(true)
+    } finally {
+      removeStyles()
+    }
   })
 
   it('uses the compact authenticated header and binds each row menu to its lot identity', async () => {
@@ -500,7 +526,6 @@ describe('Portfolio Dashboard', () => {
     expect(headerElement.querySelectorAll('.nav-compat-button')).toHaveLength(0)
     expect(within(headerElement).queryAllByRole('button', { name: /^(Overview|Holdings|Activity|Reviews|Market data)$/ })).toHaveLength(0)
     expect(screen.getByRole('tab', { name: 'Holdings' }).getAttribute('aria-selected')).toBe('true')
-    expect(committedStyles).not.toMatch(/\.app-header\s*\{|\.view-nav\s*\{|\.toolbar\s*\{|\.overview\s*\{|\.table-card\s*\{|\.pnl-gain\s*,/)
     const triggers = screen.getAllByRole('button', { name: /Actions for SAME lot/ })
     fireEvent.click(triggers[1])
     expect(screen.getByRole('menu').getAttribute('data-archive-menu-lot-id')).toBe('lot-second')
