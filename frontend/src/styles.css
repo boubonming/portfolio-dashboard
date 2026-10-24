@@ -166,7 +166,8 @@ tbody th { font-weight: 500; }
 .holding-actions { display: flex; flex-wrap: wrap; gap: .65rem; }
 .holding-row-actions { min-width: 3.25rem; position: relative; }
 .row-action-trigger { font-size: 1.25rem; line-height: 1; padding: .45rem .65rem; }
-.row-action-menu { background: #172322; border: 1px solid #75d5c7; border-radius: 8px; min-width: 10rem; padding: .3rem; position: absolute; right: 0; top: calc(100% + .25rem); z-index: 4; }
+.row-action-menu { background: #172322; border: 1px solid #75d5c7; border-radius: 8px; min-width: 10rem; padding: .3rem; z-index: 20; }
+.row-action-menu-portal { position: fixed; }
 .row-action-menu button { border: 0; display: block; text-align: left; width: 100%; }
 .holding-form { border-top: 1px solid #41615d; display: grid; gap: .8rem; margin-top: 1rem; max-width: 68rem; padding-top: 1.25rem; }
 .holding-form h3, .archive-controls h3 { margin: 0; }

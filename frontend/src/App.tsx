@@ -881,7 +881,7 @@ export default function App() {
           <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
           <button type="button" aria-label="Reviews" aria-current={view === 'reviews' ? 'page' : undefined} onClick={() => { setReviewsHoldingId(undefined); setView('reviews') }}>Review</button>
           <button type="button" aria-label="Market data" aria-current={view === 'market' ? 'page' : undefined} onClick={() => setView('market')}>Market Data</button>
-          <a className="machine-entry" href="/machine" aria-label="Machine entry">Machine</a>
+
         </nav>
         <button className="sign-out" type="button" onClick={logout}>Sign out</button>
       </header>
@@ -937,7 +937,7 @@ export default function App() {
 
           {view === 'overview' && <AllocationSection data={data} />}
 
-          {view === 'holdings' && <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized}>
+          {view === 'holdings' && <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active sessionKey={String(authGeneration.current)} scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized}>
             {(holdingActions) => <section className="table-card holdings-surface" aria-labelledby="holdings-title">
             <div className="section-heading"><div><span className="eyebrow">Canonical active lots</span><h2 id="holdings-title">Holdings</h2></div><span className="muted">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</span></div>
             <div className="table-scroll">

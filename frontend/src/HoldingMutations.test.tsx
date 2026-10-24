@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
+import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import HoldingMutations, { validateHoldingMutationReceipt, validatePortfolioETag } from './HoldingMutations'
 
@@ -513,5 +514,76 @@ describe('HoldingMutations', () => {
     expect(screen.getByRole('alert').textContent).toMatch(/fix the highlighted/i)
     expect(document.activeElement).toBe(screen.getByLabelText('Symbol'))
     expect(screen.getByLabelText('Symbol').getAttribute('aria-describedby')).toContain('symbol-error')
+  })
+
+  it('exercises the production row-menu path for exact-lot archive, outside close, and focus restoration', async () => {
+    const lots = [
+      { ...holding, symbol: 'SAME', name: 'First lot', lot_id: 'lot-first', quantity: '1', unit_cost: '5', cost_basis: '5' },
+      { ...holding, symbol: 'SAME', name: 'Second lot', lot_id: 'lot-second', quantity: '2', unit_cost: '7', cost_basis: '14' },
+    ]
+    const props = { ...baseProps(), holdings: lots }
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async (_input, init) => ({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...receipt, operation: 'remove', holding: { ...receipt.holding, holding_id: 'lot-second', lifecycle: 'removed', removed_at: '2026-01-02T12:00:00.000000000Z' }, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }) } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    const renderRows = (renderActions: (lot: typeof holding) => ReactNode) => <div>{lots.map((lot) => <span key={lot.lot_id}>{renderActions(lot)}</span>)}</div>
+    const rendered = render(<HoldingMutations {...props}>{renderRows}</HoldingMutations>)
+    const triggers = screen.getAllByRole('button', { name: /Actions for SAME lot/ })
+    fireEvent.click(triggers[1])
+    const menu = screen.getByRole('menu')
+    expect(menu.className).toContain('row-action-menu-portal')
+    expect(menu.getAttribute('data-archive-menu-lot-id')).toBe('lot-second')
+    const retainedMenuItem = screen.getByRole('menuitem', { name: 'Archive holding' })
+    rendered.rerender(<HoldingMutations {...props} scopeKey="portfolio-default:USD:holdings">{renderRows}</HoldingMutations>)
+    expect(screen.queryByRole('menu')).toBeNull()
+    fireEvent.click(retainedMenuItem)
+    expect(fetchMock).not.toHaveBeenCalled()
+    rendered.rerender(<HoldingMutations {...props}>{renderRows}</HoldingMutations>)
+    const currentTriggers = screen.getAllByRole('button', { name: /Actions for SAME lot/ })
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('menu')).toBeNull()
+
+    fireEvent.click(currentTriggers[1])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+    expect(screen.getByRole('heading', { name: /Archive SAME holding/i })).toBeTruthy()
+    expect(screen.getByText(/Second lot.*2 USD.*unit cost 7 USD.*cost basis 14 USD/i)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel archive' }))
+    expect(document.activeElement).toBe(triggers[1])
+
+    fireEvent.click(currentTriggers[1])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/holdings/lot-second')
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('DELETE')
+    rendered.rerender(<HoldingMutations {...props} holdings={[lots[0]]}>{(renderActions) => <div>{[lots[0]].map((lot) => renderActions(lot))}</div>}</HoldingMutations>)
+    await waitFor(() => expect(document.activeElement).toBe(rendered.container.querySelector('[role="status"]')))
+  })
+
+  it('keeps create failures in the active Add dialog with draft and retry state intact', async () => {
+    const props = baseProps()
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 500, headers: new Headers(), clone: () => ({ json: async () => ({}) }) } as unknown as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    const root = document.createElement('div')
+    root.id = 'root'
+    document.body.appendChild(root)
+    render(<HoldingMutations {...props} />, { container: root })
+    const origin = screen.getByRole('button', { name: 'Add holding' })
+    fireEvent.click(origin)
+    fireEvent.change(screen.getByLabelText('Symbol'), { target: { value: 'RETRY' } })
+    fireEvent.change(screen.getByLabelText('Instrument currency'), { target: { value: 'USD' } })
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '2' } })
+    fireEvent.change(screen.getByLabelText('Unit cost'), { target: { value: '5' } })
+    fireEvent.change(screen.getByLabelText('Cost basis'), { target: { value: '10' } })
+    fireEvent.change(screen.getByLabelText('Holding currency'), { target: { value: 'USD' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/server could not apply/i))
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.contains(screen.getByRole('alert'))).toBe(true)
+    expect(document.activeElement).toBe(screen.getByRole('alert'))
+    expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('RETRY')
+    expect(root.getAttribute('aria-hidden')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(document.activeElement).toBe(origin)
+    expect(root.hasAttribute('aria-hidden')).toBe(false)
+    root.remove()
   })
 })

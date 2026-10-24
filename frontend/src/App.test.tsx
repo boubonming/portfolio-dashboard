@@ -465,6 +465,7 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
     expect(screen.getByRole('heading', { name: 'Add one holding' })).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'Escape' })
     fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     expect(screen.queryByRole('heading', { name: 'Add one holding' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Holdings' }))
