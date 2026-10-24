@@ -8,6 +8,58 @@ body { margin: 0; min-width: 320px; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 .shell { width: 100%; }
+.activity-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select),
+.reviews-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select),
+.review-detail :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select),
+.thesis-surface :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select),
+.market-data-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select),
+.holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select),
+.confirmation-dialog :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select) {
+  background: #172322;
+  border: 1px solid #41615d;
+  border-radius: 6px;
+  box-sizing: border-box;
+  color: #edf6f5;
+  padding: .55rem .7rem;
+}
+.activity-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):focus-visible,
+.reviews-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):focus-visible,
+.review-detail :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):focus-visible,
+.thesis-surface :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):focus-visible,
+.market-data-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):focus-visible,
+.holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):focus-visible,
+.confirmation-dialog :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):focus-visible {
+  border-color: #75d5c7;
+  outline: 3px solid #75d5c7;
+  outline-offset: 2px;
+}
+.activity-card button:not(.MuiButtonBase-root),
+.reviews-card button:not(.MuiButtonBase-root),
+.review-detail button:not(.MuiButtonBase-root),
+.thesis-surface button:not(.MuiButtonBase-root),
+.market-data-card button:not(.MuiButtonBase-root),
+.holding-mutation-card button:not(.MuiButtonBase-root),
+.confirmation-dialog button:not(.MuiButtonBase-root) { cursor: pointer; }
+.activity-card :is(input[type="checkbox"], input[type="radio"]),
+.reviews-card :is(input[type="checkbox"], input[type="radio"]),
+.review-detail :is(input[type="checkbox"], input[type="radio"]),
+.thesis-surface :is(input[type="checkbox"], input[type="radio"]),
+.market-data-card :is(input[type="checkbox"], input[type="radio"]),
+.holding-mutation-card :is(input[type="checkbox"], input[type="radio"]),
+.confirmation-dialog :is(input[type="checkbox"], input[type="radio"]) {
+  accent-color: #52c7b8;
+  padding: 0;
+}
+.activity-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):disabled,
+.reviews-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):disabled,
+.review-detail :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):disabled,
+.thesis-surface :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):disabled,
+.market-data-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):disabled,
+.holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):disabled,
+.confirmation-dialog :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):disabled {
+  cursor: not-allowed;
+  opacity: .65;
+}
 .eyebrow { color: #75d5c7; font-size: .75rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 h1 { font-size: clamp(2rem, 6vw, 4rem); letter-spacing: -.04em; margin: .35rem 0 0; }
 h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
@@ -33,7 +85,15 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .allocation-track span { background: #52c7b8; border-radius: inherit; display: block; height: 100%; }
 .allocation-table-scroll { display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 1.25rem; max-width: 100%; min-width: 0; }
 .allocation-table-scroll:focus-visible { border-radius: 8px; outline: 2px solid #75d5c7; outline-offset: 3px; }
-.allocation-table { min-width: 0; }
+.allocation-table {
+  border-collapse: collapse;
+  min-width: 0;
+  table-layout: fixed;
+  width: 100%;
+}
+.allocation-table :is(th, td) { border: 1px solid #31514e; padding: .65rem .75rem; text-align: left; vertical-align: top; }
+.allocation-table thead th { background: #172322; position: sticky; top: 0; z-index: 1; }
+.allocation-table th[scope="row"] { font-weight: 700; }
 .allocation-table caption { color: #a9c1bd; font-weight: 700; padding: .5rem; text-align: left; }
 .visually-hidden { clip: rect(0 0 0 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
 .coverage-panel { border-width: 2px; }
@@ -160,6 +220,14 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .provider-chip.ready { border-color: #52c7b8; color: #bff8ef; }
 .provider-chip.not-ready { color: #a9c1bd; }
 .market-data-table input, .market-data-table select { min-width: 9rem; width: 100%; }
+.market-data-table {
+  border-collapse: collapse;
+  min-width: 62rem;
+  width: 100%;
+}
+.market-data-table :is(th, td) { border: 1px solid #31514e; padding: .65rem .75rem; text-align: left; vertical-align: top; }
+.market-data-table thead th { background: #172322; position: sticky; top: 0; z-index: 1; }
+.market-data-table th[scope="row"] { font-weight: 700; }
 .market-data-table th[scope="row"] { min-width: 15rem; }
 .checkbox-label { align-items: center; display: flex; font-size: .8rem; gap: .4rem; margin-top: .45rem; white-space: nowrap; }
 .checkbox-label input { min-width: auto; width: auto; }

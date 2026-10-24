@@ -444,6 +444,38 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('button', { name: /Archive lot/i })).toBeNull()
   })
 
+  it('keeps unmigrated native controls and raw tables scoped away from MUI primitives', () => {
+    expect(committedStyles).toMatch(/\.activity-card[\s\S]*\.confirmation-dialog[\s\S]*:is\(button, input, select, textarea\)/)
+    expect(committedStyles).toMatch(/:not\(\.MuiButtonBase-root\):not\(\.MuiInputBase-input\)/)
+    expect(committedStyles).toMatch(/background:\s*#172322/)
+    expect(committedStyles).toMatch(/border:\s*1px solid #41615d/)
+    expect(committedStyles).toMatch(/padding:\s*\.55rem \.7rem/)
+    expect(committedStyles).toMatch(/:focus-visible[\s\S]*outline:\s*3px solid #75d5c7/)
+    expect(committedStyles).toMatch(/\.allocation-table\s*\{[\s\S]*border-collapse:\s*collapse[\s\S]*min-width:\s*0[\s\S]*table-layout:\s*fixed[\s\S]*width:\s*100%/)
+    expect(committedStyles).toMatch(/\.market-data-table\s*\{[\s\S]*border-collapse:\s*collapse[\s\S]*min-width:\s*62rem[\s\S]*width:\s*100%/)
+    expect(committedStyles).toMatch(/\.allocation-table[\s\S]*\.market-data-table[\s\S]*:is\(th, td\)[\s\S]*border:\s*1px solid #31514e/)
+    expect(committedStyles).not.toMatch(/(?:^|\n)\s*(?:table|thead|tbody|tr|th|td)\s*\{/)
+    expect(committedStyles).not.toMatch(/(?:^|\n)\s*(?:button|input|select|textarea)\s*\{\s*(?:background|border|padding|outline)/)
+  })
+
+  it('keeps the scoped stylesheet selectors attached to rendered raw surfaces', async () => {
+    const fetchMock = authenticatedFetch((input) => String(input).includes('/activity')
+      ? activityResponse([activityItem('style-activity')], true, activityCursor)
+      : Promise.resolve({ ok: true, status: 200, json: async () => allocationOverview } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Overview' }))
+    await waitFor(() => expect(screen.getByRole('table', { name: 'Allocation detail, also available without color' })).toBeTruthy())
+    expect(document.querySelector('.allocation-table')).toBeTruthy()
+    expect(committedStyles).toContain('.allocation-table')
+    fireEvent.click(screen.getByRole('tab', { name: 'Activity' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Activity' })).toBeTruthy())
+    expect(document.querySelector('.activity-card')).toBeTruthy()
+    expect(document.querySelector('.activity-card button')).toBeTruthy()
+    expect(committedStyles).toContain('.activity-card')
+  })
+
   it('uses the compact authenticated header and binds each row menu to its lot identity', async () => {
     const duplicateLots = { ...completeOverview, holdings: [
       { ...completeOverview.holdings[0], lot_id: 'lot-first', symbol: 'SAME' },
