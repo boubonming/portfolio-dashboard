@@ -236,6 +236,9 @@ func TestPortfolioOverviewPnLUsesLotIdentityAndFailsClosed(t *testing.T) {
 		{name: "missing pnl", mutate: func(payload *snapshotPayload) {
 			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.UnrealisedPnL = nil })
 		}},
+		{name: "missing price", mutate: func(payload *snapshotPayload) {
+			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.Price = "" })
+		}},
 		{name: "stale lot valuation", mutate: func(payload *snapshotPayload) {
 			setLot(payload, "lot-pnl-a", func(lot *domain.LotValuation) { lot.Freshness.Status = domain.Stale })
 		}},
@@ -274,7 +277,11 @@ func TestPortfolioOverviewPnLUsesLotIdentityAndFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, holding := range view.Holdings {
-				if holding.LotID == "lot-pnl-a" && holding.UnrealisedPnL != nil {
+				if tc.name == "incomplete valuation" {
+					if holding.UnrealisedPnL == nil {
+						t.Fatalf("%s omitted exact P/L for %s: %+v", tc.name, holding.LotID, holding)
+					}
+				} else if holding.LotID == "lot-pnl-a" && holding.UnrealisedPnL != nil {
 					t.Fatalf("%s exposed P/L for %s: %+v", tc.name, holding.LotID, holding)
 				}
 			}

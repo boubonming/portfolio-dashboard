@@ -66,12 +66,16 @@ th, td { border-bottom: 1px solid #2d4441; padding: .8rem .65rem; text-align: le
 thead th { background: #1a2524; position: sticky; top: 0; z-index: 1; }
 tbody th { font-weight: 500; }
 .numeric { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.pnl-gain, .pnl-loss, .pnl-break-even, .pnl-unavailable { display: inline-block; }
-.pnl-gain { color: #8ce6c5; }
-.pnl-loss { color: #ffadb8; }
-.pnl-break-even { color: #d9d9e4; }
+.pnl-gain, .pnl-loss, .pnl-break-even, .pnl-unavailable { border-radius: 6px; display: inline-block; padding: .2rem .35rem; }
+.pnl-gain { background: #164d43; border: 1px solid #52c7b8; color: #b8f4df; }
+.pnl-loss { background: #652c35; border: 1px solid #ff8f9d; color: #ffd2d8; }
+.pnl-break-even { background: #3d3e46; border: 1px solid #b5b8c9; color: #f0f0f6; }
 .pnl-unavailable { color: #b8cbc8; }
 .pnl-amount { display: block; }
+.refresh-inline-status { border-radius: 6px; font-weight: 700; padding: .35rem .55rem; }
+.refresh-complete { background: #164d43; color: #b8f4df; }
+.refresh-incomplete { background: #5b421e; color: #ffdc9a; }
+.refresh-error { background: #652c35; color: #ffd2d8; }
 .sort-button { background: transparent; border: 0; color: inherit; font-weight: 700; padding: .2rem; text-align: left; white-space: nowrap; }
 .empty { color: #b8cbc8; padding: 1rem; }
 .activity-card { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; margin-top: 1.5rem; min-width: 0; padding: 1.25rem; }

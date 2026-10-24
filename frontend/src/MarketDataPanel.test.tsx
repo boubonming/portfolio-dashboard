@@ -236,36 +236,12 @@ describe('MarketDataPanel', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/changed in another window/i))
   })
 
-  it('performs one refresh action, prevents double-submit, and withholds an incomplete total', async () => {
-    let resolveRefresh: ((response: Response) => void) | undefined
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      if (String(input).endsWith('/market-data/refresh')) return new Promise<Response>((resolve) => { resolveRefresh = resolve })
-      return json(setup())
-    })
+  it('keeps routine price refresh out of the one-time market-data setup area', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => { void input; return json(setup()) })
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh prices' })).toBeTruthy())
-    const button = screen.getByRole('button', { name: 'Refresh prices' })
-    fireEvent.click(button)
-    fireEvent.click(button)
-    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/refresh'))).toHaveLength(1)
-    resolveRefresh?.(await json(refreshResult(false)))
-    await waitFor(() => expect(screen.getByText(/No partial total is shown/i)).toBeTruthy())
-    expect(screen.getByText(/Latest refresh: incomplete/i)).toBeTruthy()
-    expect(screen.getByText(/Missing exact mappings/i)).toBeTruthy()
-  })
-
-  it('renders future and invalid dependencies as distinct diagnostics', async () => {
-    const result = refreshResult(false, { future: ['quote:authority-a'], invalid: ['quote:authority-b'] })
-    result.snapshot.missing_count = 0
-    result.snapshot.missing_dependencies = []
-    result.missing_instruments = []
-    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/refresh') ? json(result) : json(setup()))
-    renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh prices' })).toBeTruthy())
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
-    await waitFor(() => expect(screen.getByText('Future quote for SAME (USD)')).toBeTruthy())
-    expect(screen.getByText('Invalid quote for SAME (USD)')).toBeTruthy()
-    expect(screen.queryByText(/invalid or future/i)).toBeNull()
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market data' })).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Refresh prices' })).toBeNull()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/market-data/refresh'))).toBe(false)
   })
 
   it('validates successful response shape and cleans up pending requests on scope replacement and unmount', async () => {

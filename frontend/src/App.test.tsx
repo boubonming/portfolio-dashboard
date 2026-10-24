@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App, { compareDecimalStrings, isCSVContentType, safeCSVFilename, type PortfolioOverview } from './App'
+import * as api from './api'
 
 const completeOverview: PortfolioOverview = {
   portfolio: { id: 'portfolio-default', name: 'Personal Portfolio', default_reporting_currency: 'MYR' },
@@ -490,6 +491,12 @@ describe('Portfolio Dashboard', () => {
     expect(screen.getByText('Break-even').className).toContain('subline')
     expect(screen.getByText('Unavailable').className).toContain('pnl-unavailable')
     expect(screen.queryByText('Unavailable')?.className).not.toMatch(/pnl-(gain|loss|break-even)/)
+    const holdingsRows = within(screen.getByRole('table', { name: 'Holdings' })).getAllByRole('row').slice(1)
+    const rowFor = (symbol: string) => holdingsRows.find((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent === symbol)
+    expect(rowFor('GAIN')?.querySelector('.pnl-gain')).toBeTruthy()
+    expect(rowFor('LOSS')?.querySelector('.pnl-loss')).toBeTruthy()
+    expect(rowFor('ZERO')?.querySelector('.pnl-break-even')).toBeTruthy()
+    expect(rowFor('UNAVAILABLE')?.querySelector('.pnl-gain')).toBeNull()
 
     const holdingsTable = () => screen.getByRole('table', { name: 'Holdings' })
     const rowSymbols = () => within(holdingsTable()).getAllByRole('row').slice(1).map((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent)
@@ -499,20 +506,42 @@ describe('Portfolio Dashboard', () => {
     expect(rowSymbols()).toEqual(['GAIN', 'ZERO', 'LOSS', 'UNAVAILABLE'])
   })
 
-  it('withholds P/L even when an incomplete response contains a candidate value', async () => {
+  it('renders exact per-lot P/L even when the global response is incomplete', async () => {
     const incomplete = { ...pnlOverview, snapshot: { ...pnlOverview.snapshot, state: 'incomplete' as const, complete: false } }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => incomplete } as Response)))
     render(<App />)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
-    expect(screen.getAllByText('Unavailable').length).toBe(4)
-    expect(screen.queryByText('Gain')).toBeNull()
-    expect(screen.queryByText('Loss')).toBeNull()
-    expect(screen.queryByText('Break-even')).toBeNull()
+    expect(screen.getAllByText('Unavailable')).toHaveLength(1)
+    expect(screen.getAllByText(/Gain/)).toHaveLength(2)
+    expect(screen.getAllByText(/Loss/)).toHaveLength(2)
+    expect(screen.getAllByText(/Break-even/)).toHaveLength(2)
+  })
+
+  it('reloads Holdings after a successfully committed incomplete refresh', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: false,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const overviewCallsBefore = fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText(/valuation is incomplete; usable per-lot values were loaded/i)).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore + 1)
+    fireEvent.click(screen.getByRole('button', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market data' })).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Refresh prices' })).toBeNull()
   })
 
   it('renders Unavailable for stale snapshots, no snapshots, and every affected freshness state', async () => {
     let response: PortfolioOverview = {
       ...pnlOverview,
+      holdings: pnlOverview.holdings.map((holding) => ({ ...holding, unrealised_pnl: undefined })),
       snapshot: { ...pnlOverview.snapshot, state: 'stale', complete: true },
     }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => response } as Response)))
@@ -525,6 +554,7 @@ describe('Portfolio Dashboard', () => {
 
     response = {
       ...pnlOverview,
+      holdings: pnlOverview.holdings.map((holding) => ({ ...holding, unrealised_pnl: undefined })),
       snapshot: { state: 'no_snapshot', complete: false, subtotals: [] },
     }
     cleanup()

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, RefObject } from 'react'
-import { apiFetch, APIError, jsonResponse } from './api'
+import { apiFetch, APIError, jsonResponse, refreshMarketData } from './api'
 import ThesisEditor from './ThesisEditor'
 import Reviews, { type FeedbackAttemptStore } from './Reviews'
 import HoldingMutations, { validatePortfolioETag } from './HoldingMutations'
@@ -142,18 +142,32 @@ export function compareDecimalStrings(left: string | undefined, right: string | 
 
 type PnLStatus = 'gain' | 'loss' | 'break-even' | 'unavailable'
 
-function unrealisedPnLStatus(holding: Holding, snapshot: PortfolioOverview['snapshot']): PnLStatus {
+function newRefreshRequestKey() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
+  return `refresh-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+export function unrealisedPnLStatus(holding: Holding): PnLStatus {
   const value = holding.unrealised_pnl
-  if (snapshot.state !== 'complete' || !snapshot.complete || value === undefined || !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) || holding.freshness.status !== 'fresh') return 'unavailable'
+  if (value === undefined || !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) || holding.freshness.status !== 'fresh') return 'unavailable'
   const comparison = compareDecimalStrings(value, '0')
   return comparison > 0 ? 'gain' : comparison < 0 ? 'loss' : 'break-even'
 }
 
-function unrealisedPnLCell(holding: Holding, snapshot: PortfolioOverview['snapshot']) {
-  const status = unrealisedPnLStatus(holding, snapshot)
+function pnlStatusLabel(status: PnLStatus) {
+  return status === 'gain' ? 'Gain' : status === 'loss' ? 'Loss' : status === 'break-even' ? 'Break-even' : 'Unavailable'
+}
+
+function unrealisedPnLCell(holding: Holding) {
+  const status = unrealisedPnLStatus(holding)
   if (status === 'unavailable') return <span className="pnl-unavailable">Unavailable</span>
-  const label = status === 'gain' ? 'Gain' : status === 'loss' ? 'Loss' : 'Break-even'
-  return <span className={`pnl-${status}`}><span className="pnl-amount">{holding.unrealised_pnl} {holding.currency}</span><span className="subline">{label}</span></span>
+  return <span className={`pnl-${status}`}><span className="pnl-amount">{holding.unrealised_pnl} {holding.currency}</span><span className="subline">{pnlStatusLabel(status)}</span></span>
+}
+
+function latestPriceCell(holding: Holding) {
+  const status = unrealisedPnLStatus(holding)
+  if (status === 'unavailable') return <span><span>{holding.latest_price || '—'}</span><span className="subline">{holding.latest_value || 'value unavailable'}</span></span>
+  return <span className={`pnl-${status}`}><span className="pnl-amount">{holding.latest_price || '—'}</span><span className="subline">{pnlStatusLabel(status)} · {holding.latest_value || 'value unavailable'}</span></span>
 }
 
 function displayDate(value?: string) {
@@ -396,6 +410,9 @@ export default function App() {
   const [exportState, setExportState] = useState<'idle' | 'loading' | 'error'>('idle')
   const [exportError, setExportError] = useState('')
   const [exportAnnouncement, setExportAnnouncement] = useState('')
+  const [refreshState, setRefreshState] = useState<'idle' | 'loading' | 'complete' | 'incomplete' | 'error'>('idle')
+  const [refreshError, setRefreshError] = useState('')
+  const [refreshAnnouncement, setRefreshAnnouncement] = useState('')
   const [authError, setAuthError] = useState('')
   const csrfToken = useRef<string | undefined>(undefined)
   const [filter, setFilter] = useState('')
@@ -405,6 +422,7 @@ export default function App() {
   const loadControllerRef = useRef<AbortController | null>(null)
   const activityControllerRef = useRef<AbortController | null>(null)
   const exportControllerRef = useRef<AbortController | null>(null)
+  const refreshControllerRef = useRef<AbortController | null>(null)
   const activityLoadMoreRef = useRef<HTMLButtonElement>(null)
   const activityStatusRef = useRef<HTMLParagraphElement>(null)
   const thesisReturnRef = useRef<HTMLButtonElement>(null)
@@ -418,6 +436,8 @@ export default function App() {
   const loadGeneration = useRef(0)
   const activityGeneration = useRef(0)
   const exportGeneration = useRef(0)
+  const refreshGeneration = useRef(0)
+  const refreshingRef = useRef(false)
   const feedbackAttemptsRef = useRef<FeedbackAttemptStore>(new Map())
   const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mutationSessionGeneration = authGeneration.current
@@ -427,6 +447,7 @@ export default function App() {
     loadGeneration.current += 1
     activityGeneration.current += 1
     exportGeneration.current += 1
+    refreshGeneration.current += 1
     authControllerRef.current?.abort()
     authControllerRef.current = null
     loadControllerRef.current?.abort()
@@ -435,12 +456,15 @@ export default function App() {
     activityControllerRef.current = null
     exportControllerRef.current?.abort()
     exportControllerRef.current = null
+    refreshControllerRef.current?.abort()
+    refreshControllerRef.current = null
+    refreshingRef.current = false
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
     feedbackAttemptsRef.current.clear()
     activityLoadingMoreRef.current = false
     activityItemsRef.current = []
-    setData(null); setOverviewETag(undefined); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
+    setData(null); setOverviewETag(undefined); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setRefreshError(''); setRefreshAnnouncement(''); setRefreshState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -491,6 +515,47 @@ export default function App() {
     if (authState !== 'authenticated' || authGeneration.current !== mutationSessionGeneration) return Promise.resolve(undefined)
     return load(true).then((etag) => authGeneration.current === mutationSessionGeneration && authState === 'authenticated' ? etag : undefined)
   }, [authState, load, mutationSessionGeneration])
+
+  const refreshPrices = useCallback(async () => {
+    if (authState !== 'authenticated' || refreshingRef.current) return
+    const portfolioID = currentPortfolioID(data)
+    if (!portfolioID) {
+      setRefreshState('error')
+      setRefreshError('Unable to refresh prices: no valid portfolio overview is loaded.')
+      setRefreshAnnouncement('Price refresh failed.')
+      return
+    }
+    const authGenerationAtStart = authGeneration.current
+    const generation = ++refreshGeneration.current
+    refreshControllerRef.current?.abort()
+    const controller = new AbortController()
+    refreshControllerRef.current = controller
+    refreshingRef.current = true
+    setRefreshState('loading')
+    setRefreshError('')
+    setRefreshAnnouncement('Refreshing prices and creating an immutable snapshot…')
+    try {
+      const result = await refreshMarketData(portfolioID, currency, newRefreshRequestKey(), csrfToken.current, controller.signal)
+      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current) return
+      if (result.refresh.portfolio_id !== portfolioID || result.snapshot.portfolio_id !== portfolioID || result.snapshot.reporting_currency !== currency.toUpperCase()) throw new APIError(200, 'Invalid market refresh response: stale portfolio scope.')
+      // Reload for incomplete responses too: source-currency lot valuations can
+      // be exact even when reporting-currency totals remain withheld.
+      await load(true)
+      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current) return
+      setRefreshState(result.complete ? 'complete' : 'incomplete')
+      setRefreshAnnouncement(result.complete ? 'Prices refreshed. Complete valuation loaded.' : 'Prices refreshed. Valuation is incomplete; usable per-lot values were loaded and totals remain withheld.')
+      if (result.missing_instruments.length) setRefreshError(`Missing exact mappings: ${result.missing_instruments.join(', ')}`)
+    } catch (reason) {
+      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current) return
+      if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+      setRefreshState('error')
+      setRefreshError(reason instanceof Error ? reason.message : 'Unable to refresh prices')
+      setRefreshAnnouncement('Price refresh failed.')
+    } finally {
+      if (generation === refreshGeneration.current) { refreshingRef.current = false; setRefreshState((current) => current === 'loading' ? 'error' : current) }
+      if (refreshControllerRef.current === controller) refreshControllerRef.current = null
+    }
+  }, [authState, clearPrivateState, currency, data, load])
 
   const downloadCSV = useCallback(() => {
     if (authState !== 'authenticated' || exportState === 'loading') return
@@ -552,10 +617,26 @@ export default function App() {
     setExportAnnouncement('')
   }, [currency, view])
 
+  useEffect(() => {
+    if (refreshingRef.current) {
+      refreshGeneration.current += 1
+      refreshControllerRef.current?.abort()
+      refreshControllerRef.current = null
+      refreshingRef.current = false
+    }
+    setRefreshState('idle')
+    setRefreshError('')
+    setRefreshAnnouncement('')
+  }, [currency, view])
+
   useEffect(() => () => {
     exportGeneration.current += 1
     exportControllerRef.current?.abort()
     exportControllerRef.current = null
+    refreshGeneration.current += 1
+    refreshControllerRef.current?.abort()
+    refreshControllerRef.current = null
+    refreshingRef.current = false
   }, [])
 
   const loadActivity = useCallback((cursor: string | undefined, append: boolean, keyboardActivated = false) => {
@@ -755,8 +836,8 @@ export default function App() {
       if (sortKey === 'symbol' || sortKey === 'currency') comparison = (left[sortKey] || '').localeCompare(right[sortKey] || '')
       else if (sortKey === 'freshness') comparison = (left.freshness.status || '').localeCompare(right.freshness.status || '')
       else {
-        const leftValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(left, data.snapshot) === 'unavailable' ? undefined : left.unrealised_pnl) : left[sortKey]
-        const rightValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(right, data.snapshot) === 'unavailable' ? undefined : right.unrealised_pnl) : right[sortKey]
+        const leftValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(left) === 'unavailable' ? undefined : left.unrealised_pnl) : left[sortKey]
+        const rightValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(right) === 'unavailable' ? undefined : right.unrealised_pnl) : right[sortKey]
         comparison = compareDecimalStrings(leftValue, rightValue)
       }
       if (comparison === 0) comparison = left.lot_id.localeCompare(right.lot_id)
@@ -814,7 +895,10 @@ export default function App() {
         <label htmlFor="filter">Filter holdings</label>
         <input ref={filterRef} id="filter" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Symbol, currency or flag" />
         <button type="button" onClick={downloadCSV} disabled={exportState === 'loading'} aria-busy={exportState === 'loading'}>{exportState === 'loading' ? 'Downloading CSV…' : 'Download CSV'}</button>
+        <button type="button" onClick={refreshPrices} disabled={refreshState === 'loading'} aria-busy={refreshState === 'loading'}>{refreshState === 'loading' ? 'Refreshing prices…' : 'Refresh prices'}</button>
         {exportError && <span className="notice error" role="alert">{exportError} <button type="button" onClick={downloadCSV}>Retry download</button></span>}
+        {refreshAnnouncement && <span className={`refresh-inline-status refresh-${refreshState}`} role="status" aria-live="polite">{refreshAnnouncement}</span>}
+        {refreshError && <span className="notice error" role={refreshState === 'error' ? 'alert' : 'status'}>{refreshError}</span>}
         <span className="visually-hidden" role="status" aria-live="polite">{exportAnnouncement}</span>
       </section>}
 
@@ -872,8 +956,8 @@ export default function App() {
                     <td>{holding.currency}</td>
                     <td className="numeric">{holding.unit_cost || '—'}</td>
                     <td className="numeric">{holding.cost_basis || '—'}</td>
-                    <td className="numeric">{holding.latest_price || '—'}<span className="subline">{holding.latest_value || 'value unavailable'}</span></td>
-                    <td className="numeric">{unrealisedPnLCell(holding, data.snapshot)}</td>
+                    <td className="numeric">{latestPriceCell(holding)}</td>
+                    <td className="numeric">{unrealisedPnLCell(holding)}</td>
                     <td className="numeric">{data.snapshot.complete ? (holding.reporting_value || '—') : 'Withheld'}</td>
                     <td><span className={`flag ${qualityClass(holding)}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
                     <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button><button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`}>View reviews</button></td>
