@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, RefObject } from 'react'
-import { apiFetch, APIError, jsonResponse, refreshMarketData } from './api'
+import { apiFetch, APIError, getMarketDataSetup, jsonResponse, refreshMarketData, type MarketDataSetup } from './api'
 import ThesisEditor from './ThesisEditor'
 import Reviews, { type FeedbackAttemptStore } from './Reviews'
 import HoldingMutations, { validatePortfolioETag } from './HoldingMutations'
@@ -166,8 +166,10 @@ function unrealisedPnLCell(holding: Holding) {
 
 function latestPriceCell(holding: Holding) {
   const status = unrealisedPnLStatus(holding)
-  if (status === 'unavailable') return <span><span>{holding.latest_price || '—'}</span><span className="subline">{holding.latest_value || 'value unavailable'}</span></span>
-  return <span className={`pnl-${status}`}><span className="pnl-amount">{holding.latest_price || '—'}</span><span className="subline">{pnlStatusLabel(status)} · {holding.latest_value || 'value unavailable'}</span></span>
+  const latestPrice = holding.latest_price?.trim()
+  const latestValue = holding.latest_value?.trim()
+  if (status === 'unavailable' || !latestPrice) return <span><span>{latestPrice || '—'}</span><span className="subline">{latestValue || 'value unavailable'}</span></span>
+  return <span className={`pnl-${status}`}><span className="pnl-amount">{latestPrice}</span><span className="subline">{pnlStatusLabel(status)} · {latestValue || 'value unavailable'}</span></span>
 }
 
 function displayDate(value?: string) {
@@ -535,13 +537,16 @@ export default function App() {
     setRefreshError('')
     setRefreshAnnouncement('Refreshing prices and creating an immutable snapshot…')
     try {
-      const result = await refreshMarketData(portfolioID, currency, newRefreshRequestKey(), csrfToken.current, controller.signal)
-      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current) return
+      const setup: MarketDataSetup = await getMarketDataSetup(portfolioID, controller.signal)
+      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || currentPortfolioID(data) !== portfolioID || currency !== data?.reporting_currency) return
+      if (setup.portfolio_id !== portfolioID) throw new APIError(200, 'Invalid market-data setup response: stale portfolio scope.')
+      const result = await refreshMarketData(portfolioID, currency, newRefreshRequestKey(), csrfToken.current, controller.signal, setup)
+      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || currentPortfolioID(data) !== portfolioID || currency !== data?.reporting_currency) return
       if (result.refresh.portfolio_id !== portfolioID || result.snapshot.portfolio_id !== portfolioID || result.snapshot.reporting_currency !== currency.toUpperCase()) throw new APIError(200, 'Invalid market refresh response: stale portfolio scope.')
       // Reload for incomplete responses too: source-currency lot valuations can
       // be exact even when reporting-currency totals remain withheld.
       await load(true)
-      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current) return
+      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || currentPortfolioID(data) !== portfolioID || currency !== data?.reporting_currency) return
       setRefreshState(result.complete ? 'complete' : 'incomplete')
       setRefreshAnnouncement(result.complete ? 'Prices refreshed. Complete valuation loaded.' : 'Prices refreshed. Valuation is incomplete; usable per-lot values were loaded and totals remain withheld.')
       if (result.missing_instruments.length) setRefreshError(`Missing exact mappings: ${result.missing_instruments.join(', ')}`)
