@@ -21,7 +21,6 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .notice.warning { border-color: #92723c; }
 .section-heading { align-items: center; display: flex; justify-content: space-between; gap: 1rem; min-width: 0; }
 .sign-out { margin-left: auto; white-space: nowrap; }
-.allocation-card { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; margin-top: 1.5rem; padding: 1.25rem; }
 .allocation-visuals { display: grid; gap: 1.5rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 1.25rem; }
 .allocation-group { min-width: 0; }
 .allocation-group h3 { font-size: 1rem; margin: 0 0 .75rem; }

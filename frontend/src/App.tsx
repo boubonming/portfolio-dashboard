@@ -966,10 +966,9 @@ export default function App() {
         <Toolbar variant="dense" disableGutters sx={{ gap: { xs: 1, sm: 2 }, flexWrap: { xs: 'wrap', md: 'nowrap' }, py: .5 }}>
           <Box component="a" className="app-brand" href="#portfolio-content" aria-label="Portfolio Dashboard home" sx={{ color: 'text.primary', fontWeight: 800, textDecoration: 'none', whiteSpace: 'nowrap', mr: { md: 1 } }}>Portfolio Dashboard</Box>
           <Box component="nav" className="view-nav" aria-label="Portfolio views" sx={{ flex: 1, minWidth: 0, order: { xs: 3, md: 0 }, width: { xs: '100%', md: 'auto' }, overflowX: 'auto' }}>
-            <Tabs value={view} onChange={(_event, nextView) => { if (nextView === 'reviews') setReviewsHoldingId(undefined); setView(nextView) }} variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile aria-label="Portfolio views" sx={{ minHeight: 40, '& .MuiTab-root': { minHeight: 40, minWidth: { xs: 92, sm: 108 }, px: { xs: 1.25, sm: 2 } } }}>
+            <Tabs value={view} onChange={(_event, nextView) => { if (nextView === 'reviews') setReviewsHoldingId(undefined); setView(nextView) }} selectionFollowsFocus variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile aria-label="Portfolio views" sx={{ minHeight: 40, '& .MuiTab-root': { minHeight: 40, minWidth: { xs: 92, sm: 108 }, px: { xs: 1.25, sm: 2 } } }}>
               {navTabs.map((tab) => <Tab key={tab.value} value={tab.value} label={tab.label} aria-label={tab.ariaLabel} aria-current={view === tab.value ? 'page' : undefined} />)}
             </Tabs>
-            <Box sx={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', clipPath: 'inset(50%)' }} aria-hidden={false}>{navTabs.map((tab) => <button key={`compat-${tab.value}`} className="visually-hidden nav-compat-button" type="button" tabIndex={-1} aria-current={view === tab.value ? 'page' : undefined} aria-label={tab.ariaLabel || tab.label} onClick={() => { if (tab.value === 'reviews') setReviewsHoldingId(undefined); setView(tab.value) }} />)}</Box>
           </Box>
           <Button className="sign-out" type="button" onClick={logout} color="inherit" variant="outlined" size="small" sx={{ ml: 'auto', flexShrink: 0, whiteSpace: 'nowrap' }}>Sign out</Button>
         </Toolbar>
