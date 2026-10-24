@@ -489,6 +489,17 @@ describe('Portfolio Dashboard', () => {
 
       fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
       await waitFor(() => expect(screen.getByRole('table', { name: 'Holdings' })).toBeTruthy())
+      const reportingCurrency = screen.getByRole('combobox', { name: /reporting currency/i })
+      expect(reportingCurrency.classList).toContain('MuiNativeSelect-select')
+      expect(reportingCurrency.classList).toContain('MuiInputBase-input')
+      const legacyControlScopes = /(?:activity-card|reviews-card|review-detail|thesis-surface|market-data-card|holding-mutation-card|confirmation-dialog)/
+      expect(matchingStyleRules(reportingCurrency).some(({ selectorText }) => legacyControlScopes.test(selectorText))).toBe(false)
+      expect(hasMatchingDeclaration(reportingCurrency, 'background', '#172322')).toBe(false)
+      expect(hasMatchingDeclaration(reportingCurrency, 'border', '1px solid #41615d')).toBe(false)
+      expect(hasMatchingDeclaration(reportingCurrency, 'padding', '.55rem .7rem')).toBe(false)
+      reportingCurrency.focus()
+      expect(hasMatchingDeclaration(reportingCurrency, 'border-color', '#75d5c7', 'focus-visible')).toBe(false)
+      expect(hasMatchingDeclaration(reportingCurrency, 'outline', '3px solid #75d5c7', 'focus-visible')).toBe(false)
       const muiElements = [
         document.querySelector('.MuiToolbar-root'),
         screen.getByRole('button', { name: 'Add holding' }),
