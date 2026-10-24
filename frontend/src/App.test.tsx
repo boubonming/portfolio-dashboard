@@ -1,8 +1,12 @@
+// @ts-expect-error Vitest executes this test in Node, while the app tsconfig omits Node typings.
+import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App, { compareDecimalStrings, formatDecimalForDisplay, isCSVContentType, safeCSVFilename, type PortfolioOverview } from './App'
 import * as api from './api'
+
+const committedStyles = readFileSync('src/styles.css', 'utf8')
 
 const completeOverview: PortfolioOverview = {
   portfolio: { id: 'portfolio-default', name: 'Personal Portfolio', default_reporting_currency: 'MYR' },
@@ -75,8 +79,8 @@ const decimalSortOverview: PortfolioOverview = {
   holdings: [
     { ...completeOverview.holdings[0], lot_id: 'lot-two', symbol: 'TWO', latest_price: '2', latest_value: '2.004', unrealised_pnl: '2.004', reporting_value: '10.1' },
     { ...completeOverview.holdings[0], lot_id: 'lot-ten', symbol: 'TEN', latest_price: '10', latest_value: '10.02', unrealised_pnl: '10.02', reporting_value: '10.02' },
-    { ...completeOverview.holdings[0], lot_id: 'lot-ten02', symbol: 'TEN02', latest_price: '10.02', latest_value: '10.1', unrealised_pnl: '10.1', reporting_value: '10' },
-    { ...completeOverview.holdings[0], lot_id: 'lot-ten1', symbol: 'TEN1', latest_price: '10.1', latest_value: '10.10', unrealised_pnl: '10.10', reporting_value: '2' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-ten02', symbol: 'TEN02', latest_price: '10.02', latest_value: '10.101', unrealised_pnl: '10.101', reporting_value: '10' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-ten1', symbol: 'TEN1', latest_price: '10.1', latest_value: '10.100', unrealised_pnl: '10.100', reporting_value: '2' },
   ],
 }
 
@@ -450,7 +454,28 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getAllByRole('button', { name: /Actions for SAME lot/ })).toHaveLength(2))
     expect(screen.queryByText('Private workspace')).toBeNull()
     expect(screen.queryByText('Read-only holdings and immutable valuation snapshots.')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Sign out' })).toBeTruthy()
+    const header = document.querySelector('.app-header')
+    expect(header).toBeTruthy()
+    expect(within(header as HTMLElement).getByRole('navigation', { name: 'Portfolio views' }).className).toContain('view-nav')
+    const signOut = within(header as HTMLElement).getByRole('button', { name: 'Sign out' })
+    expect(signOut.className).toContain('sign-out')
+    const desktopHeaderRule = committedStyles.match(/\.app-header\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(desktopHeaderRule).toMatch(/min-height:\s*2\.75rem;/)
+    expect(desktopHeaderRule).toMatch(/padding:\s*\.2rem 0 \.35rem;/)
+    expect(desktopHeaderRule).toMatch(/gap:\s*\.65rem;/)
+    const headerButtonRule = committedStyles.match(/\.app-header button\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(headerButtonRule).toMatch(/padding:\s*\.4rem \.55rem;/)
+    const navigationRule = committedStyles.match(/\.view-nav\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(navigationRule).toMatch(/display:\s*flex;/)
+    expect(navigationRule).toMatch(/flex-wrap:\s*wrap;/)
+    const mobileHeaderRule = committedStyles.match(/@media \(max-width: 780px\)\s*\{\s*\.app-header\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(mobileHeaderRule).toMatch(/flex-wrap:\s*wrap;/)
+    const mobileSignOutRule = committedStyles.match(/@media \(max-width: 780px\)[\s\S]*?\.sign-out\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(mobileSignOutRule).toMatch(/position:\s*static;/)
+    expect(mobileSignOutRule).toMatch(/margin-left:\s*auto;/)
+    expect(mobileSignOutRule).not.toMatch(/position:\s*absolute;/)
+    expect(mobileSignOutRule).not.toMatch(/(?:^|\s)right\s*:/)
+    expect(mobileSignOutRule).not.toMatch(/(?:^|\s)top\s*:/)
     const triggers = screen.getAllByRole('button', { name: /Actions for SAME lot/ })
     fireEvent.click(triggers[1])
     expect(screen.getByRole('menu').getAttribute('data-archive-menu-lot-id')).toBe('lot-second')
@@ -555,7 +580,7 @@ describe('Portfolio Dashboard', () => {
     expect(screen.getByRole('columnheader', { name: /freshness/i })).toBeTruthy()
   })
 
-  it('renders exact decimal row ordering for latest price and reporting value', async () => {
+  it('renders exact decimal row ordering for latest price, market value, P/L and reporting value', async () => {
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => decimalSortOverview } as Response)))
     render(<App />)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
@@ -572,20 +597,26 @@ describe('Portfolio Dashboard', () => {
     expect(rowSymbols()).toEqual(['TEN1', 'TEN02', 'TEN', 'TWO'])
 
     const latestValueHeader = screen.getByRole('columnheader', { name: /latest market value/i })
+    expect(decimalSortOverview.holdings[2].latest_value).not.toBe(decimalSortOverview.holdings[3].latest_value)
+    expect(formatDecimalForDisplay(decimalSortOverview.holdings[2].latest_value ?? '')).toBe('10.1')
+    expect(formatDecimalForDisplay(decimalSortOverview.holdings[3].latest_value ?? '')).toBe('10.1')
     fireEvent.click(screen.getByRole('button', { name: /sort by latest market value/i }))
     expect(latestValueHeader.getAttribute('aria-sort')).toBe('ascending')
-    expect(rowSymbols()).toEqual(['TWO', 'TEN', 'TEN02', 'TEN1'])
+    expect(rowSymbols()).toEqual(['TWO', 'TEN', 'TEN1', 'TEN02'])
     fireEvent.click(screen.getByRole('button', { name: /sort by latest market value/i }))
     expect(latestValueHeader.getAttribute('aria-sort')).toBe('descending')
-    expect(rowSymbols()).toEqual(['TEN1', 'TEN02', 'TEN', 'TWO'])
+    expect(rowSymbols()).toEqual(['TEN02', 'TEN1', 'TEN', 'TWO'])
 
     const pnlHeader = screen.getByRole('columnheader', { name: /unrealised p\/l/i })
+    expect(decimalSortOverview.holdings[2].unrealised_pnl).not.toBe(decimalSortOverview.holdings[3].unrealised_pnl)
+    expect(formatDecimalForDisplay(decimalSortOverview.holdings[2].unrealised_pnl ?? '')).toBe('10.1')
+    expect(formatDecimalForDisplay(decimalSortOverview.holdings[3].unrealised_pnl ?? '')).toBe('10.1')
     fireEvent.click(screen.getByRole('button', { name: /sort by unrealised p\/l/i }))
     expect(pnlHeader.getAttribute('aria-sort')).toBe('ascending')
-    expect(rowSymbols()).toEqual(['TWO', 'TEN', 'TEN02', 'TEN1'])
+    expect(rowSymbols()).toEqual(['TWO', 'TEN', 'TEN1', 'TEN02'])
     fireEvent.click(screen.getByRole('button', { name: /sort by unrealised p\/l/i }))
     expect(pnlHeader.getAttribute('aria-sort')).toBe('descending')
-    expect(rowSymbols()).toEqual(['TEN1', 'TEN02', 'TEN', 'TWO'])
+    expect(rowSymbols()).toEqual(['TEN02', 'TEN1', 'TEN', 'TWO'])
 
     fireEvent.click(screen.getByRole('button', { name: /sort by reporting value/i }))
     expect(reportingValueHeader.getAttribute('aria-sort')).toBe('ascending')
