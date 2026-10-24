@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { Box, Button, IconButton, Paper, Stack, Typography } from '@mui/material'
+import { Add, MoreVert } from '@mui/icons-material'
 import { apiFetch, APIError } from './api'
 import type { Holding } from './App'
 
@@ -608,12 +610,12 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       menuContextRef.current = current ? null : { sessionKey, portfolioId, scopeKey, lotId: holding.lot_id }
       setOpenMenuLotId(current ? null : holding.lot_id)
     }
-    return <div className="holding-row-actions">
-      <button ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} className="row-action-trigger" type="button" aria-label={`Actions for ${holding.symbol} lot ${holding.lot_id}`} aria-expanded={menuOpen} aria-haspopup="menu" data-archive-trigger-lot-id={holding.lot_id} onClick={openMenu} disabled={busy}>⋯</button>
+    return <Box className="holding-row-actions">
+      <IconButton ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} className="row-action-trigger" type="button" aria-label={`Actions for ${holding.symbol} lot ${holding.lot_id}`} aria-expanded={menuOpen} aria-haspopup="menu" data-archive-trigger-lot-id={holding.lot_id} onClick={openMenu} disabled={busy} size="small"><MoreVert aria-hidden="true" /></IconButton>
       {menuOpen && createPortal(<div ref={(node) => { if (node) archiveMenuRefs.current.set(holding.lot_id, node); else archiveMenuRefs.current.delete(holding.lot_id) }} className="row-action-menu row-action-menu-portal" style={{ top: menuPosition.top, left: menuPosition.left }} role="menu" data-archive-menu-lot-id={holding.lot_id}>
-        <button type="button" role="menuitem" onClick={(event) => openArchive(holding, archiveTriggerRefs.current.get(holding.lot_id) || event.currentTarget)} disabled={busy || (!mutationETagValid && !removeAttempt.current)}>Archive holding</button>
+        <Button type="button" role="menuitem" onClick={(event) => openArchive(holding, archiveTriggerRefs.current.get(holding.lot_id) || event.currentTarget)} disabled={busy || (!mutationETagValid && !removeAttempt.current)} size="small" fullWidth sx={{ justifyContent: 'flex-start' }}>Archive holding</Button>
       </div>, document.body)}
-    </div>
+    </Box>
   }
 
   const closeForm = () => {
@@ -662,8 +664,8 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   if (!active) return null
   const mutationETagValid = validatePortfolioETag(overviewETag, portfolioId) !== null
   return <>
-    <section ref={contentRef} className="holding-mutation-card" aria-labelledby="manage-holdings-title">
-      <div className="holding-actions-bar"><div><span className="eyebrow">Holdings</span><h2 className="visually-hidden" id="manage-holdings-title">Manage holdings</h2></div><div className="holding-actions"><button ref={addButtonRef} type="button" onClick={(event) => openForm(event.currentTarget)} disabled={busy}>Add holding</button></div></div>
+    <Paper component="section" ref={contentRef} className="holding-mutation-card" aria-labelledby="manage-holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', p: { xs: 1.5, sm: 2.5 } }}>
+      <Stack className="holding-actions-bar" direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between' }}><Box><Typography component="span" className="eyebrow">Holdings</Typography><Typography component="h2" className="visually-hidden" id="manage-holdings-title">Manage holdings</Typography></Box><Box className="holding-actions"><Button ref={addButtonRef} type="button" onClick={(event) => openForm(event.currentTarget)} disabled={busy} variant="contained" startIcon={<Add aria-hidden="true" />}>Add holding</Button></Box></Stack>
       {status && <p ref={statusRef} className="notice success" role="status" aria-live="polite" tabIndex={-1}>{status}</p>}
       {error && !archiveLot && !effectiveFormOpen && <p className="notice error" role="alert">{error}</p>}
       {children?.(renderHoldingActions)}
@@ -679,7 +681,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
           <button id="archive-continue" type="button" onClick={continueToArchive} disabled={busy || !selectedArchiveLotId || !mutationETagValid} aria-busy={busy}>Continue to archive</button>
         </div>}
       </div>}
-    </section>
+    </Paper>
       {effectiveFormOpen && createPortal(<div className="confirmation-backdrop add-dialog-backdrop"><section ref={addDialogRef} className="confirmation-dialog add-dialog" role="dialog" aria-modal="true" aria-labelledby="holding-form-title" aria-describedby={error ? 'holding-form-description holding-form-error' : 'holding-form-description'}><form className="holding-form" onSubmit={create}>
         <h3 id="holding-form-title" ref={formHeadingRef} tabIndex={-1}>Add one holding</h3>
         <p id="holding-form-description" className="muted">Use an existing portfolio instrument ID or define one new instrument. Financial values stay as exact text.</p>
