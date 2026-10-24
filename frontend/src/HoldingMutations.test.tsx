@@ -3,6 +3,7 @@ import { StrictMode } from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import HoldingMutations, { calculateRowMenuPosition, validateHoldingMutationReceipt, validatePortfolioETag } from './HoldingMutations'
+import { hasMatchingDeclaration, matchingStyleRules, installCommittedStyles } from './cssTestUtils'
 
 const holding = {
   lot_id: 'lot-a', symbol: 'AAA', name: 'AAA Fund', quantity: '2', currency: 'USD', unit_cost: '5', cost_basis: '10',
@@ -54,6 +55,51 @@ function retainedHandler<T extends (...args: any[]) => unknown>(element: HTMLEle
 afterEach(() => cleanup())
 
 describe('HoldingMutations', () => {
+  it('binds card controls and both portaled dialogs while excluding MUI mutation primitives', async () => {
+    const removeStyles = installCommittedStyles()
+    const fetchMock = vi.fn(() => new Promise<Response>(() => undefined))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      render(<HoldingMutations {...baseProps()} />)
+      const add = screen.getByRole('button', { name: 'Add holding' })
+      expect(hasMatchingDeclaration(add, 'background', '#172322')).toBe(false)
+      fireEvent.click(add)
+      const symbol = screen.getByLabelText('Symbol')
+      expect(hasMatchingDeclaration(symbol, 'background', '#172322')).toBe(true)
+      symbol.focus()
+      expect(hasMatchingDeclaration(symbol, 'outline', '3px', 'focus-visible')).toBe(true)
+      const addCancel = screen.getByRole('button', { name: 'Cancel' })
+      expect(hasMatchingDeclaration(addCancel, 'background', '#172322')).toBe(true)
+      fireEvent.click(addCancel)
+      const pickerToggle = screen.getByRole('button', { name: 'Archive a holding' })
+      fireEvent.click(pickerToggle)
+      const picker = screen.getByLabelText('Holding to archive')
+      expect(hasMatchingDeclaration(picker, 'background', '#172322')).toBe(true)
+      fireEvent.change(picker, { target: { value: 'lot-a' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Continue to archive' }))
+      const confirm = screen.getByRole('button', { name: 'Confirm archive holding' })
+      const cancelArchive = screen.getByRole('button', { name: 'Cancel archive' })
+      expect(hasMatchingDeclaration(confirm, 'background', '#172322')).toBe(true)
+      cancelArchive.focus()
+      expect(hasMatchingDeclaration(cancelArchive, 'outline', '3px', 'focus-visible')).toBe(true)
+      fireEvent.click(confirm)
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Archiving holding…' })).toBeTruthy())
+      const busyConfirm = screen.getByRole('button', { name: 'Archiving holding…' })
+      expect((busyConfirm as HTMLButtonElement).disabled).toBe(true)
+      expect(hasMatchingDeclaration(busyConfirm, 'opacity', '.65', 'disabled')).toBe(true)
+      cleanup()
+      render(<HoldingMutations {...baseProps()}>{(renderActions) => <div>{renderActions(holding)}</div>}</HoldingMutations>)
+      const muiAdd = screen.getByRole('button', { name: 'Add holding' })
+      const rowIcon = screen.getByRole('button', { name: 'Actions for AAA lot lot-a' })
+      expect(muiAdd.className).toContain('MuiButtonBase-root')
+      expect(rowIcon.className).toContain('MuiButtonBase-root')
+      expect(matchingStyleRules(muiAdd).every(({ selectorText }) => !selectorText.includes('.holding-mutation-card'))).toBe(true)
+      expect(matchingStyleRules(rowIcon).every(({ selectorText }) => !selectorText.includes('.holding-mutation-card'))).toBe(true)
+    } finally {
+      removeStyles()
+    }
+  })
+
   it('keeps archive management collapsed until a human-readable holding is selected', () => {
     render(<HoldingMutations {...baseProps()} holdings={[{ ...holding, symbol: 'NVDA', name: 'NVIDIA Corporation', quantity: '2.500', currency: 'USD', unit_cost: '100.25', cost_basis: '250.625', lot_id: 'lot-immutable-nvda-123456789' }]} />)
     expect(screen.getByRole('button', { name: 'Archive a holding' })).toBeTruthy()

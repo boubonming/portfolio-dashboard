@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import Reviews, { validateReview, validateReviewPage, type FeedbackAttemptStore, type Review } from './Reviews'
 import type { Holding } from './App'
+import { hasMatchingDeclaration, installCommittedStyles } from './cssTestUtils'
 
 const timestamp = '2026-01-02T12:00:00.000000000Z'
 const holdings: Holding[] = [
@@ -46,6 +47,36 @@ describe('Phase D review contract validation', () => {
     await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
     fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
     await waitFor(() => expect(screen.getByText(/Outdated review\. Current snapshot: snap-2/)).toBeTruthy())
+  })
+
+  it('binds the real list and detail controls to baseline, focus, and disabled legacy rules', async () => {
+    const removeStyles = installCommittedStyles()
+    let resolveFeedback: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/feedback')) return new Promise<Response>((resolve) => { resolveFeedback = resolve })
+      return url.endsWith('/review-1') ? emptyResponse(review) : emptyResponse({ items: [review], has_more: false })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} csrfToken="csrf-token" onUnauthorized={vi.fn()} />)
+      const viewButton = await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+      expect(hasMatchingDeclaration(viewButton, 'background', '#172322')).toBe(true)
+      viewButton.focus()
+      expect(hasMatchingDeclaration(viewButton, 'outline', '3px', 'focus-visible')).toBe(true)
+      fireEvent.click(viewButton)
+      await waitFor(() => expect(document.querySelector('.review-detail')).toBeTruthy())
+      const note = screen.getByLabelText('Optional note')
+      expect(hasMatchingDeclaration(note, 'background', '#172322')).toBe(true)
+      fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+      await waitFor(() => expect(resolveFeedback).toBeTypeOf('function'))
+      const submit = screen.getByRole('button', { name: 'Recording feedback…' })
+      expect((submit as HTMLButtonElement).disabled).toBe(true)
+      expect(hasMatchingDeclaration(submit, 'opacity', '.65', 'disabled')).toBe(true)
+      resolveFeedback?.(await emptyResponse({}))
+    } finally {
+      removeStyles()
+    }
   })
 
   it('fails closed for contradictory lifecycle and unsafe evidence URLs', () => {

@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ThesisEditor, { validateSource, type Thesis } from './ThesisEditor'
 import type { Holding } from './App'
+import { hasMatchingDeclaration, installCommittedStyles } from './cssTestUtils'
 
 const holding: Holding = {
   lot_id: 'lot-a', symbol: 'AAA', name: 'AAA Fund', quantity: '1', currency: 'USD',
@@ -408,6 +409,31 @@ describe('ThesisEditor response contracts', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/newer revision exists/i))
     expect(document.activeElement).toBe(screen.getByRole('alert'))
     expect(screen.getByRole('button', { name: 'Reload latest revision' })).toBeTruthy()
+  })
+
+  it('binds real thesis inputs, textareas, and disabled submit to scoped legacy rules', async () => {
+    const removeStyles = installCommittedStyles()
+    let resolveSave: ((value: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => init?.method === 'PUT'
+      ? new Promise<Response>((resolve) => { resolveSave = resolve })
+      : response(thesis()))
+    try {
+      renderEditor(fetchMock)
+      const summary = await waitFor(() => screen.getByLabelText('Summary'))
+      const period = screen.getByLabelText('Intended holding period')
+      const save = screen.getByRole('button', { name: 'Save thesis' })
+      expect(hasMatchingDeclaration(summary, 'background', '#172322')).toBe(true)
+      expect(hasMatchingDeclaration(period, 'background', '#172322')).toBe(true)
+      summary.focus()
+      expect(hasMatchingDeclaration(summary, 'outline', '3px', 'focus-visible')).toBe(true)
+      fireEvent.click(save)
+      await waitFor(() => expect(resolveSave).toBeTypeOf('function'))
+      expect((save as HTMLButtonElement).disabled).toBe(true)
+      expect(hasMatchingDeclaration(save, 'opacity', '.65', 'disabled')).toBe(true)
+      resolveSave?.(await response(thesis({ revision: 2, revision_id: 'revision-b' })))
+    } finally {
+      removeStyles()
+    }
   })
 
   it('keeps long valid thesis content in shrink-safe semantic regions at the 320px contract boundary', async () => {

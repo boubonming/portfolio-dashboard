@@ -1,5 +1,37 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, RefObject } from 'react'
+import {
+  AppBar,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  FormControl,
+  InputLabel,
+  Paper,
+  Select,
+  Stack,
+  Tab,
+  Tabs,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  TableSortLabel,
+  TextField,
+  Toolbar,
+  Typography,
+} from '@mui/material'
+import {
+  Download,
+  Refresh,
+  TrendingDown,
+  TrendingFlat,
+  TrendingUp,
+} from '@mui/icons-material'
 import { apiFetch, APIError, getMarketDataSetup, jsonResponse, refreshMarketData, type MarketDataSetup } from './api'
 import ThesisEditor from './ThesisEditor'
 import Reviews, { type FeedbackAttemptStore } from './Reviews'
@@ -197,20 +229,21 @@ function directionGlyph(status: Exclude<PnLStatus, 'unavailable'>) {
 }
 
 function directionMarker(status: Exclude<PnLStatus, 'unavailable'>) {
-  return <><span className="direction-icon" aria-hidden="true">{directionGlyph(status)}</span><span className="visually-hidden">{pnlStatusLabel(status)}</span></>
+  const Icon = status === 'gain' ? TrendingUp : status === 'loss' ? TrendingDown : TrendingFlat
+  return <><span className="direction-icon" aria-hidden="true"><Icon fontSize="inherit" /><span className="direction-glyph">{directionGlyph(status)}</span></span><span className="visually-hidden">{pnlStatusLabel(status)}</span></>
 }
 
 function unrealisedPnLCell(holding: Holding) {
   const status = unrealisedPnLStatus(holding)
-  if (status === 'unavailable') return <span className="pnl-unavailable">Unavailable</span>
-  return <span className={`pnl-${status}`}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatDecimalForDisplay(holding.unrealised_pnl)} {holding.currency}</span></span></span>
+  if (status === 'unavailable') return <Box component="span" className="pnl-unavailable" sx={{ color: 'text.secondary' }}>Unavailable</Box>
+  return <Box component="span" className={`pnl-${status}`} sx={{ bgcolor: status === 'gain' ? 'rgba(22,77,67,.65)' : status === 'loss' ? 'rgba(101,44,53,.8)' : 'rgba(61,62,70,.8)', border: 1, borderColor: status === 'gain' ? 'primary.main' : status === 'loss' ? 'error.main' : 'text.secondary', borderRadius: 1, display: 'inline-block', px: .5, py: .25 }}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatDecimalForDisplay(holding.unrealised_pnl)} {holding.currency}</span></span></Box>
 }
 
 function latestPriceCell(holding: Holding) {
   const status = unrealisedPnLStatus(holding)
   const latestPrice = holding.latest_price?.trim()
   if (status === 'unavailable' || !latestPrice) return <span>{formatDecimalForDisplay(latestPrice)}</span>
-  return <span className={`pnl-${status}`}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatDecimalForDisplay(latestPrice)}</span></span></span>
+  return <Box component="span" className={`pnl-${status}`} sx={{ color: status === 'gain' ? 'success.light' : status === 'loss' ? 'error.light' : 'text.primary' }}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatDecimalForDisplay(latestPrice)}</span></span></Box>
 }
 
 function latestMarketValueCell(holding: Holding) {
@@ -427,16 +460,18 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
       if (mountedRef.current) { setPassword(''); setState('idle') }
     }
   }
-  return <main className="shell login-shell">
-    <header className="brand"><span className="eyebrow">Private workspace</span><h1>Portfolio Dashboard</h1><p className="muted">Sign in to view your private portfolio.</p></header>
-    <form className="login-card" onSubmit={submit} aria-labelledby="login-title">
-      <h2 id="login-title">Sign in</h2>
-      <label htmlFor="username">Username</label><input ref={usernameRef} id="username" name="username" autoComplete="username" autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required />
-      <label htmlFor="password">Password</label><input id="password" name="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
-      {(error || externalError) && <p className="notice error" role="alert">{error || externalError}</p>}
-      <button type="submit" disabled={state === 'submitting'}>{state === 'submitting' ? 'Signing in…' : 'Sign in'}</button>
-    </form>
-  </main>
+  return <Box component="main" className="shell login-shell" sx={{ maxWidth: 576, minHeight: '100vh', py: { xs: 3, sm: 8 } }}>
+    <Box component="header" sx={{ mb: 3 }}><Typography component="span" className="eyebrow">Private workspace</Typography><Typography component="h1" variant="h3" sx={{ mt: .5 }}>Portfolio Dashboard</Typography><Typography color="text.secondary">Sign in to view your private portfolio.</Typography></Box>
+    <Card component="form" className="login-card" onSubmit={submit} aria-labelledby="login-title" variant="outlined">
+      <CardContent sx={{ display: 'grid', gap: 1.25, p: { xs: 2.5, sm: 3 } }}>
+        <Typography component="h2" id="login-title" variant="h5">Sign in</Typography>
+        <TextField inputRef={usernameRef} id="username" name="username" label="Username" slotProps={{ htmlInput: { 'aria-label': 'Username' } }} autoComplete="username" autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required fullWidth />
+        <TextField id="password" name="password" type="password" label="Password" slotProps={{ htmlInput: { 'aria-label': 'Password' } }} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required fullWidth />
+        {(error || externalError) && <Box className="notice error" role="alert" sx={{ mt: 1 }}>{error || externalError}</Box>}
+        <Button type="submit" variant="contained" disabled={state === 'submitting'} sx={{ mt: 1 }}>{state === 'submitting' ? 'Signing in…' : 'Sign in'}</Button>
+      </CardContent>
+    </Card>
+  </Box>
 }
 
 export default function App() {
@@ -905,124 +940,95 @@ export default function App() {
   }
 
   const sortButton = (label: string, key: SortKey) => (
-    <button className="sort-button" type="button" onClick={() => selectSort(key)} aria-label={`Sort by ${label}`}>
-      {label} {sortKey === key ? (sortDirection === 'ascending' ? '↑' : '↓') : '↕'}
-    </button>
+    <TableSortLabel active={sortKey === key} direction={sortDirection === 'ascending' ? 'asc' : 'desc'} onClick={() => selectSort(key)} aria-label={`Sort by ${label}`}>
+      {label}
+    </TableSortLabel>
   )
 
   const sortHeader = (label: string, key: SortKey) => (
-    <th scope="col" aria-sort={sortKey === key ? sortDirection : 'none'}>{sortButton(label, key)}</th>
+    <TableCell component="th" scope="col" sortDirection={sortKey === key ? (sortDirection === 'ascending' ? 'asc' : 'desc') : false} aria-sort={sortKey === key ? sortDirection : 'none'}>{sortButton(label, key)}</TableCell>
   )
 
   if (authState === 'login') return <Login onLogin={signIn} externalError={authError} />
-  if (authState === 'checking') return <main className="shell" aria-busy="true"><section className="notice" role="status" aria-live="polite"><h1>Checking your session…</h1><p>Loading portfolio securely.</p></section></main>
+  if (authState === 'checking') return <Box component="main" className="shell" aria-busy="true"><Paper className="notice" role="status" aria-live="polite" sx={{ mt: 3, p: 3 }}><Typography component="h1" variant="h4">Checking your session…</Typography><Typography>Loading portfolio securely.</Typography></Paper></Box>
+
+  const navTabs: Array<{ value: typeof view; label: string; ariaLabel?: string }> = [
+    { value: 'overview', label: 'Overview' },
+    { value: 'holdings', label: 'Holdings' },
+    { value: 'activity', label: 'Activity' },
+    { value: 'reviews', label: 'Review', ariaLabel: 'Reviews' },
+    { value: 'market', label: 'Market Data', ariaLabel: 'Market data' },
+  ]
 
   return (
-    <main className="shell">
-      <header className="app-header">
-        <a className="app-brand" href="#portfolio-content" aria-label="Portfolio Dashboard home">Portfolio Dashboard</a>
-        <nav className="view-nav" aria-label="Portfolio views">
-          <button type="button" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Overview</button>
-          <button type="button" aria-current={view === 'holdings' ? 'page' : undefined} onClick={() => setView('holdings')}>Holdings</button>
-          <button type="button" aria-current={view === 'activity' ? 'page' : undefined} onClick={() => setView('activity')}>Activity</button>
-          <button type="button" aria-label="Reviews" aria-current={view === 'reviews' ? 'page' : undefined} onClick={() => { setReviewsHoldingId(undefined); setView('reviews') }}>Review</button>
-          <button type="button" aria-label="Market data" aria-current={view === 'market' ? 'page' : undefined} onClick={() => setView('market')}>Market Data</button>
-
-        </nav>
-        <button className="sign-out" type="button" onClick={logout}>Sign out</button>
-      </header>
+    <Box component="main" className="shell" sx={{ maxWidth: 1800, mx: 'auto', px: { xs: 1.5, sm: 3, lg: 4 }, pb: 6, width: '100%' }}>
+      <AppBar component="header" className="app-header" position="static" color="transparent">
+        <Toolbar variant="dense" disableGutters sx={{ gap: { xs: 1, sm: 2 }, flexWrap: { xs: 'wrap', md: 'nowrap' }, py: .5 }}>
+          <Box component="a" className="app-brand" href="#portfolio-content" aria-label="Portfolio Dashboard home" sx={{ color: 'text.primary', fontWeight: 800, textDecoration: 'none', whiteSpace: 'nowrap', mr: { md: 1 } }}>Portfolio Dashboard</Box>
+          <Box component="nav" className="view-nav" aria-label="Portfolio views" sx={{ flex: 1, minWidth: 0, order: { xs: 3, md: 0 }, width: { xs: '100%', md: 'auto' }, overflowX: 'auto' }}>
+            <Tabs value={view} onChange={(_event, nextView) => { if (nextView === 'reviews') setReviewsHoldingId(undefined); setView(nextView) }} selectionFollowsFocus variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile aria-label="Portfolio views" sx={{ minHeight: 40, '& .MuiTab-root': { minHeight: 40, minWidth: { xs: 92, sm: 108 }, px: { xs: 1.25, sm: 2 } } }}>
+              {navTabs.map((tab) => <Tab key={tab.value} value={tab.value} label={tab.label} aria-label={tab.ariaLabel} aria-current={view === tab.value ? 'page' : undefined} />)}
+            </Tabs>
+          </Box>
+          <Button className="sign-out" type="button" onClick={logout} color="inherit" variant="outlined" size="small" sx={{ ml: 'auto', flexShrink: 0, whiteSpace: 'nowrap' }}>Sign out</Button>
+        </Toolbar>
+      </AppBar>
 
       {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} /> : <>
       {(view === 'overview' || view === 'holdings') && <>
-      {view === 'holdings' && <section className="toolbar" aria-label="Portfolio controls">
-        <label htmlFor="currency">Reporting currency</label>
-        <select id="currency" value={currency} onChange={(event) => setCurrency(event.target.value)}>
-          <option value="MYR">MYR</option>
-          <option value="USD">USD</option>
-          <option value="SGD">SGD</option>
-          <option value="JPY">JPY</option>
-        </select>
-        <label htmlFor="filter">Filter holdings</label>
-        <input ref={filterRef} id="filter" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Symbol, currency or flag" />
-        <button type="button" onClick={downloadCSV} disabled={exportState === 'loading'} aria-busy={exportState === 'loading'}>{exportState === 'loading' ? 'Downloading CSV…' : 'Download CSV'}</button>
-        <button type="button" onClick={refreshPrices} disabled={refreshState === 'loading'} aria-busy={refreshState === 'loading'}>{refreshState === 'loading' ? 'Refreshing prices…' : 'Refresh prices'}</button>
-        {exportError && <span className="notice error" role="alert">{exportError} <button type="button" onClick={downloadCSV}>Retry download</button></span>}
-        {refreshAnnouncement && <span className={`refresh-inline-status refresh-${refreshState}`} role="status" aria-live="polite">{refreshAnnouncement}</span>}
-        {refreshError && <span className="notice error" role={refreshState === 'error' ? 'alert' : 'status'}>{refreshError}</span>}
-        <span className="visually-hidden" role="status" aria-live="polite">{exportAnnouncement}</span>
-      </section>}
+      {view === 'holdings' && <Paper component="section" className="toolbar" aria-label="Portfolio controls" variant="outlined" sx={{ mt: 3, p: { xs: 1.5, sm: 2 }, borderColor: 'divider' }}>
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} useFlexGap sx={{ flexWrap: 'wrap', alignItems: { xs: 'stretch', md: 'center' } }}>
+          <FormControl size="small" sx={{ minWidth: 170 }}><InputLabel id="currency-label">Reporting currency</InputLabel><Select native labelId="currency-label" id="currency" inputProps={{ 'aria-label': 'Reporting currency' }} value={currency} label="Reporting currency" onChange={(event) => setCurrency(event.target.value)}><option value="MYR">MYR</option><option value="USD">USD</option><option value="SGD">SGD</option><option value="JPY">JPY</option></Select></FormControl>
+          <TextField inputRef={filterRef} id="filter" label="Filter holdings" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Symbol, currency or flag" size="small" sx={{ minWidth: { md: 250 }, flex: 1 }} />
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}><Button type="button" onClick={downloadCSV} disabled={exportState === 'loading'} aria-busy={exportState === 'loading'} startIcon={<Download aria-hidden="true" />}>{exportState === 'loading' ? 'Downloading CSV…' : 'Download CSV'}</Button><Button type="button" onClick={refreshPrices} disabled={refreshState === 'loading'} aria-busy={refreshState === 'loading'} startIcon={<Refresh aria-hidden="true" />}>{refreshState === 'loading' ? 'Refreshing prices…' : 'Refresh prices'}</Button></Stack>
+          {exportError && <Box className="notice error" role="alert">{exportError} <Button type="button" onClick={downloadCSV} size="small">Retry download</Button></Box>}
+          {refreshAnnouncement && <Box component="span" className={`refresh-inline-status refresh-${refreshState}`} role="status" aria-live="polite">{refreshAnnouncement}</Box>}
+          {refreshError && <Box component="span" className="notice error" role={refreshState === 'error' ? 'alert' : 'status'}>{refreshError}</Box>}
+          <span className="visually-hidden" role="status" aria-live="polite">{exportAnnouncement}</span>
+        </Stack>
+      </Paper>}
 
-      {state === 'loading' && <section className="notice" role="status"><h2>Loading portfolio</h2><p>Reading the latest immutable snapshot…</p></section>}
-      {authError && <section className="notice error" role="alert"><h2>Session error</h2><p>{authError}</p></section>}
-      {state === 'error' && <section className="notice error" role="alert"><h2>Unable to load portfolio</h2><p>{error}</p><button type="button" onClick={() => load()}>Try again</button></section>}
+      {state === 'loading' && <Paper className="notice" role="status" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Loading portfolio</Typography><Typography>Reading the latest immutable snapshot…</Typography></Paper>}
+      {authError && <Paper className="notice error" role="alert" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Session error</Typography><Typography>{authError}</Typography></Paper>}
+      {state === 'error' && <Paper className="notice error" role="alert" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Unable to load portfolio</Typography><Typography>{error}</Typography><Button type="button" onClick={() => load()}>Try again</Button></Paper>}
 
       {state === 'ready' && data && (
         <>
-          <div id="portfolio-content" tabIndex={-1} />
-          {view !== 'overview' && <h1 className="visually-hidden">{data.portfolio.name}</h1>}
-          {view === 'overview' && <section className="overview" aria-labelledby="overview-title">
-            <div>
-              <span className="eyebrow">Overview</span>
-              <h2 id="overview-title">{data.portfolio.name}</h2>
-              <p className="muted">Reporting in {data.reporting_currency}</p>
-            </div>
-            <div className={`state-pill state-${data.snapshot.state}`}>
-              {data.snapshot.state === 'complete' ? 'Complete valuation' : data.snapshot.state === 'incomplete' ? 'Incomplete valuation' : 'No snapshot'}
-            </div>
-            {data.snapshot.complete && data.snapshot.reporting_total && (
-              <div className="total"><span className="muted">Reporting total</span><strong>{data.snapshot.reporting_total} {data.reporting_currency}</strong></div>
-            )}
-            <dl className="snapshot-meta">
-              <div><dt>Snapshot as-of</dt><dd>{displayDate(data.snapshot.as_of)}</dd></div>
-              <div><dt>Version</dt><dd>{data.snapshot.calculation_version || 'Not available'}</dd></div>
-            </dl>
-          </section>}
+          <Box id="portfolio-content" tabIndex={-1} />
+          {view !== 'overview' && <Typography component="h1" className="visually-hidden">{data.portfolio.name}</Typography>}
+          {view === 'overview' && <Card component="section" className="overview" aria-labelledby="overview-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider' }}><CardContent sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 1fr' }, alignItems: 'center', p: { xs: 2, sm: 2.5 } }}>
+            <Box><Typography component="span" className="eyebrow">Overview</Typography><Typography component="h2" id="overview-title" variant="h4" sx={{ mt: .5 }}>{data.portfolio.name}</Typography><Typography color="text.secondary">Reporting in {data.reporting_currency}</Typography></Box>
+            <Chip className={`state-pill state-${data.snapshot.state}`} label={data.snapshot.state === 'complete' ? 'Complete valuation' : data.snapshot.state === 'incomplete' ? 'Incomplete valuation' : 'No snapshot'} sx={{ justifySelf: { md: 'start' } }} />
+            {data.snapshot.complete && data.snapshot.reporting_total && <Box className="total"><Typography color="text.secondary">Reporting total</Typography><Typography component="strong" variant="h5">{data.snapshot.reporting_total} {data.reporting_currency}</Typography></Box>}
+            <Box component="dl" className="snapshot-meta" sx={{ m: 0, pl: { md: 2 }, borderLeft: { md: 1 }, borderColor: 'divider' }}><Box><Typography component="dt" variant="caption" color="text.secondary">Snapshot as-of</Typography><Typography component="dd" sx={{ m: 0, mt: .25 }}>{displayDate(data.snapshot.as_of)}</Typography></Box><Box sx={{ mt: 1 }}><Typography component="dt" variant="caption" color="text.secondary">Version</Typography><Typography component="dd" sx={{ m: 0, mt: .25, overflowWrap: 'anywhere' }}>{data.snapshot.calculation_version || 'Not available'}</Typography></Box></Box>
+          </CardContent></Card>}
 
-          {view === 'overview' && data.snapshot.state === 'no_snapshot' && <section className="notice"><h2>No immutable snapshot yet</h2><p>A snapshot is a frozen point-in-time valuation calculated from the current holdings plus dated quotes and FX rates. It does not place trades or change holdings. Earnings, value and allocation are withheld until the required market inputs exist and a snapshot is created.</p></section>}
-          {view === 'overview' && data.snapshot.state === 'incomplete' && <section className="notice warning"><h2>Valuation is incomplete</h2><p>Reporting total is intentionally withheld. Missing, stale or invalid market dependencies must be resolved before this view can be complete.</p></section>}
+          {view === 'overview' && data.snapshot.state === 'no_snapshot' && <Paper className="notice" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">No immutable snapshot yet</Typography><Typography>A snapshot is a frozen point-in-time valuation calculated from the current holdings plus dated quotes and FX rates. It does not place trades or change holdings. Earnings, value and allocation are withheld until the required market inputs exist and a snapshot is created.</Typography></Paper>}
+          {view === 'overview' && data.snapshot.state === 'incomplete' && <Paper className="notice warning" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Valuation is incomplete</Typography><Typography>Reporting total is intentionally withheld. Missing, stale or invalid market dependencies must be resolved before this view can be complete.</Typography></Paper>}
 
           {view === 'overview' && <AllocationSection data={data} />}
 
           {view === 'holdings' && <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active sessionKey={String(authGeneration.current)} scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized}>
-            {(holdingActions) => <section className="table-card holdings-surface" aria-labelledby="holdings-title">
-            <div className="section-heading"><div><span className="eyebrow">Canonical active lots</span><h2 id="holdings-title">Holdings</h2></div><span className="muted">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</span></div>
-            <div className="table-scroll">
-              <table>
+            {(holdingActions) => <Paper component="section" className="table-card holdings-surface" aria-labelledby="holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', overflow: 'hidden' }}>
+            <Stack className="section-heading" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between', p: { xs: 2, sm: 2.5 } }}><Box><Typography component="span" className="eyebrow">Canonical active lots</Typography><Typography component="h2" id="holdings-title" variant="h5" sx={{ mt: .5, mb: 0 }}>Holdings</Typography></Box><Typography color="text.secondary">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</Typography></Stack>
+            <TableContainer className="table-scroll" sx={{ maxWidth: '100%', overflowX: 'auto' }}>
+              <Table stickyHeader aria-label="Holdings" sx={{ minWidth: 1250 }}>
                 <caption className="visually-hidden">Holdings</caption>
-                <thead><tr>
-                  {sortHeader('Instrument', 'symbol')}
-                  {sortHeader('Quantity', 'quantity')}
-                  {sortHeader('Currency', 'currency')}
-                  <th scope="col">Source unit cost</th>
-                  {sortHeader('Cost basis', 'cost_basis')}
-                  {sortHeader('Latest price', 'latest_price')}
-                  {sortHeader('Latest market value', 'latest_value')}
-                  {sortHeader('Unrealised P/L', 'unrealised_pnl')}
-                  {sortHeader('Reporting value', 'reporting_value')}
-                  {sortHeader('Freshness', 'freshness')}
-                  <th scope="col">Broker / date</th>
-                  <th scope="col"><span className="visually-hidden">Holding actions</span></th>
-                </tr></thead>
-                <tbody>
-                  {visibleHoldings.map((holding) => <tr key={holding.lot_id}>
-                    <th scope="row"><strong>{holding.symbol}</strong><span className="subline">{holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'} · lot {holding.lot_id.slice(-8)}</span></th>
-                    <td className="numeric">{holding.quantity}</td>
-                    <td>{holding.currency}</td>
-                    <td className="numeric">{formatDecimalForDisplay(holding.unit_cost)}</td>
-                    <td className="numeric">{formatDecimalForDisplay(holding.cost_basis)}</td>
-                    <td className="numeric">{latestPriceCell(holding)}</td>
-                    <td className="numeric">{latestMarketValueCell(holding)}</td>
-                    <td className="numeric">{unrealisedPnLCell(holding)}</td>
-                    <td className="numeric">{data.snapshot.complete ? formatDecimalForDisplay(holding.reporting_value) : 'Withheld'}</td>
-                    <td><span className={`flag ${qualityClass(holding)}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
-                    <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button><button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`}>View reviews</button></td>
-                    <td>{holdingActions(holding)}</td>
-                  </tr>)}
-                </tbody>
-              </table>
+                <TableHead><TableRow>
+                  {sortHeader('Instrument', 'symbol')}{sortHeader('Quantity', 'quantity')}{sortHeader('Currency', 'currency')}
+                  <TableCell component="th" scope="col">Source unit cost</TableCell>{sortHeader('Cost basis', 'cost_basis')}{sortHeader('Latest price', 'latest_price')}{sortHeader('Latest market value', 'latest_value')}{sortHeader('Unrealised P/L', 'unrealised_pnl')}{sortHeader('Reporting value', 'reporting_value')}{sortHeader('Freshness', 'freshness')}
+                  <TableCell component="th" scope="col">Broker / date</TableCell><TableCell component="th" scope="col"><span className="visually-hidden">Holding actions</span></TableCell>
+                </TableRow></TableHead>
+                <TableBody>{visibleHoldings.map((holding) => <TableRow key={holding.lot_id} hover>
+                    <TableCell component="th" scope="row"><strong>{holding.symbol}</strong><span className="subline">{holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'} · lot {holding.lot_id.slice(-8)}</span></TableCell>
+                    <TableCell className="numeric">{holding.quantity}</TableCell><TableCell>{holding.currency}</TableCell><TableCell className="numeric">{formatDecimalForDisplay(holding.unit_cost)}</TableCell><TableCell className="numeric">{formatDecimalForDisplay(holding.cost_basis)}</TableCell><TableCell className="numeric">{latestPriceCell(holding)}</TableCell><TableCell className="numeric">{latestMarketValueCell(holding)}</TableCell><TableCell className="numeric">{unrealisedPnLCell(holding)}</TableCell><TableCell className="numeric">{data.snapshot.complete ? formatDecimalForDisplay(holding.reporting_value) : 'Withheld'}</TableCell><TableCell><Chip size="small" className={`flag ${qualityClass(holding)}`} label={qualityLabel(holding)} />{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</TableCell>
+                    <TableCell>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><Button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`} size="small">Open thesis</Button><Button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`} size="small">View reviews</Button></TableCell>
+                    <TableCell>{holdingActions(holding)}</TableCell>
+                </TableRow>)}</TableBody>
+              </Table>
               {!visibleHoldings.length && <p className="empty">No holdings match this filter.</p>}
-            </div>
-          </section>}
+            </TableContainer>
+          </Paper>}
           </HoldingMutations>}
         </>
       )}
@@ -1031,6 +1037,6 @@ export default function App() {
       {view === 'market' && <MarketDataPanel portfolioID={data?.portfolio.id || activityPortfolioID} reportingCurrency={currency} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} onReload={() => load()} />}
       {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} feedbackAttempts={feedbackAttemptsRef.current} onUnauthorized={handleThesisUnauthorized} onBackToOverview={closeReviews} />}
       </>}
-    </main>
+    </Box>
   )
 }
