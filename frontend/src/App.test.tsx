@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import App, { compareDecimalStrings, isCSVContentType, safeCSVFilename, type PortfolioOverview } from './App'
+import App, { compareDecimalStrings, formatDecimalForDisplay, isCSVContentType, safeCSVFilename, type PortfolioOverview } from './App'
 import * as api from './api'
 
 const completeOverview: PortfolioOverview = {
@@ -73,10 +73,10 @@ const appReview = {
 const decimalSortOverview: PortfolioOverview = {
   ...completeOverview,
   holdings: [
-    { ...completeOverview.holdings[0], lot_id: 'lot-two', symbol: 'TWO', latest_price: '2', reporting_value: '10.1' },
-    { ...completeOverview.holdings[0], lot_id: 'lot-ten', symbol: 'TEN', latest_price: '10', reporting_value: '10.02' },
-    { ...completeOverview.holdings[0], lot_id: 'lot-ten02', symbol: 'TEN02', latest_price: '10.02', reporting_value: '10' },
-    { ...completeOverview.holdings[0], lot_id: 'lot-ten1', symbol: 'TEN1', latest_price: '10.1', reporting_value: '2' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-two', symbol: 'TWO', latest_price: '2', latest_value: '2.004', unrealised_pnl: '2.004', reporting_value: '10.1' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-ten', symbol: 'TEN', latest_price: '10', latest_value: '10.02', unrealised_pnl: '10.02', reporting_value: '10.02' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-ten02', symbol: 'TEN02', latest_price: '10.02', latest_value: '10.1', unrealised_pnl: '10.1', reporting_value: '10' },
+    { ...completeOverview.holdings[0], lot_id: 'lot-ten1', symbol: 'TEN1', latest_price: '10.1', latest_value: '10.10', unrealised_pnl: '10.10', reporting_value: '2' },
   ],
 }
 
@@ -519,6 +519,28 @@ describe('Portfolio Dashboard', () => {
     expect(compareDecimalStrings('1.000', '1')).toBe(0)
   })
 
+  it('formats monetary decimals exactly to at most two places with ties away from zero', () => {
+    const cases: Array<[string, string]> = [
+      ['0', '0'],
+      ['12', '12'],
+      ['12.3', '12.3'],
+      ['12.30', '12.3'],
+      ['12.345', '12.35'],
+      ['12.344', '12.34'],
+      ['12.3450', '12.35'],
+      ['-12.345', '-12.35'],
+      ['-12.344', '-12.34'],
+      ['0.005', '0.01'],
+      ['-0.005', '-0.01'],
+      ['-0.004', '0'],
+      ['999.999', '1000'],
+      ['-999.999', '-1000'],
+      ['999999999999999999999999999999.995', '1000000000000000000000000000000'],
+    ]
+    for (const [input, expected] of cases) expect(formatDecimalForDisplay(input)).toBe(expected)
+    expect(formatDecimalForDisplay.toString()).not.toMatch(/Number|parseFloat|toFixed|Math\\./)
+  })
+
   it('exposes accessible active sort state for value columns', async () => {
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
     render(<App />)
@@ -549,6 +571,22 @@ describe('Portfolio Dashboard', () => {
     expect(latestPriceHeader.getAttribute('aria-sort')).toBe('descending')
     expect(rowSymbols()).toEqual(['TEN1', 'TEN02', 'TEN', 'TWO'])
 
+    const latestValueHeader = screen.getByRole('columnheader', { name: /latest market value/i })
+    fireEvent.click(screen.getByRole('button', { name: /sort by latest market value/i }))
+    expect(latestValueHeader.getAttribute('aria-sort')).toBe('ascending')
+    expect(rowSymbols()).toEqual(['TWO', 'TEN', 'TEN02', 'TEN1'])
+    fireEvent.click(screen.getByRole('button', { name: /sort by latest market value/i }))
+    expect(latestValueHeader.getAttribute('aria-sort')).toBe('descending')
+    expect(rowSymbols()).toEqual(['TEN1', 'TEN02', 'TEN', 'TWO'])
+
+    const pnlHeader = screen.getByRole('columnheader', { name: /unrealised p\/l/i })
+    fireEvent.click(screen.getByRole('button', { name: /sort by unrealised p\/l/i }))
+    expect(pnlHeader.getAttribute('aria-sort')).toBe('ascending')
+    expect(rowSymbols()).toEqual(['TWO', 'TEN', 'TEN02', 'TEN1'])
+    fireEvent.click(screen.getByRole('button', { name: /sort by unrealised p\/l/i }))
+    expect(pnlHeader.getAttribute('aria-sort')).toBe('descending')
+    expect(rowSymbols()).toEqual(['TEN1', 'TEN02', 'TEN', 'TWO'])
+
     fireEvent.click(screen.getByRole('button', { name: /sort by reporting value/i }))
     expect(reportingValueHeader.getAttribute('aria-sort')).toBe('ascending')
     expect(latestPriceHeader.getAttribute('aria-sort')).toBe('none')
@@ -563,18 +601,18 @@ describe('Portfolio Dashboard', () => {
     render(<App />)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
     expect(screen.getByText('10.1 USD')).toBeTruthy()
-    expect(screen.getByText('Gain').className).toContain('subline')
+    expect(screen.getByText('Gain').className).toContain('visually-hidden')
     expect(screen.getByText('-10 USD')).toBeTruthy()
-    expect(screen.getByText('Loss').className).toContain('subline')
-    expect(screen.getByText('0.00 USD')).toBeTruthy()
-    expect(screen.getByText('Break-even').className).toContain('subline')
+    expect(screen.getAllByText('Loss').every((element) => element.className.includes('visually-hidden'))).toBe(true)
+    expect(screen.getByText('0 USD')).toBeTruthy()
+    expect(screen.getAllByText('Break-even').every((element) => element.className.includes('visually-hidden'))).toBe(true)
     expect(screen.getByText('Unavailable').className).toContain('pnl-unavailable')
     expect(screen.queryByText('Unavailable')?.className).not.toMatch(/pnl-(gain|loss|break-even)/)
     const holdingsRows = within(screen.getByRole('table', { name: 'Holdings' })).getAllByRole('row').slice(1)
     const rowFor = (symbol: string) => holdingsRows.find((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent === symbol)
     expect(rowFor('GAIN')?.querySelector('.pnl-gain')).toBeTruthy()
     expect(rowFor('GAIN')?.querySelectorAll('td')[4]?.querySelector('.pnl-gain, .pnl-loss, .pnl-break-even')).toBeNull()
-    expect(rowFor('GAIN')?.querySelectorAll('td')[5]?.querySelector('.pnl-gain')).toBeTruthy()
+    expect(rowFor('GAIN')?.querySelectorAll('td')[6]?.querySelector('.pnl-gain')).toBeTruthy()
     expect(rowFor('LOSS')?.querySelector('.pnl-loss')).toBeTruthy()
     expect(rowFor('ZERO')?.querySelector('.pnl-break-even')).toBeTruthy()
     expect(rowFor('UNAVAILABLE')?.querySelector('.pnl-gain')).toBeNull()
@@ -585,6 +623,49 @@ describe('Portfolio Dashboard', () => {
     expect(rowSymbols()).toEqual(['UNAVAILABLE', 'LOSS', 'ZERO', 'GAIN'])
     fireEvent.click(screen.getByRole('button', { name: /sort by unrealised p\/l/i }))
     expect(rowSymbols()).toEqual(['GAIN', 'ZERO', 'LOSS', 'UNAVAILABLE'])
+  })
+
+  it('splits latest market value and uses left-side directional icons without visible status subtitles', async () => {
+    const presentationOverview: PortfolioOverview = {
+      ...completeOverview,
+      holdings: [
+        { ...completeOverview.holdings[0], lot_id: 'lot-gain', symbol: 'GAIN', latest_price: '10.005', latest_value: '100.005', unrealised_pnl: '1.005' },
+        { ...completeOverview.holdings[0], lot_id: 'lot-loss', symbol: 'LOSS', latest_price: '9.995', latest_value: '99.995', unrealised_pnl: '-1.005' },
+        { ...completeOverview.holdings[0], lot_id: 'lot-zero', symbol: 'ZERO', latest_price: '8.004', latest_value: '80.004', unrealised_pnl: '0' },
+        { ...completeOverview.holdings[0], lot_id: 'lot-missing', symbol: 'MISSING', latest_price: undefined, latest_value: undefined, unrealised_pnl: undefined, freshness: { status: 'missing' } },
+      ],
+    }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => presentationOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+
+    expect(screen.getByRole('columnheader', { name: /latest price/i })).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: /latest market value/i })).toBeTruthy()
+    expect(screen.getAllByRole('columnheader', { name: /latest/i })).toHaveLength(2)
+    expect(screen.queryByText('Gain', { selector: ':not(.visually-hidden)' })).toBeNull()
+    expect(screen.queryByText('Loss', { selector: ':not(.visually-hidden)' })).toBeNull()
+    expect(screen.queryByText('Break-even', { selector: ':not(.visually-hidden)' })).toBeNull()
+
+    const rows = within(screen.getByRole('table', { name: 'Holdings' })).getAllByRole('row').slice(1)
+    const rowFor = (symbol: string) => rows.find((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent === symbol)!
+    const price = (row: HTMLElement) => within(row).getAllByRole('cell')[4]
+    const marketValue = (row: HTMLElement) => within(row).getAllByRole('cell')[5]
+    const pnl = (row: HTMLElement) => within(row).getAllByRole('cell')[6]
+
+    expect(price(rowFor('GAIN')).textContent).toContain('10.01')
+    expect(marketValue(rowFor('GAIN')).textContent).toBe('100.01 USD')
+    expect(pnl(rowFor('GAIN')).textContent).toContain('1.01 USD')
+    expect(price(rowFor('GAIN')).querySelector('.direction-icon')?.textContent).toBe('↑')
+    expect(pnl(rowFor('GAIN')).querySelector('.direction-icon')?.textContent).toBe('↑')
+    expect(price(rowFor('GAIN')).querySelector('.direction-icon')?.nextElementSibling?.className).toContain('visually-hidden')
+    expect(pnl(rowFor('GAIN')).querySelector('.direction-icon')?.nextElementSibling?.textContent).toBe('Gain')
+    expect(price(rowFor('LOSS')).querySelector('.direction-icon')?.textContent).toBe('↓')
+    expect(pnl(rowFor('LOSS')).querySelector('.direction-icon')?.textContent).toBe('↓')
+    expect(price(rowFor('ZERO')).querySelector('.direction-icon')?.textContent).toBe('→')
+    expect(pnl(rowFor('ZERO')).querySelector('.direction-icon')?.textContent).toBe('→')
+    expect(price(rowFor('MISSING')).querySelector('.direction-icon')).toBeNull()
+    expect(pnl(rowFor('MISSING')).querySelector('.direction-icon')).toBeNull()
+    expect(marketValue(rowFor('MISSING')).textContent).toBe('—')
   })
 
   it('renders exact per-lot P/L even when the global response is incomplete', async () => {

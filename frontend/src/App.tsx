@@ -108,8 +108,42 @@ export type ActivityPage = {
   has_more: boolean
 }
 
-type SortKey = 'symbol' | 'quantity' | 'currency' | 'cost_basis' | 'latest_price' | 'unrealised_pnl' | 'reporting_value' | 'freshness'
+type SortKey = 'symbol' | 'quantity' | 'currency' | 'cost_basis' | 'latest_price' | 'latest_value' | 'unrealised_pnl' | 'reporting_value' | 'freshness'
 type SortDirection = 'ascending' | 'descending'
+
+function incrementDecimalDigits(value: string) {
+  const digits = value.split('')
+  let carry = 1
+  for (let index = digits.length - 1; index >= 0 && carry; index -= 1) {
+    if (digits[index] === '9') digits[index] = '0'
+    else {
+      digits[index] = String.fromCharCode(digits[index].charCodeAt(0) + 1)
+      carry = 0
+    }
+  }
+  return carry ? `1${digits.join('')}` : digits.join('')
+}
+
+// Format canonical decimal strings without floating-point conversion. Values
+// at the third fractional place are rounded away from zero on a half tie.
+export function formatDecimalForDisplay(value: string | undefined): string {
+  if (value === undefined || value.trim() === '') return '—'
+  const trimmed = value.trim()
+  const match = trimmed.match(/^([+-]?)(\d+)(?:\.(\d+))?$/)
+  if (!match) return trimmed
+  const negative = match[1] === '-'
+  let integer = match[2].replace(/^0+(?=\d)/, '') || '0'
+  const fraction = match[3] || ''
+  let cents = fraction.slice(0, 2).padEnd(2, '0')
+  if (fraction.length > 2 && fraction[2] >= '5') {
+    const rounded = incrementDecimalDigits(`${integer}${cents}`)
+    integer = rounded.slice(0, -2) || '0'
+    cents = rounded.slice(-2)
+  }
+  cents = cents.replace(/0+$/, '')
+  const zero = integer === '0' && cents === ''
+  return `${negative && !zero ? '-' : ''}${integer}${cents ? `.${cents}` : ''}`
+}
 
 // Compare canonical decimal strings without Number, parseFloat, or lexical
 // ordering. It also safely handles the optional values used by incomplete data.
@@ -158,18 +192,30 @@ function pnlStatusLabel(status: PnLStatus) {
   return status === 'gain' ? 'Gain' : status === 'loss' ? 'Loss' : status === 'break-even' ? 'Break-even' : 'Unavailable'
 }
 
+function directionGlyph(status: Exclude<PnLStatus, 'unavailable'>) {
+  return status === 'gain' ? '↑' : status === 'loss' ? '↓' : '→'
+}
+
+function directionMarker(status: Exclude<PnLStatus, 'unavailable'>) {
+  return <><span className="direction-icon" aria-hidden="true">{directionGlyph(status)}</span><span className="visually-hidden">{pnlStatusLabel(status)}</span></>
+}
+
 function unrealisedPnLCell(holding: Holding) {
   const status = unrealisedPnLStatus(holding)
   if (status === 'unavailable') return <span className="pnl-unavailable">Unavailable</span>
-  return <span className={`pnl-${status}`}><span className="pnl-amount">{holding.unrealised_pnl} {holding.currency}</span><span className="subline">{pnlStatusLabel(status)}</span></span>
+  return <span className={`pnl-${status}`}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatDecimalForDisplay(holding.unrealised_pnl)} {holding.currency}</span></span></span>
 }
 
 function latestPriceCell(holding: Holding) {
   const status = unrealisedPnLStatus(holding)
   const latestPrice = holding.latest_price?.trim()
-  const latestValue = holding.latest_value?.trim()
-  if (status === 'unavailable' || !latestPrice) return <span><span>{latestPrice || '—'}</span><span className="subline">{latestValue || 'value unavailable'}</span></span>
-  return <span className={`pnl-${status}`}><span className="pnl-amount">{latestPrice}</span><span className="subline">{pnlStatusLabel(status)} · {latestValue || 'value unavailable'}</span></span>
+  if (status === 'unavailable' || !latestPrice) return <span>{formatDecimalForDisplay(latestPrice)}</span>
+  return <span className={`pnl-${status}`}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatDecimalForDisplay(latestPrice)}</span></span></span>
+}
+
+function latestMarketValueCell(holding: Holding) {
+  const latestValue = formatDecimalForDisplay(holding.latest_value)
+  return <span>{latestValue === '—' ? latestValue : `${latestValue} ${holding.currency}`}</span>
 }
 
 function displayDate(value?: string) {
@@ -950,6 +996,7 @@ export default function App() {
                   <th scope="col">Source unit cost</th>
                   {sortHeader('Cost basis', 'cost_basis')}
                   {sortHeader('Latest price', 'latest_price')}
+                  {sortHeader('Latest market value', 'latest_value')}
                   {sortHeader('Unrealised P/L', 'unrealised_pnl')}
                   {sortHeader('Reporting value', 'reporting_value')}
                   {sortHeader('Freshness', 'freshness')}
@@ -961,11 +1008,12 @@ export default function App() {
                     <th scope="row"><strong>{holding.symbol}</strong><span className="subline">{holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'} · lot {holding.lot_id.slice(-8)}</span></th>
                     <td className="numeric">{holding.quantity}</td>
                     <td>{holding.currency}</td>
-                    <td className="numeric">{holding.unit_cost || '—'}</td>
-                    <td className="numeric">{holding.cost_basis || '—'}</td>
+                    <td className="numeric">{formatDecimalForDisplay(holding.unit_cost)}</td>
+                    <td className="numeric">{formatDecimalForDisplay(holding.cost_basis)}</td>
                     <td className="numeric">{latestPriceCell(holding)}</td>
+                    <td className="numeric">{latestMarketValueCell(holding)}</td>
                     <td className="numeric">{unrealisedPnLCell(holding)}</td>
-                    <td className="numeric">{data.snapshot.complete ? (holding.reporting_value || '—') : 'Withheld'}</td>
+                    <td className="numeric">{data.snapshot.complete ? formatDecimalForDisplay(holding.reporting_value) : 'Withheld'}</td>
                     <td><span className={`flag ${qualityClass(holding)}`}>{qualityLabel(holding)}</span>{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</td>
                     <td>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`}>Open thesis</button><button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`}>View reviews</button></td>
                     <td>{holdingActions(holding)}</td>
