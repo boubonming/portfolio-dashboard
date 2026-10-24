@@ -11,10 +11,11 @@ button, select, input { border: 1px solid #41615d; border-radius: 8px; backgroun
 button { cursor: pointer; }
 button:hover, button:focus-visible, select:focus-visible, input:focus-visible { border-color: #75d5c7; outline: 2px solid #75d5c7; outline-offset: 2px; }
 .shell { margin: 0 auto; max-width: 1800px; padding: 1rem clamp(1rem, 2.5vw, 2.5rem) 3rem; width: 100%; }
-.app-header { align-items: center; border-bottom: 1px solid #31514e; display: flex; gap: 1rem; min-height: 3.5rem; padding: .35rem 0 .75rem; }
+.app-header { align-items: center; border-bottom: 1px solid #31514e; display: flex; gap: .65rem; min-height: 2.75rem; padding: .2rem 0 .35rem; }
 .app-brand { color: #edf6f5; font-size: 1.15rem; font-weight: 800; letter-spacing: -.02em; text-decoration: none; white-space: nowrap; }
 .app-brand::before { border-left: 3px solid #52c7b8; content: ''; margin-right: .55rem; }
-.view-nav { display: flex; flex: 1; flex-wrap: wrap; gap: .35rem; margin: 0; }
+.app-header button { padding: .4rem .55rem; }
+.view-nav { display: flex; flex: 1; flex-wrap: wrap; gap: .25rem; margin: 0; }
 .view-nav a { border: 1px solid #41615d; border-radius: 8px; color: inherit; padding: .65rem .75rem; text-decoration: none; }
 .view-nav a:hover, .view-nav a:focus-visible { border-color: #75d5c7; outline: 2px solid #75d5c7; outline-offset: 2px; }
 .view-nav button[aria-current="page"] { background: #164d43; border-color: #75d5c7; font-weight: 700; }
@@ -76,7 +77,9 @@ tbody th { font-weight: 500; }
 .pnl-loss { background: #652c35; border: 1px solid #ff8f9d; color: #ffd2d8; }
 .pnl-break-even { background: #3d3e46; border: 1px solid #b5b8c9; color: #f0f0f6; }
 .pnl-unavailable { color: #b8cbc8; }
-.pnl-amount { display: block; }
+.directional-amount { align-items: baseline; display: inline-flex; gap: .3rem; }
+.direction-icon { display: inline-block; font-weight: 800; min-width: 1ch; }
+.pnl-amount { display: inline; }
 .refresh-inline-status { border-radius: 6px; font-weight: 700; padding: .35rem .55rem; }
 .refresh-complete { background: #164d43; color: #b8f4df; }
 .refresh-incomplete { background: #5b421e; color: #ffdc9a; }
@@ -208,10 +211,10 @@ tbody th { font-weight: 500; }
 .market-refresh-status { border-top: 1px solid #41615d; margin-top: 1.25rem; padding-top: 1rem; }
 .market-refresh-status ul { line-height: 1.7; margin-bottom: 0; padding-left: 1.2rem; }
 @media (max-width: 780px) {
-  .app-header { align-items: stretch; flex-wrap: wrap; }
-  .app-brand { width: 100%; }
+  .app-header { align-items: center; flex-wrap: wrap; }
+  .app-brand { flex: 1 1 auto; min-width: 0; }
   .view-nav { order: 3; width: 100%; }
-  .sign-out { margin-left: auto; position: absolute; right: 1rem; top: 1rem; }
+  .sign-out { margin-left: auto; position: static; }
   .overview { grid-template-columns: 1fr; }
   .snapshot-meta { border-left: 0; border-top: 1px solid #41615d; padding-left: 0; padding-top: 1rem; }
   .toolbar { align-items: stretch; flex-direction: column; }
