@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { StrictMode } from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import HoldingMutations, { validateHoldingMutationReceipt, validatePortfolioETag } from './HoldingMutations'
+import HoldingMutations, { calculateRowMenuPosition, validateHoldingMutationReceipt, validatePortfolioETag } from './HoldingMutations'
 
 const holding = {
   lot_id: 'lot-a', symbol: 'AAA', name: 'AAA Fund', quantity: '2', currency: 'USD', unit_cost: '5', cost_basis: '10',
@@ -28,6 +28,11 @@ function openArchive(lotId = 'lot-a') {
   if (openButton) fireEvent.click(openButton)
   fireEvent.change(screen.getByLabelText('Holding to archive'), { target: { value: lotId } })
   fireEvent.click(screen.getByRole('button', { name: 'Continue to archive' }))
+}
+
+function retainedHandler<T extends (...args: any[]) => unknown>(element: HTMLElement, name: string) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith('__reactProps$'))
+  return propsKey ? (element as unknown as Record<string, Record<string, T | undefined>>)[propsKey]?.[name] : undefined
 }
 
 afterEach(() => cleanup())
@@ -80,7 +85,8 @@ describe('HoldingMutations', () => {
     const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async (_input, init) => ({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...receipt, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }) } as Response))
     vi.stubGlobal('fetch', fetchMock)
     render(<HoldingMutations {...props} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    const origin = screen.getByRole('button', { name: 'Add holding' })
+    fireEvent.click(origin)
     fireEvent.change(screen.getByLabelText('Symbol'), { target: { value: 'NEW' } })
     fireEvent.change(screen.getByLabelText('Instrument currency'), { target: { value: 'USD' } })
     fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '2' } })
@@ -89,6 +95,7 @@ describe('HoldingMutations', () => {
     fireEvent.change(screen.getByLabelText('Holding currency'), { target: { value: 'USD' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
+    expect(document.activeElement).toBe(origin)
     const [, init] = fetchMock.mock.calls[0]
     expect(init?.method).toBe('POST')
     expect(new Headers(init?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
@@ -585,5 +592,160 @@ describe('HoldingMutations', () => {
     expect(document.activeElement).toBe(origin)
     expect(root.hasAttribute('aria-hidden')).toBe(false)
     root.remove()
+  })
+
+  it('rejects retained production row handlers after same-scope session replacement', () => {
+    const props = { ...baseProps(), sessionKey: 's1' }
+    const renderRows = (renderActions: (lot: typeof holding) => ReactNode) => <div>{renderActions(holding)}</div>
+    const rendered = render(<HoldingMutations {...props}>{renderRows}</HoldingMutations>)
+    const trigger = screen.getByRole('button', { name: /Actions for AAA lot lot-a/ })
+    const retainedTrigger = retainedHandler<() => unknown>(trigger, 'onClick')
+    fireEvent.click(trigger)
+    const menuItem = screen.getByRole('menuitem', { name: 'Archive holding' })
+    const retainedMenuItem = retainedHandler<(event: { currentTarget: HTMLElement }) => unknown>(menuItem, 'onClick')
+    rendered.rerender(<HoldingMutations {...props} sessionKey="s2">{renderRows}</HoldingMutations>)
+    retainedTrigger?.()
+    retainedMenuItem?.({ currentTarget: menuItem })
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Confirm archive holding' })).toBeNull()
+  })
+
+  it('keeps retained archive confirmation powerless after session replacement', () => {
+    const props = { ...baseProps(), sessionKey: 's1' }
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const renderRows = (renderActions: (lot: typeof holding) => ReactNode) => <div>{renderActions(holding)}</div>
+    const rendered = render(<HoldingMutations {...props}>{renderRows}</HoldingMutations>)
+    fireEvent.click(screen.getByRole('button', { name: /Actions for AAA lot lot-a/ }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+    const confirm = screen.getByRole('button', { name: 'Confirm archive holding' })
+    const retainedConfirm = retainedHandler<() => unknown>(confirm, 'onClick')
+    rendered.rerender(<HoldingMutations {...props} sessionKey="s2">{renderRows}</HoldingMutations>)
+    retainedConfirm?.()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('keeps retained row handlers powerless immediately after a 401 teardown', async () => {
+    const props = { ...baseProps(), sessionKey: 's1' }
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 401, headers: new Headers(), json: async () => ({}) } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    const renderRows = (renderActions: (lot: typeof holding) => ReactNode) => <div>{renderActions(holding)}</div>
+    render(<HoldingMutations {...props}>{renderRows}</HoldingMutations>)
+    const trigger = screen.getByRole('button', { name: /Actions for AAA lot lot-a/ })
+    const retainedTrigger = retainedHandler<() => unknown>(trigger, 'onClick')
+    fireEvent.click(trigger)
+    const menuItem = screen.getByRole('menuitem', { name: 'Archive holding' })
+    const retainedMenuItem = retainedHandler<(event: { currentTarget: HTMLElement }) => unknown>(menuItem, 'onClick')
+    fireEvent.click(menuItem)
+    const confirm = screen.getByRole('button', { name: 'Confirm archive holding' })
+    const retainedConfirm = retainedHandler<() => unknown>(confirm, 'onClick')
+    fireEvent.click(confirm)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    retainedTrigger?.()
+    retainedMenuItem?.({ currentTarget: menuItem })
+    retainedConfirm?.()
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('rejects a retained Add submit synchronously after session and scope replacement', () => {
+    const props = { ...baseProps(), sessionKey: 's1' }
+    const rendered = render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    const form = screen.getByRole('dialog').querySelector('form') as HTMLFormElement
+    const retainedSubmit = retainedHandler<(event: { preventDefault: () => void }) => unknown>(form, 'onSubmit')
+    rendered.rerender(<HoldingMutations {...props} sessionKey="s2" scopeKey="portfolio-default:USD:holdings" />)
+    retainedSubmit?.({ preventDefault: vi.fn() })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(props.onRefresh).not.toHaveBeenCalled()
+  })
+
+  it('rejects a retained Add submit after a 401 before any second request', async () => {
+    const props = { ...baseProps(), sessionKey: 's1' }
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 401, headers: new Headers(), json: async () => ({}) } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    const form = screen.getByRole('dialog').querySelector('form') as HTMLFormElement
+    const retainedSubmit = retainedHandler<(event: { preventDefault: () => void }) => unknown>(form, 'onSubmit')
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('dialog')).toBeNull()
+    retainedSubmit?.({ preventDefault: vi.fn() })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('activates the production row trigger from keyboard and returns focus on Escape', async () => {
+    const renderRows = (renderActions: (lot: typeof holding) => ReactNode) => <div>{renderActions(holding)}</div>
+    render(<HoldingMutations {...baseProps()}>{renderRows}</HoldingMutations>)
+    const trigger = screen.getByRole('button', { name: /Actions for AAA lot lot-a/ })
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.keyUp(trigger, { key: 'Enter' })
+    fireEvent.click(trigger)
+    expect(screen.getByRole('menuitem', { name: 'Archive holding' })).toBe(document.activeElement)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+    fireEvent.keyDown(trigger, { key: ' ' })
+    fireEvent.keyUp(trigger, { key: ' ' })
+    fireEvent.click(trigger)
+    expect(screen.getByRole('menu')).toBeTruthy()
+  })
+
+  it('contains Add focus from its heading, live error, and outside node', async () => {
+    const props = baseProps()
+    const root = document.createElement('div')
+    root.id = 'root'
+    document.body.appendChild(root)
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 500, headers: new Headers(), clone: () => ({ json: async () => ({}) }) } as unknown as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />, { container: root })
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    const heading = screen.getByRole('heading', { name: 'Add one holding' })
+    const first = screen.getByLabelText('Existing instrument ID')
+    fireEvent.keyDown(heading, { key: 'Tab' })
+    expect(document.activeElement).toBe(first)
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    outside.focus()
+    expect(document.activeElement).toBe(heading)
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/server could not apply/i))
+    const alert = screen.getByRole('alert')
+    expect(document.activeElement).toBe(alert)
+    fireEvent.keyDown(alert, { key: 'Tab' })
+    expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true)
+    outside.remove()
+    root.remove()
+  })
+
+  it('places a portaled row menu inside a narrow viewport and recomputes on scroll', () => {
+    expect(calculateRowMenuPosition({ top: 190, bottom: 214, left: 290, right: 314 }, { width: 100, height: 70 }, 320, 240)).toEqual({ top: 116, left: 212 })
+    const props = baseProps()
+    const originalWidth = window.innerWidth
+    const originalHeight = window.innerHeight
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 320 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 240 })
+    let triggerRect = { top: 190, bottom: 214, left: 290, right: 314 }
+    const originalRect = HTMLElement.prototype.getBoundingClientRect
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('row-action-trigger')) return { ...triggerRect, width: 24, height: 24 } as DOMRect
+      if (this.classList.contains('row-action-menu')) return { top: 0, left: 0, width: 100, height: 70, right: 100, bottom: 70 } as DOMRect
+      return originalRect.call(this)
+    })
+    render(<HoldingMutations {...props}>{(renderActions) => <div>{renderActions(holding)}</div>}</HoldingMutations>)
+    fireEvent.click(screen.getByRole('button', { name: /Actions for AAA lot lot-a/ }))
+    const menu = screen.getByRole('menu')
+    expect(menu.style.left).toBe('212px')
+    expect(menu.style.top).toBe('116px')
+    triggerRect = { top: 20, bottom: 44, left: 10, right: 34 }
+    fireEvent.scroll(window)
+    expect(menu.style.top).toBe('48px')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight })
   })
 })
