@@ -538,6 +538,120 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('button', { name: 'Refresh prices' })).toBeNull()
   })
 
+  it('reloads Holdings and announces a complete refresh', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: true,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(screen.getAllByRole('button', { name: 'Refresh prices' })).toHaveLength(1)
+    const overviewCallsBefore = fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore + 1)
+    fireEvent.click(screen.getByRole('button', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market data' })).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Refresh prices' })).toBeNull()
+  })
+
+  it('ignores a second activation while a Holdings refresh is in flight', async () => {
+    let resolveRefresh: ((value: Awaited<ReturnType<typeof api.refreshMarketData>>) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockImplementation(() => new Promise((resolve) => { resolveRefresh = resolve }))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const refreshButton = screen.getByRole('button', { name: 'Refresh prices' })
+    fireEvent.click(refreshButton)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refreshing prices…' })).toHaveProperty('disabled', true))
+    fireEvent.click(refreshButton)
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    resolveRefresh?.({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: true,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+  })
+
+  it('keeps Holdings usable and announces a refresh error', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.spyOn(api, 'refreshMarketData').mockRejectedValue(new Error('provider unavailable'))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('provider unavailable'))
+    expect(screen.getByRole('table', { name: 'Holdings' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Refresh prices' })).toHaveProperty('disabled', false)
+    expect(screen.getByText('Price refresh failed.')).toBeTruthy()
+  })
+
+  it('clears private state and returns to login after a refresh 401', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.spyOn(api, 'refreshMarketData').mockRejectedValue(new api.APIError(401))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+  })
+
+  it('invalidates a late refresh when switching views', async () => {
+    let resolveRefresh: ((value: Awaited<ReturnType<typeof api.refreshMarketData>>) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.spyOn(api, 'refreshMarketData').mockImplementation(() => new Promise((resolve) => { resolveRefresh = resolve }))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const overviewCallsBefore = fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refreshing prices…' })).toHaveProperty('disabled', true))
+    fireEvent.click(screen.getByRole('button', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market data' })).toBeTruthy())
+    resolveRefresh?.({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: true,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    await flushEffects()
+    fireEvent.click(screen.getByRole('button', { name: 'Holdings' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore)
+    expect(screen.queryByText(/Prices refreshed/)).toBeNull()
+  })
+
+  it('invalidates a late refresh when changing reporting currency', async () => {
+    let resolveRefresh: ((value: Awaited<ReturnType<typeof api.refreshMarketData>>) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.spyOn(api, 'refreshMarketData').mockImplementation(() => new Promise((resolve) => { resolveRefresh = resolve }))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refreshing prices…' })).toHaveProperty('disabled', true))
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('currency=USD'), expect.anything()))
+    resolveRefresh?.({
+      refresh: { portfolio_id: 'portfolio-default' },
+      snapshot: { portfolio_id: 'portfolio-default', reporting_currency: 'MYR' },
+      complete: true,
+      missing_instruments: [],
+    } as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    await flushEffects()
+    expect(screen.queryByText(/Prices refreshed/)).toBeNull()
+    expect(screen.queryByText(/Refreshing prices/)).toBeNull()
+  })
+
   it('renders Unavailable for stale snapshots, no snapshots, and every affected freshness state', async () => {
     let response: PortfolioOverview = {
       ...pnlOverview,
