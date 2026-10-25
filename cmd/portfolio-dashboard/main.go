@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -544,6 +547,7 @@ func runMarketRefresh(args []string) error {
 	reportingCurrency := flags.String("reporting-currency", "", "reporting currency; defaults to portfolio setting")
 	providerList := flags.String("providers", "", "optional comma-separated provider subset")
 	asOf := flags.String("as-of", "", "UTC refresh timestamp in RFC3339; defaults to now")
+	idempotencyKey := flags.String("idempotency-key", "", "optional bounded retry key; defaults to the as-of instant")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -567,11 +571,45 @@ func runMarketRefresh(args []string) error {
 		return err
 	}
 	defer db.Close()
-	result, err := db.Refresh(ctx, store.RefreshOptions{PortfolioID: *portfolioID, ReportingCurrency: *reportingCurrency, Providers: providers, Clients: clients, AsOf: when})
+	if strings.TrimSpace(*idempotencyKey) == "" {
+		*idempotencyKey = cliMarketRefreshIdempotencyKey(*portfolioID, when)
+	}
+	if !cliMarketRefreshIdempotencyKeyPattern.MatchString(strings.TrimSpace(*idempotencyKey)) {
+		return errors.New("-idempotency-key must be 8 to 128 bounded identifier characters")
+	}
+	service := marketrefresh.New(db, clients, store.MarketProviders(map[marketdata.Provider]bool{
+		marketdata.ProviderFinnhub:           cfg.ProviderKeys.Finnhub != "",
+		marketdata.ProviderAlphaVantage:      cfg.ProviderKeys.AlphaVantage != "",
+		marketdata.ProviderOpenExchangeRates: cfg.ProviderKeys.OpenExchangeRates != "",
+	}))
+	result, _, err := service.Refresh(ctx, marketrefresh.Request{
+		PortfolioID:       *portfolioID,
+		ReportingCurrency: *reportingCurrency,
+		IdempotencyKey:    strings.TrimSpace(*idempotencyKey),
+		Actor:             store.MutationActor{Category: "cli", ID: "market-refresh-cli", Permissions: []string{"market_data:refresh"}},
+		AsOf:              when,
+		Providers:         providers,
+		FingerprintScope:  cliMarketRefreshFingerprintScope(providers, when),
+	})
 	if err != nil {
 		return err
 	}
 	return writeJSON(result)
+}
+
+var cliMarketRefreshIdempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$`)
+
+func cliMarketRefreshIdempotencyKey(portfolioID string, asOf time.Time) string {
+	witness := sha256.Sum256([]byte("cli\x00" + portfolioID + "\x00" + asOf.UTC().Format(time.RFC3339Nano)))
+	return "cli-" + hex.EncodeToString(witness[:])
+}
+
+func cliMarketRefreshFingerprintScope(providers []marketdata.Provider, asOf time.Time) string {
+	encoded, _ := json.Marshal(struct {
+		Providers []marketdata.Provider `json:"providers"`
+		AsOf      string                `json:"as_of"`
+	}{providers, asOf.UTC().Format(time.RFC3339Nano)})
+	return string(encoded)
 }
 
 func NewFinnhubFromConfig(cfg config.Config) marketdata.ProviderClient {

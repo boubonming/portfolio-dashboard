@@ -197,7 +197,7 @@ func (s *Store) RefreshMarketDataIdempotent(ctx context.Context, options MarketR
 }
 
 func validateMarketRefreshIdempotency(options MarketRefreshIdempotencyOptions) error {
-	if options.ActorCategory != "browser_user" && options.ActorCategory != "machine" && options.ActorCategory != "scheduler" {
+	if options.ActorCategory != "browser_user" && options.ActorCategory != "machine" && options.ActorCategory != "scheduler" && options.ActorCategory != "cli" {
 		return errors.New("invalid market refresh actor category")
 	}
 	if options.ActorID == "" || len(options.ActorID) > 128 || !actorIDPattern.MatchString(options.ActorID) {
@@ -208,6 +208,9 @@ func validateMarketRefreshIdempotency(options MarketRefreshIdempotencyOptions) e
 	}
 	if options.ActorCategory == "scheduler" && (options.ActorID != "market-refresh-scheduler" || len(options.Permissions) != 1 || options.Permissions[0] != "market_data:refresh") {
 		return errors.New("invalid market refresh scheduler actor")
+	}
+	if options.ActorCategory == "cli" && (options.ActorID != "market-refresh-cli" || len(options.Permissions) != 1 || options.Permissions[0] != "market_data:refresh") {
+		return errors.New("invalid market refresh cli actor")
 	}
 	if options.PortfolioID == "" || len(options.IdempotencyKey) < 8 || len(options.IdempotencyKey) > 128 || len(options.RequestFingerprint) != 64 {
 		return errors.New("invalid market refresh idempotency namespace")
@@ -349,7 +352,7 @@ func (s *Store) readOrReserveMarketRefreshOnce(ctx context.Context, options Mark
 	leaseUntilText := formatMarketRefreshTimestamp(s.now().Add(marketRefreshLeaseDuration))
 	if _, err := tx.ExecContext(ctx, `INSERT INTO market_refresh_idempotency
 		(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), boolInt(options.ActorCategory == "machine" || options.ActorCategory == "scheduler"), created, ownerToken, leaseUntilText); err != nil {
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), boolInt(options.ActorCategory == "machine" || options.ActorCategory == "scheduler" || options.ActorCategory == "cli"), created, ownerToken, leaseUntilText); err != nil {
 		if !isUniqueError(err) {
 			return marketRefreshReceipt{}, false, err
 		}

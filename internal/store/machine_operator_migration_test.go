@@ -79,7 +79,7 @@ func TestMachineOperatorMigrationUpgradesExistingTenMigrationDatabase(t *testing
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 15 {
+	if migrationCount != 16 {
 		t.Fatalf("migration count after upgrade=%d", migrationCount)
 	}
 	var phaseColumn, deleteTrigger, immutableTrigger int
@@ -124,7 +124,7 @@ func TestMachineOperatorMigrationUpgradesExistingTenMigrationDatabase(t *testing
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 15 {
+	if migrationCount != 16 {
 		t.Fatalf("migration count after repeat=%d", migrationCount)
 	}
 }
@@ -160,7 +160,34 @@ func TestMachineOperatorMigrationRollsBackAtomicallyOnTriggerConflict(t *testing
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 15 {
+	if migrationCount != 16 {
 		t.Fatalf("migration rows after retry=%d", migrationCount)
+	}
+}
+
+func TestMarketRefreshCLIActorMigrationGuard(t *testing.T) {
+	database, ctx := openThrough010(t)
+	defer database.Close()
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-01-02T12:00:00.000000000Z"
+	valid := []any{"cli", "market-refresh-cli", "portfolio-default", "refresh", "cli-migration-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "pending", "reserved", `{}`, "refresh-cli", 1, now, "0123456789abcdef0123456789abcdef0123456789abcdef", "2026-01-02T12:00:30.000000000Z"}
+	if _, err := database.ExecContext(ctx, `INSERT INTO market_refresh_idempotency(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, valid...); err != nil {
+		t.Fatalf("valid CLI receipt rejected: %v", err)
+	}
+	for _, actorID := range []string{"not-the-cli", "market-refresh-scheduler"} {
+		invalid := append([]any(nil), valid...)
+		invalid[1] = actorID
+		invalid[4] = "cli-invalid-" + actorID
+		if _, err := database.ExecContext(ctx, `INSERT INTO market_refresh_idempotency(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, invalid...); err == nil {
+			t.Fatalf("invalid CLI actor %q was accepted", actorID)
+		}
+	}
+	invalidCategory := append([]any(nil), valid...)
+	invalidCategory[0] = "unsupported"
+	invalidCategory[4] = "cli-invalid-category"
+	if _, err := database.ExecContext(ctx, `INSERT INTO market_refresh_idempotency(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, invalidCategory...); err == nil {
+		t.Fatal("unsupported market refresh actor category was accepted")
 	}
 }

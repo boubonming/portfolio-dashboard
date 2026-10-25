@@ -26,6 +26,10 @@ type Request struct {
 	IdempotencyKey    string
 	Actor             store.MutationActor
 	AsOf              time.Time
+	Providers         []marketdata.Provider
+	// FingerprintScope lets non-HTTP callers include transport-specific
+	// options without changing the legacy browser/Hermes fingerprint.
+	FingerprintScope string
 }
 
 type Service struct {
@@ -71,6 +75,14 @@ func (s *Service) Refresh(ctx context.Context, request Request) (domain.MarketRe
 		Operation         string `json:"operation"`
 		ReportingCurrency string `json:"reporting_currency"`
 	}{portfolioID, "refresh", reportingCurrency})
+	if request.FingerprintScope != "" {
+		fingerprintInput, _ = json.Marshal(struct {
+			PortfolioID       string `json:"portfolio_id"`
+			Operation         string `json:"operation"`
+			ReportingCurrency string `json:"reporting_currency"`
+			Scope             string `json:"scope"`
+		}{portfolioID, "refresh", reportingCurrency, request.FingerprintScope})
+	}
 	fingerprintBytes := sha256.Sum256(fingerprintInput)
 	fingerprint := hex.EncodeToString(fingerprintBytes[:])
 	missing := make([]string, 0)
@@ -89,6 +101,7 @@ func (s *Service) Refresh(ctx context.Context, request Request) (domain.MarketRe
 		Refresh: store.RefreshOptions{
 			PortfolioID:       portfolioID,
 			ReportingCurrency: reportingCurrency,
+			Providers:         append([]marketdata.Provider(nil), request.Providers...),
 			Clients:           s.Clients,
 			AsOf:              request.AsOf,
 		},

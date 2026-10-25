@@ -303,7 +303,7 @@ There are no live-key tests in this repository: adapter tests must use local
 `httptest` servers and the refresh command must be exercised with fake
 endpoints only.
 
-For operators who need the preserved CLI path, run a bounded, aggregate-only refresh after mappings are reviewed:
+For operators who need the preserved CLI path, run a bounded refresh after mappings are reviewed. The CLI uses the same durable refresh, immutable snapshot, audit, Activity, and replay workflow as the browser, machine, and scheduler callers. Its default retry key is derived from the portfolio and `-as-of` instant; pass `-idempotency-key` when coordinating an explicit retry:
 
 ```sh
 go run ./cmd/portfolio-dashboard market-refresh -db portfolio.sqlite \
