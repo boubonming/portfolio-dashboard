@@ -42,6 +42,21 @@ go run ./cmd/portfolio-dashboard
 
 Configuration is environment-driven. `PORTFOLIO_REPORTING_CURRENCY` defaults to `MYR`; timestamps stored by the application are UTC and human-facing dates use Singapore time in later phases.
 
+### Optional scheduled market refresh
+
+The in-process scheduler is disabled when `PORTFOLIO_MARKET_REFRESH_CRON` is
+blank. To enable a strict standard five-field cron expression, set the IANA
+timezone (default `Asia/Singapore`), bounded portfolio ID (default
+`portfolio-default`), and optionally an exact uppercase reporting currency.
+For example, `PORTFOLIO_MARKET_REFRESH_CRON='0 5 * * 1-5'` runs on Singapore
+weekday mornings. It does not run at startup or backfill missed slots. Each
+slot uses the same durable refresh, immutable snapshot, audit, Activity,
+missing-mapping, and replay workflow as the browser and machine endpoints.
+Scheduled work is attributed as `scheduler` / `market-refresh-scheduler`,
+does not use or expose the Hermes bearer, and is stopped with the server.
+Invalid enabled configuration fails before HTTP serving; provider failures are
+bounded and do not stop later slots.
+
 The HTTP server fails closed unless authentication is configured explicitly:
 `PORTFOLIO_AUTH_USERNAME`, a bcrypt `PORTFOLIO_AUTH_PASSWORD_HASH` (cost 10 or
 higher), `PORTFOLIO_PUBLIC_ORIGIN` (one exact `https://host[:port]` origin), and
@@ -146,7 +161,7 @@ portfolio ownership, and never create, reactivate, or grant holding authority.
 exposing the bearer secret.
 
 `Store.Open` runs the forward migrations on startup. Existing databases must
-complete migration 014 before these commands are used; it preserves existing
+complete migration 015 before these commands are used; it preserves existing
 rows and makes both machine grant/revoke audit events and their portfolio
 ownership associations append-only.
 

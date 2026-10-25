@@ -197,7 +197,7 @@ func (s *Store) RefreshMarketDataIdempotent(ctx context.Context, options MarketR
 }
 
 func validateMarketRefreshIdempotency(options MarketRefreshIdempotencyOptions) error {
-	if options.ActorCategory != "browser_user" && options.ActorCategory != "machine" {
+	if options.ActorCategory != "browser_user" && options.ActorCategory != "machine" && options.ActorCategory != "scheduler" {
 		return errors.New("invalid market refresh actor category")
 	}
 	if options.ActorID == "" || len(options.ActorID) > 128 || !actorIDPattern.MatchString(options.ActorID) {
@@ -205,6 +205,9 @@ func validateMarketRefreshIdempotency(options MarketRefreshIdempotencyOptions) e
 	}
 	if options.ActorCategory == "machine" && (len(options.Permissions) != 2 || options.Permissions[0] != "portfolio:read" || options.Permissions[1] != "market_data:refresh") {
 		return errors.New("invalid market refresh machine permissions")
+	}
+	if options.ActorCategory == "scheduler" && (options.ActorID != "market-refresh-scheduler" || len(options.Permissions) != 1 || options.Permissions[0] != "market_data:refresh") {
+		return errors.New("invalid market refresh scheduler actor")
 	}
 	if options.PortfolioID == "" || len(options.IdempotencyKey) < 8 || len(options.IdempotencyKey) > 128 || len(options.RequestFingerprint) != 64 {
 		return errors.New("invalid market refresh idempotency namespace")
@@ -255,6 +258,21 @@ func (s *Store) acquireOrReadMarketRefresh(ctx context.Context, options MarketRe
 	const maxAttempts = 50
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		receipt, owner, err := s.readOrReserveMarketRefreshOnce(ctx, options, ownerToken)
+		// SQLite can report a unique conflict against a concurrent writer
+		// before that writer's committed row is visible to this connection.
+		// Treat the transient no-row observation as contention and retry.
+		if errors.Is(err, sql.ErrNoRows) && attempt < maxAttempts-1 {
+			timer := time.NewTimer(10 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return marketRefreshReceipt{}, false, ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
 		if err == nil || !isSQLiteBusy(err) || attempt == maxAttempts-1 {
 			if attempt == maxAttempts-1 && isSQLiteBusy(err) {
 				return marketRefreshReceipt{}, false, ErrMarketRefreshInProgress
@@ -331,7 +349,7 @@ func (s *Store) readOrReserveMarketRefreshOnce(ctx context.Context, options Mark
 	leaseUntilText := formatMarketRefreshTimestamp(s.now().Add(marketRefreshLeaseDuration))
 	if _, err := tx.ExecContext(ctx, `INSERT INTO market_refresh_idempotency
 		(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), boolInt(options.ActorCategory == "machine"), created, ownerToken, leaseUntilText); err != nil {
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), boolInt(options.ActorCategory == "machine" || options.ActorCategory == "scheduler"), created, ownerToken, leaseUntilText); err != nil {
 		if !isUniqueError(err) {
 			return marketRefreshReceipt{}, false, err
 		}

@@ -11,14 +11,18 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/config"
 	"github.com/boubonming/portfolio-dashboard/internal/httpserver"
 
 	"github.com/boubonming/portfolio-dashboard/internal/marketdata"
+	"github.com/boubonming/portfolio-dashboard/internal/marketrefresh"
+	"github.com/boubonming/portfolio-dashboard/internal/scheduler"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 )
 
@@ -40,13 +44,46 @@ func main() {
 		fatal(err)
 	}
 	defer database.Close()
-	handler, err := httpserver.NewHandlerWithConfig(database, cfg)
+	clients := map[marketdata.Provider]marketdata.ProviderClient{
+		marketdata.ProviderFinnhub:           NewFinnhubFromConfig(cfg),
+		marketdata.ProviderAlphaVantage:      NewAlphaFromConfig(cfg),
+		marketdata.ProviderCoinGecko:         marketdata.NewCoinGeckoClient(marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.CoinGecko}),
+		marketdata.ProviderOpenExchangeRates: NewOXRFromConfig(cfg),
+	}
+	handler, err := httpserver.NewHandlerWithConfigAndMarketClients(database, cfg, clients)
 	if err != nil {
 		fatal(err)
 	}
+	refreshService := marketrefresh.New(database, clients, store.MarketProviders(map[marketdata.Provider]bool{
+		marketdata.ProviderFinnhub:           cfg.ProviderKeys.Finnhub != "",
+		marketdata.ProviderAlphaVantage:      cfg.ProviderKeys.AlphaVantage != "",
+		marketdata.ProviderOpenExchangeRates: cfg.ProviderKeys.OpenExchangeRates != "",
+	}))
+	refreshScheduler := scheduler.New(refreshService, cfg.MarketRefresh)
+	serverContext := context.Background()
+	var stopSignals context.CancelFunc
+	if cfg.MarketRefresh.Enabled() {
+		serverContext, stopSignals = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stopSignals()
+		if err := refreshScheduler.Start(serverContext); err != nil {
+			fatal(err)
+		}
+	}
 	fmt.Fprintf(os.Stderr, "portfolio dashboard listening on %s\n", cfg.BindAddress)
 	server := newHTTPServer(cfg.BindAddress, handler)
-	fatal(server.ListenAndServe())
+	if cfg.MarketRefresh.Enabled() {
+		go func() {
+			<-serverContext.Done()
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = server.Shutdown(shutdownContext)
+		}()
+	}
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		_ = refreshScheduler.Stop(context.Background())
+		fatal(err)
+	}
+	_ = refreshScheduler.Stop(context.Background())
 }
 
 // newHTTPServer centralizes the production timeout policy so it can be
