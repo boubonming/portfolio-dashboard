@@ -13,7 +13,7 @@ button { cursor: pointer; }
 .review-detail :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select),
 .thesis-surface :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select),
 .market-data-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select),
-.holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select) {
+.holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):not(.PrivateSwitchBase-input) {
   background: #172322;
   border: 1px solid #41615d;
   border-radius: 6px;
@@ -26,7 +26,7 @@ button { cursor: pointer; }
 .review-detail :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):focus-visible,
 .thesis-surface :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):focus-visible,
 .market-data-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):focus-visible,
-.holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):focus-visible {
+.holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):not(.PrivateSwitchBase-input):focus-visible {
   border-color: #75d5c7;
   outline: 3px solid #75d5c7;
   outline-offset: 2px;
@@ -42,7 +42,7 @@ button { cursor: pointer; }
 .review-detail :is(input[type="checkbox"], input[type="radio"]),
 .thesis-surface :is(input[type="checkbox"], input[type="radio"]),
 .market-data-card :is(input[type="checkbox"], input[type="radio"]),
-.holding-mutation-card :is(input[type="checkbox"], input[type="radio"]) {
+.holding-mutation-card :is(input[type="checkbox"], input[type="radio"]):not(.PrivateSwitchBase-input) {
   accent-color: #52c7b8;
   padding: 0;
 }
@@ -51,7 +51,7 @@ button { cursor: pointer; }
 .review-detail :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):disabled,
 .thesis-surface :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):disabled,
 .market-data-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):disabled,
-.holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):disabled {
+.holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):not(.PrivateSwitchBase-input):disabled {
   cursor: not-allowed;
   opacity: .65;
 }

@@ -52,6 +52,14 @@ function retainedHandler<T extends (...args: any[]) => unknown>(element: HTMLEle
   return handler as T
 }
 
+function expectNoLegacyMutationStyles(element: Element, state?: 'focus-visible' | 'disabled') {
+  const legacyRules = matchingStyleRules(element, state).filter(({ selectorText }) => selectorText.includes('.holding-mutation-card'))
+  expect(legacyRules).toEqual([])
+  for (const property of ['background', 'border', 'padding', 'outline', 'accent-color', 'opacity']) {
+    expect(hasMatchingDeclaration(element, property, property === 'opacity' ? '.65' : property === 'accent-color' ? '#52c7b8' : property === 'outline' ? '3px' : property === 'border' ? '1px' : property === 'padding' ? '.55rem' : '#172322', state)).toBe(false)
+  }
+}
+
 afterEach(() => cleanup())
 
 describe('HoldingMutations', () => {
@@ -87,6 +95,7 @@ describe('HoldingMutations', () => {
       const busyConfirm = screen.getByRole('button', { name: 'Archiving holding…' })
       expect((busyConfirm as HTMLButtonElement).disabled).toBe(true)
       expect(hasMatchingDeclaration(busyConfirm, 'opacity', '.65', 'disabled')).toBe(false)
+      expectNoLegacyMutationStyles(busyConfirm, 'disabled')
       cleanup()
       render(<HoldingMutations {...baseProps()}>{(renderActions) => <div>{renderActions(holding)}</div>}</HoldingMutations>)
       const muiAdd = screen.getByRole('button', { name: 'Add holding' })
@@ -113,6 +122,102 @@ describe('HoldingMutations', () => {
     expect(document.querySelector('.MuiMenu-root')).toBeTruthy()
     expect(screen.getByRole('menu').className).toContain('MuiMenu-list')
     fireEvent.keyDown(document, { key: 'Escape' })
+  })
+
+  it('proves every migrated MUI primitive excludes the committed legacy mutation rules', () => {
+    const removeStyles = installCommittedStyles()
+    try {
+      const renderRows = (renderActions: (lot: typeof holding) => ReactNode) => <div>{renderActions(holding)}</div>
+      render(<HoldingMutations {...baseProps()} />)
+      const add = screen.getByRole('button', { name: 'Add holding' })
+      expectNoLegacyMutationStyles(add)
+      expectNoLegacyMutationStyles(add.querySelector('svg') as SVGElement)
+
+      fireEvent.click(add)
+      const dialog = screen.getByRole('dialog')
+      const dialogPaper = dialog.querySelector('.MuiDialog-paper') as HTMLElement
+      const dialogTitle = dialog.querySelector('.MuiDialogTitle-root') as HTMLElement
+      const dialogContent = dialog.querySelector('.MuiDialogContent-root') as HTMLElement
+      const dialogActions = dialog.querySelector('.MuiDialogActions-root') as HTMLElement
+      const textInput = screen.getByLabelText('Symbol')
+      const radioInput = screen.getByLabelText('New inline instrument')
+      const radioControl = radioInput.closest('label')?.querySelector('.MuiRadio-root') as HTMLElement
+      const cancel = screen.getByRole('button', { name: 'Cancel' })
+      for (const element of [dialog, dialogPaper, dialogTitle, dialogContent, dialogActions, textInput, radioInput, radioControl, cancel]) expectNoLegacyMutationStyles(element)
+      textInput.focus()
+      expectNoLegacyMutationStyles(textInput, 'focus-visible')
+      expectNoLegacyMutationStyles(radioInput)
+      expectNoLegacyMutationStyles(radioControl)
+      expectNoLegacyMutationStyles(cancel.querySelector('svg') as SVGElement)
+      fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+      const addAlert = screen.getByRole('alert')
+      expectNoLegacyMutationStyles(addAlert)
+
+      fireEvent.click(cancel)
+      fireEvent.click(screen.getByRole('button', { name: 'Archive a holding' }))
+      const nativeSelect = screen.getByLabelText('Holding to archive')
+      expectNoLegacyMutationStyles(nativeSelect)
+      fireEvent.change(nativeSelect, { target: { value: 'lot-a' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Continue to archive' }))
+      const archiveDialog = screen.getByRole('dialog')
+      const archivePaper = archiveDialog.querySelector('.MuiDialog-paper') as HTMLElement
+      const archiveTitle = archiveDialog.querySelector('.MuiDialogTitle-root') as HTMLElement
+      const archiveContent = archiveDialog.querySelector('.MuiDialogContent-root') as HTMLElement
+      const archiveActions = archiveDialog.querySelector('.MuiDialogActions-root') as HTMLElement
+      const confirm = screen.getByRole('button', { name: 'Confirm archive holding' })
+      const cancelArchive = screen.getByRole('button', { name: 'Cancel archive' })
+      for (const element of [archiveDialog, archivePaper, archiveTitle, archiveContent, archiveActions, confirm, cancelArchive]) expectNoLegacyMutationStyles(element)
+      fireEvent.click(cancelArchive)
+
+      cleanup()
+      render(<HoldingMutations {...baseProps()}>{renderRows}</HoldingMutations>)
+      const rowTrigger = screen.getByRole('button', { name: /Actions for AAA lot lot-a/ })
+      expectNoLegacyMutationStyles(rowTrigger)
+      expectNoLegacyMutationStyles(rowTrigger.querySelector('svg') as SVGElement)
+      fireEvent.click(rowTrigger)
+      const menuPaper = document.querySelector('.MuiPopover-paper') as HTMLElement
+      const menu = screen.getByRole('menu')
+      const menuItem = screen.getByRole('menuitem', { name: 'Archive holding' })
+      const menuIcon = menuItem.querySelector('svg') as SVGElement
+      for (const element of [menuPaper, menu, menuItem, menuIcon]) expectNoLegacyMutationStyles(element)
+      fireEvent.keyDown(document, { key: 'Escape' })
+    } finally {
+      removeStyles()
+    }
+  })
+
+  it('uses one trigger per rendered lot and portaled MUI backdrops for Add and archive dialogs', async () => {
+    const root = customModalRoot('root-visible', false)
+    const lots = [holding, { ...holding, lot_id: 'lot-b', symbol: 'BBB' }]
+    const renderRows = (renderActions: (lot: typeof holding) => ReactNode) => <div>{lots.map((lot) => <span key={lot.lot_id}>{renderActions(lot)}</span>)}</div>
+    render(<HoldingMutations {...baseProps()} holdings={lots}>{renderRows}</HoldingMutations>, { container: root })
+    expect(screen.getAllByRole('button', { name: 'Add holding' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /Actions for/ })).toHaveLength(lots.length)
+    expect(document.querySelectorAll('[data-archive-trigger-lot-id]')).toHaveLength(lots.length)
+    expect(document.querySelectorAll('[data-archive-trigger-lot-id][aria-hidden="true"]')).toHaveLength(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    const addBackdrop = document.querySelector('.MuiBackdrop-root')
+    expect(addBackdrop).toBeTruthy()
+    expect(root.contains(addBackdrop)).toBe(false)
+    expect(root.getAttribute('aria-hidden')).toBe('true')
+    expect(root.inert).toBe(true)
+    expect(document.querySelectorAll('.MuiDialog-root')).toHaveLength(1)
+    expect(document.querySelectorAll('.MuiMenu-root')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    fireEvent.click(screen.getByRole('button', { name: /Actions for AAA lot lot-a/ }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+    const archiveBackdrop = document.querySelector('.MuiBackdrop-root')
+    expect(archiveBackdrop).toBeTruthy()
+    expect(root.contains(archiveBackdrop)).toBe(false)
+    expect(root.getAttribute('aria-hidden')).toBe('true')
+    expect(root.inert).toBe(true)
+    expect(document.querySelectorAll('.MuiDialog-root')).toHaveLength(1)
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel archive' }))
+    expect(document.querySelectorAll('.MuiBackdrop-root')).toHaveLength(0)
+    root.remove()
   })
 
   it('keeps archive management collapsed until a human-readable holding is selected', () => {
@@ -611,8 +716,10 @@ describe('HoldingMutations', () => {
     const triggers = screen.getAllByRole('button', { name: /Actions for SAME lot/ })
     fireEvent.click(triggers[1])
     const menu = screen.getByRole('menu')
+    const paper = document.querySelector('.MuiPopover-paper') as HTMLElement
     expect(menu.className).toContain('row-action-menu-portal')
     expect(menu.getAttribute('data-archive-menu-lot-id')).toBe('lot-second')
+    expect(paper.className).toContain('row-action-menu')
     const retainedMenuItem = screen.getByRole('menuitem', { name: 'Archive holding' })
     rendered.rerender(<HoldingMutations {...props} scopeKey="portfolio-default:USD:holdings">{renderRows}</HoldingMutations>)
     expect(screen.queryByRole('menu')).toBeNull()
@@ -922,13 +1029,11 @@ describe('HoldingMutations', () => {
     const trigger = screen.getByRole('button', { name: /Actions for AAA lot lot-a/ })
     fireEvent.keyDown(trigger, { key: 'Enter' })
     fireEvent.keyUp(trigger, { key: 'Enter' })
-    fireEvent.click(trigger)
     expect(screen.getByRole('menuitem', { name: 'Archive holding' })).toBe(document.activeElement)
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() => expect(document.activeElement).toBe(trigger))
     fireEvent.keyDown(trigger, { key: ' ' })
     fireEvent.keyUp(trigger, { key: ' ' })
-    fireEvent.click(trigger)
     expect(screen.getByRole('menu')).toBeTruthy()
   })
 
@@ -978,31 +1083,34 @@ describe('HoldingMutations', () => {
     render(<HoldingMutations {...props}>{(renderActions) => <div className="table-scroll">{renderActions(holding)}</div>}</HoldingMutations>)
     fireEvent.click(screen.getByRole('button', { name: /Actions for AAA lot lot-a/ }))
     const menu = screen.getByRole('menu')
-    expect(menu.style.left).toBe('212px')
-    expect(menu.style.top).toBe('116px')
+    const paper = document.querySelector('.MuiPopover-paper') as HTMLElement
+    expect(menu.getAttribute('data-archive-menu-lot-id')).toBe('lot-a')
+    expect(screen.getByRole('menuitem', { name: 'Archive holding' })).toBe(document.activeElement)
+    expect(paper.style.left).toBe('212px')
+    expect(paper.style.top).toBe('116px')
     const scrollContainer = document.querySelector('.table-scroll') as HTMLElement
     triggerRect = { top: 100, bottom: 124, left: 250, right: 274 }
     menuRect = { width: 120, height: 80 }
     fireEvent.scroll(scrollContainer)
-    expect(menu.style.left).toBe('192px')
-    expect(menu.style.top).toBe('128px')
-    expect(Number.parseFloat(menu.style.left) + menuRect.width).toBeLessThanOrEqual(320 - 8)
-    expect(Number.parseFloat(menu.style.top) + menuRect.height).toBeLessThanOrEqual(240 - 8)
+    expect(paper.style.left).toBe('192px')
+    expect(paper.style.top).toBe('128px')
+    expect(Number.parseFloat(paper.style.left) + menuRect.width).toBeLessThanOrEqual(320 - 8)
+    expect(Number.parseFloat(paper.style.top) + menuRect.height).toBeLessThanOrEqual(240 - 8)
 
     triggerRect = { top: 20, bottom: 44, left: 10, right: 34 }
     fireEvent.scroll(window)
-    expect(menu.style.top).toBe('48px')
-    expect(menu.style.left).toBe('10px')
+    expect(paper.style.top).toBe('48px')
+    expect(paper.style.left).toBe('10px')
 
     triggerRect = { top: 210, bottom: 234, left: 300, right: 324 }
     menuRect = { width: 100, height: 100 }
     fireEvent.resize(window)
-    expect(menu.style.left).toBe('212px')
-    expect(menu.style.top).toBe('106px')
-    expect(Number.parseFloat(menu.style.left)).toBeGreaterThanOrEqual(8)
-    expect(Number.parseFloat(menu.style.top)).toBeGreaterThanOrEqual(8)
-    expect(Number.parseFloat(menu.style.left) + menuRect.width).toBeLessThanOrEqual(320 - 8)
-    expect(Number.parseFloat(menu.style.top) + menuRect.height).toBeLessThanOrEqual(240 - 8)
+    expect(paper.style.left).toBe('212px')
+    expect(paper.style.top).toBe('106px')
+    expect(Number.parseFloat(paper.style.left)).toBeGreaterThanOrEqual(8)
+    expect(Number.parseFloat(paper.style.top)).toBeGreaterThanOrEqual(8)
+    expect(Number.parseFloat(paper.style.left) + menuRect.width).toBeLessThanOrEqual(320 - 8)
+    expect(Number.parseFloat(paper.style.top) + menuRect.height).toBeLessThanOrEqual(240 - 8)
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight })
   })

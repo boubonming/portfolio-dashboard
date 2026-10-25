@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { FormEvent, ReactNode } from 'react'
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, FormControl, FormControlLabel, FormHelperText, IconButton, InputLabel, Menu, MenuItem, Paper, Radio, RadioGroup, Select, Stack, TextField, Typography } from '@mui/material'
 import { Add, Archive, MoreVert } from '@mui/icons-material'
 import { apiFetch, APIError } from './api'
@@ -238,6 +238,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const contentRef = useRef<HTMLElement>(null)
   const archiveTriggerRefs = useRef(new Map<string, HTMLButtonElement>())
   const archiveMenuRefs = useRef(new Map<string, HTMLElement>())
+  const archiveKeyboardActivationRef = useRef<string | null>(null)
   const archiveOriginRef = useRef<HTMLButtonElement | null>(null)
   const archiveRestoreRef = useRef<{ lotId: string; success: boolean } | null>(null)
   const modalBackgroundRef = useRef<ModalBackground | null>(null)
@@ -619,8 +620,24 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       menuContextRef.current = current ? null : { sessionKey, portfolioId, scopeKey, lotId: holding.lot_id }
       setOpenMenuLotId(current ? null : holding.lot_id)
     }
+    const activateFromKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        openMenu()
+      } else if (event.key === ' ') {
+        event.preventDefault()
+        archiveKeyboardActivationRef.current = holding.lot_id
+      }
+    }
+    const finishKeyboardActivation = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      if (event.key !== ' ') return
+      event.preventDefault()
+      if (archiveKeyboardActivationRef.current !== holding.lot_id) return
+      archiveKeyboardActivationRef.current = null
+      openMenu()
+    }
     return <Box className="holding-row-actions">
-      <IconButton ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} className="row-action-trigger" type="button" aria-label={`Actions for ${holding.symbol} lot ${holding.lot_id}`} aria-expanded={menuOpen} aria-haspopup="menu" data-archive-trigger-lot-id={holding.lot_id} onClick={openMenu} disabled={busy} size="small"><MoreVert aria-hidden="true" /></IconButton>
+      <IconButton ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} className="row-action-trigger" type="button" aria-label={`Actions for ${holding.symbol} lot ${holding.lot_id}`} aria-expanded={menuOpen} aria-haspopup="menu" data-archive-trigger-lot-id={holding.lot_id} onClick={openMenu} onKeyDown={activateFromKeyboard} onKeyUp={finishKeyboardActivation} disabled={busy} size="small"><MoreVert aria-hidden="true" /></IconButton>
       <Menu
         open={menuOpen}
         onClose={() => {
@@ -631,14 +648,14 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
         }}
         anchorReference="anchorPosition"
         anchorPosition={menuPosition}
+        marginThreshold={8}
         transformOrigin={{ vertical: 'top', horizontal: 'left' }}
         autoFocus
         disableRestoreFocus
         transitionDuration={0}
         slotProps={{
           root: { className: 'row-action-menu-portal' },
-          paper: { className: 'row-action-menu', elevation: 8 },
-          list: {
+          paper: {
             ref: (node: any) => {
               if (!node) { archiveMenuRefs.current.delete(holding.lot_id); return }
               const element = node as HTMLElement
@@ -653,9 +670,13 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
                 setMenuPosition((previous) => previous.top === nextPosition.top && previous.left === nextPosition.left ? previous : nextPosition)
               }
             },
-            className: 'row-action-menu row-action-menu-portal',
-            'data-archive-menu-lot-id': holding.lot_id,
+            className: 'row-action-menu',
+            elevation: 8,
             style: { top: menuPosition.top, left: menuPosition.left },
+          } as any,
+          list: {
+            className: 'row-action-menu-list row-action-menu-portal',
+            'data-archive-menu-lot-id': holding.lot_id,
           } as any,
         }}
       >
