@@ -66,6 +66,7 @@ func FromEnv() Config {
 				PortfolioRead: machinePortfolioRead(),
 				ReviewsWrite:  machineReviewsWrite(),
 				HoldingsWrite: machineHoldingsWrite(),
+				MarketRefresh: machineMarketRefresh(),
 			},
 		},
 	}
@@ -98,6 +99,15 @@ func machineHoldingsWrite() bool {
 	return err == nil && parsed
 }
 
+func machineMarketRefresh() bool {
+	value := os.Getenv("PORTFOLIO_MACHINE_MARKET_REFRESH")
+	if value == "" {
+		return false
+	}
+	parsed, err := strconv.ParseBool(value)
+	return err == nil && parsed
+}
+
 // Load reads and validates all server configuration. Authentication is
 // intentionally fail-closed: there are no development credentials or secret
 // fallbacks. Local HTTP use must explicitly opt into PORTFOLIO_ENV=development
@@ -123,6 +133,11 @@ func Load() (Config, error) {
 	if value := os.Getenv("PORTFOLIO_MACHINE_HOLDINGS_WRITE"); value != "" {
 		if _, err := strconv.ParseBool(value); err != nil {
 			return Config{}, fmt.Errorf("machine authentication configuration: invalid PORTFOLIO_MACHINE_HOLDINGS_WRITE")
+		}
+	}
+	if value := os.Getenv("PORTFOLIO_MACHINE_MARKET_REFRESH"); value != "" {
+		if _, err := strconv.ParseBool(value); err != nil {
+			return Config{}, fmt.Errorf("machine authentication configuration: invalid PORTFOLIO_MACHINE_MARKET_REFRESH")
 		}
 	}
 	if !cfg.Auth.CookieSecure && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "development") && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "test") {

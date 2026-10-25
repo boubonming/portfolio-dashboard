@@ -79,7 +79,7 @@ func TestMachineOperatorMigrationUpgradesExistingTenMigrationDatabase(t *testing
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 13 {
+	if migrationCount != 14 {
 		t.Fatalf("migration count after upgrade=%d", migrationCount)
 	}
 	var phaseColumn, deleteTrigger, immutableTrigger int
@@ -124,7 +124,7 @@ func TestMachineOperatorMigrationUpgradesExistingTenMigrationDatabase(t *testing
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 13 {
+	if migrationCount != 14 {
 		t.Fatalf("migration count after repeat=%d", migrationCount)
 	}
 }
@@ -160,7 +160,7 @@ func TestMachineOperatorMigrationRollsBackAtomicallyOnTriggerConflict(t *testing
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 13 {
+	if migrationCount != 14 {
 		t.Fatalf("migration rows after retry=%d", migrationCount)
 	}
 }

@@ -29,6 +29,7 @@ const (
 type MarketRefreshIdempotencyOptions struct {
 	ActorCategory      string
 	ActorID            string
+	Permissions        []string
 	PortfolioID        string
 	IdempotencyKey     string
 	RequestFingerprint string
@@ -53,6 +54,7 @@ type marketRefreshReceipt struct {
 type marketRefreshReceiptBinding struct {
 	ActorCategory      string
 	ActorID            string
+	Permissions        []string
 	PortfolioID        string
 	IdempotencyKey     string
 	RequestFingerprint string
@@ -141,7 +143,7 @@ func (s *Store) RefreshMarketDataIdempotent(ctx context.Context, options MarketR
 		}
 	} else {
 		options.Refresh.RefreshID = receipt.refreshID
-		options.Refresh.receipt = &marketRefreshReceiptBinding{ActorCategory: options.ActorCategory, ActorID: options.ActorID, PortfolioID: options.PortfolioID, IdempotencyKey: options.IdempotencyKey, RequestFingerprint: options.RequestFingerprint, ownerToken: ownerToken}
+		options.Refresh.receipt = &marketRefreshReceiptBinding{ActorCategory: options.ActorCategory, ActorID: options.ActorID, Permissions: append([]string(nil), options.Permissions...), PortfolioID: options.PortfolioID, IdempotencyKey: options.IdempotencyKey, RequestFingerprint: options.RequestFingerprint, ownerToken: ownerToken}
 		if err := s.renewMarketRefreshLease(ctx, options, ownerToken); err != nil {
 			return domain.MarketRefreshResult{}, false, err
 		}
@@ -160,7 +162,7 @@ func (s *Store) RefreshMarketDataIdempotent(ctx context.Context, options MarketR
 			return domain.MarketRefreshResult{}, false, fmt.Errorf("decode persisted snapshot phase: %w", err)
 		}
 	} else {
-		options.Snapshot.receipt = &marketRefreshReceiptBinding{ActorCategory: options.ActorCategory, ActorID: options.ActorID, PortfolioID: options.PortfolioID, IdempotencyKey: options.IdempotencyKey, RequestFingerprint: options.RequestFingerprint, ownerToken: ownerToken, Refresh: refresh, Missing: options.Missing}
+		options.Snapshot.receipt = &marketRefreshReceiptBinding{ActorCategory: options.ActorCategory, ActorID: options.ActorID, Permissions: append([]string(nil), options.Permissions...), PortfolioID: options.PortfolioID, IdempotencyKey: options.IdempotencyKey, RequestFingerprint: options.RequestFingerprint, ownerToken: ownerToken, Refresh: refresh, Missing: options.Missing}
 		if err := s.renewMarketRefreshLease(ctx, options, ownerToken); err != nil {
 			return domain.MarketRefreshResult{}, false, err
 		}
@@ -200,6 +202,9 @@ func validateMarketRefreshIdempotency(options MarketRefreshIdempotencyOptions) e
 	}
 	if options.ActorID == "" || len(options.ActorID) > 128 || !actorIDPattern.MatchString(options.ActorID) {
 		return errors.New("invalid market refresh actor")
+	}
+	if options.ActorCategory == "machine" && (len(options.Permissions) != 2 || options.Permissions[0] != "portfolio:read" || options.Permissions[1] != "market_data:refresh") {
+		return errors.New("invalid market refresh machine permissions")
 	}
 	if options.PortfolioID == "" || len(options.IdempotencyKey) < 8 || len(options.IdempotencyKey) > 128 || len(options.RequestFingerprint) != 64 {
 		return errors.New("invalid market refresh idempotency namespace")
@@ -325,8 +330,8 @@ func (s *Store) readOrReserveMarketRefreshOnce(ctx context.Context, options Mark
 	created := formatMarketRefreshTimestamp(s.now())
 	leaseUntilText := formatMarketRefreshTimestamp(s.now().Add(marketRefreshLeaseDuration))
 	if _, err := tx.ExecContext(ctx, `INSERT INTO market_refresh_idempotency
-		(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,created_at,owner_token,lease_until)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), created, ownerToken, leaseUntilText); err != nil {
+		(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), boolInt(options.ActorCategory == "machine"), created, ownerToken, leaseUntilText); err != nil {
 		if !isUniqueError(err) {
 			return marketRefreshReceipt{}, false, err
 		}

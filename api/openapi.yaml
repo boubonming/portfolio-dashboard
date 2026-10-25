@@ -628,9 +628,11 @@ paths:
         complete total. Provider errors and quote/FX missing, stale, invalid or
         future dependencies are returned as human-diagnosable classifications.
         The machine alternative requires the exact configured principal and
-        portfolio, both runtime portfolio-read and holdings-write flags, and
-        the persisted same-principal portfolio-read plus holdings-write grant;
-        its idempotency and audit/activity records retain the machine actor.
+        portfolio, runtime portfolio-read and the independent
+        `PORTFOLIO_MACHINE_MARKET_REFRESH=true` flag, and the persisted
+        same-principal `market_data:refresh` grant. Holdings-write is not
+        required and is not granted by this operation; its idempotency and
+        audit/activity records retain the machine actor and permission set.
       operationId: refreshMarketData
       security:
         - sessionCookie: []
@@ -668,11 +670,13 @@ components:
         Opaque machine credential for the fixed Hermes principal. The token is
         injected into the Hermes environment, compared in constant time, and
         never stored in SQLite, returned, logged, placed in a URL, or exposed
-        to browser code. Holding mutations and the market-data setup,
-        discovery, mapping, and refresh operations require the separately
-        configured portfolio:read plus holdings:write runtime scope and the
-        persisted same-principal, same-portfolio grants. It is disabled by
-        default and is not implied by reviews:write.
+        to browser code. Holding mutations and market-data setup,
+        discovery, and mapping require the separately configured
+        portfolio:read plus holdings:write runtime scope and persisted grants.
+        The canonical market-data refresh operation instead requires
+        portfolio:read plus the independent market_data:refresh runtime scope
+        and persisted grant; refresh does not grant holding mutation authority.
+        It is disabled by default and is not implied by reviews:write.
   headers:
     NoStore:
       description: Private responses are never stored by shared or browser caches.

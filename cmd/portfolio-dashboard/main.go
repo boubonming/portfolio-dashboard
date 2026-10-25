@@ -85,13 +85,71 @@ func runCommand(command string, args []string) error {
 		return runMachineGrantHoldings(args)
 	case "machine-revoke-holdings":
 		return runMachineRevokeHoldings(args)
+	case "machine-grant-market-refresh", "machine-grant-market-data-refresh":
+		return runMachineGrantMarketRefresh(args)
+	case "machine-revoke-market-refresh", "machine-revoke-market-data-refresh":
+		return runMachineRevokeMarketRefresh(args)
 	case "machine-inspect":
 		return runMachineInspect(args)
 	case "healthcheck":
 		return runHealthcheck(args)
 	default:
-		return fmt.Errorf("unknown command %q (use healthcheck, mapping-add, mapping-list, market-refresh, machine-grant-holdings, machine-revoke-holdings, machine-inspect, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
+		return fmt.Errorf("unknown command %q (use healthcheck, mapping-add, mapping-list, market-refresh, machine-grant-holdings, machine-revoke-holdings, machine-grant-market-refresh, machine-revoke-market-refresh, machine-inspect, quote-add, fx-add, snapshot-create, snapshot-status, or snapshot-show)", command)
 	}
+}
+
+func runMachineGrantMarketRefresh(args []string) error {
+	flags := flag.NewFlagSet("machine-grant-market-refresh", flag.ContinueOnError)
+	databasePath := flags.String("db", "", "SQLite database path")
+	principalID := flags.String("principal", "", "existing machine principal ID")
+	portfolioID := flags.String("portfolio", "", "exact portfolio binding")
+	confirmation := flags.String("confirm", "", "must be exactly GRANT MARKET DATA REFRESH")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *confirmation != "GRANT MARKET DATA REFRESH" {
+		return errors.New("-confirm must be exactly GRANT MARKET DATA REFRESH")
+	}
+	if err := requireConfiguredMarketRefreshBinding(*principalID, *portfolioID); err != nil {
+		return err
+	}
+	database, ctx, err := openDatabase(*databasePath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	changed, err := database.GrantMachineMarketRefresh(ctx, *principalID, *portfolioID)
+	if err != nil {
+		return err
+	}
+	return writeJSON(map[string]any{"principal_id": *principalID, "portfolio_id": *portfolioID, "market_data_refresh": true, "changed": changed, "result": map[bool]string{true: "granted", false: "already_granted"}[changed]})
+}
+
+func runMachineRevokeMarketRefresh(args []string) error {
+	flags := flag.NewFlagSet("machine-revoke-market-refresh", flag.ContinueOnError)
+	databasePath := flags.String("db", "", "SQLite database path")
+	principalID := flags.String("principal", "", "existing machine principal ID")
+	portfolioID := flags.String("portfolio", "", "exact portfolio binding")
+	confirmation := flags.String("confirm", "", "must be exactly REVOKE MARKET DATA REFRESH")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *confirmation != "REVOKE MARKET DATA REFRESH" {
+		return errors.New("-confirm must be exactly REVOKE MARKET DATA REFRESH")
+	}
+	if err := requireConfiguredMarketRefreshBinding(*principalID, *portfolioID); err != nil {
+		return err
+	}
+	database, ctx, err := openDatabase(*databasePath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	changed, err := database.RevokeMachineMarketRefresh(ctx, *principalID, *portfolioID)
+	if err != nil {
+		return err
+	}
+	return writeJSON(map[string]any{"principal_id": *principalID, "portfolio_id": *portfolioID, "market_data_refresh": false, "changed": changed, "result": map[bool]string{true: "revoked", false: "already_revoked"}[changed]})
 }
 
 func runMachineGrantHoldings(args []string) error {
@@ -177,6 +235,16 @@ func requireConfiguredMachineBinding(principalID, portfolioID string, requireWri
 	}
 	if requireWrite && os.Getenv("PORTFOLIO_MACHINE_HOLDINGS_WRITE") != "true" {
 		return errors.New("PORTFOLIO_MACHINE_HOLDINGS_WRITE must be true before granting")
+	}
+	return nil
+}
+
+func requireConfiguredMarketRefreshBinding(principalID, portfolioID string) error {
+	if err := requireConfiguredMachineBinding(principalID, portfolioID, false); err != nil {
+		return err
+	}
+	if os.Getenv("PORTFOLIO_MACHINE_MARKET_REFRESH") != "true" {
+		return errors.New("PORTFOLIO_MACHINE_MARKET_REFRESH must be true before changing the market refresh grant")
 	}
 	return nil
 }

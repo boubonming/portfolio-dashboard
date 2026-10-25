@@ -189,10 +189,28 @@ func (s *Store) Refresh(ctx context.Context, options RefreshOptions) (domain.Ref
 		}
 	}
 	payload, _ := json.Marshal(struct {
-		RefreshID string                         `json:"refresh_id"`
-		Status    string                         `json:"status"`
-		Providers []domain.ProviderRefreshStatus `json:"providers"`
-	}{result.RefreshID, result.Status, result.Providers})
+		RefreshID     string                         `json:"refresh_id"`
+		Status        string                         `json:"status"`
+		Providers     []domain.ProviderRefreshStatus `json:"providers"`
+		ActorCategory string                         `json:"actor_category,omitempty"`
+		ActorID       string                         `json:"actor_id,omitempty"`
+		Permissions   []string                       `json:"permissions,omitempty"`
+	}{result.RefreshID, result.Status, result.Providers, func() string {
+		if options.receipt != nil {
+			return options.receipt.ActorCategory
+		}
+		return ""
+	}(), func() string {
+		if options.receipt != nil {
+			return options.receipt.ActorID
+		}
+		return ""
+	}(), func() []string {
+		if options.receipt != nil {
+			return options.receipt.Permissions
+		}
+		return nil
+	}()})
 	for _, status := range result.Providers {
 		if err := s.persistRefreshRunTx(ctx, tx, result.RefreshID, options.PortfolioID, status, started); err != nil {
 			return domain.RefreshResult{}, err

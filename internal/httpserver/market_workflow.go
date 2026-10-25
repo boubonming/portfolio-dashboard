@@ -250,7 +250,7 @@ func (h *marketWorkflowEndpoint) refresh(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	response, _, err := h.database.RefreshMarketDataIdempotent(r.Context(), store.MarketRefreshIdempotencyOptions{
-		ActorCategory: requestAuth.actor.Category, ActorID: requestAuth.actor.ID, PortfolioID: portfolioID, IdempotencyKey: key, RequestFingerprint: fingerprint,
+		ActorCategory: requestAuth.actor.Category, ActorID: requestAuth.actor.ID, Permissions: append([]string(nil), requestAuth.actor.Permissions...), PortfolioID: portfolioID, IdempotencyKey: key, RequestFingerprint: fingerprint,
 		Refresh:  store.RefreshOptions{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, Clients: h.clients},
 		Snapshot: store.SnapshotRequest{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, MaxAge: domain.DefaultFreshness}, Missing: missing,
 	})

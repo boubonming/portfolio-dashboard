@@ -24,7 +24,7 @@ func marketMachineSecretValue() string {
 
 func marketMachineFixture(t *testing.T, clients map[marketdata.Provider]marketdata.ProviderClient) (http.Handler, *store.Store) {
 	return marketMachineFixtureWithMachine(t, clients, auth.MachineConfig{
-		PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, HoldingsWrite: true,
+		PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, HoldingsWrite: true, MarketRefresh: true,
 	}, true)
 }
 
@@ -72,6 +72,12 @@ func marketMachineFixtureWithMachine(t *testing.T, clients map[marketdata.Provid
 		if _, err := database.GrantMachineHoldings(context.Background(), machine.PrincipalID, machine.PortfolioID); err != nil {
 			database.Close()
 			t.Fatal(err)
+		}
+		if machine.MarketRefresh {
+			if _, err := database.GrantMachineMarketRefresh(context.Background(), machine.PrincipalID, machine.PortfolioID); err != nil {
+				database.Close()
+				t.Fatal(err)
+			}
 		}
 	}
 	return handler, database
@@ -138,6 +144,47 @@ func machineMarketRequest(handler http.Handler, method, path, body string, heade
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func TestMachineMarketRefreshGrantIsIndependentFromHoldingGrant(t *testing.T) {
+	clients := map[marketdata.Provider]marketdata.ProviderClient{
+		marketdata.ProviderCoinGecko:         &fakeMarketProvider{provider: marketdata.ProviderCoinGecko},
+		marketdata.ProviderOpenExchangeRates: &fakeMarketProvider{provider: marketdata.ProviderOpenExchangeRates},
+	}
+	refreshOnly, refreshDB := marketMachineFixtureWithMachine(t, clients, auth.MachineConfig{
+		PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, MarketRefresh: true,
+	}, true)
+	defer refreshDB.Close()
+	if response := machineMarketRequest(refreshOnly, http.MethodGet, "/api/v1/portfolios/market-machine-portfolio/market-data", "", nil); response.Code != http.StatusForbidden {
+		t.Fatalf("refresh-only setup status=%d body=%s", response.Code, response.Body.String())
+	}
+	response := machineMarketRequest(refreshOnly, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, map[string]string{"Idempotency-Key": "refresh-only-key"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("refresh-only refresh status=%d body=%s", response.Code, response.Body.String())
+	}
+	var permission int
+	if err := refreshDB.DB.QueryRow(`SELECT permission_market_data_refresh FROM market_refresh_idempotency WHERE idempotency_key=?`, "refresh-only-key").Scan(&permission); err != nil {
+		t.Fatal(err)
+	}
+	if permission != 1 {
+		t.Fatalf("refresh receipt permission=%d, want 1", permission)
+	}
+	var payload string
+	if err := refreshDB.DB.QueryRow(`SELECT payload FROM audit_events WHERE action='market.refresh.completed'`).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(payload, `"market_data:refresh"`) {
+		t.Fatalf("refresh audit omitted capability: %s", payload)
+	}
+
+	holdingsOnly, holdingsDB := marketMachineFixtureWithMachine(t, nil, auth.MachineConfig{
+		PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, HoldingsWrite: true,
+	}, true)
+	defer holdingsDB.Close()
+	response = machineMarketRequest(holdingsOnly, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, map[string]string{"Idempotency-Key": "holdings-only-key"})
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("holdings-only refresh status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func TestMachineBearerCanUseScopedMarketWorkflowAndPreservesActor(t *testing.T) {

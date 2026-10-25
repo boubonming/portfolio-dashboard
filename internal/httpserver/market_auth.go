@@ -62,7 +62,13 @@ func authenticateMarketWorkflow(w http.ResponseWriter, r *http.Request, database
 			return marketWorkflowAuth{}, false
 		}
 		principal := authenticator.MachinePrincipal()
-		allowed, err := database.MachineHoldingPrincipalAllowedForRuntime(r.Context(), principal, parts[3])
+		refreshRoute := len(parts) == 6 && parts[5] == "refresh" && r.Method == http.MethodPost
+		allowed, err := false, error(nil)
+		if refreshRoute {
+			allowed, err = database.MachineMarketRefreshPrincipalAllowedForRuntime(r.Context(), principal, parts[3])
+		} else {
+			allowed, err = database.MachineHoldingPrincipalAllowedForRuntime(r.Context(), principal, parts[3])
+		}
 		if err != nil {
 			writePhaseDError(w, http.StatusInternalServerError, "internal_error", "The server could not complete the request.")
 			return marketWorkflowAuth{}, false
@@ -71,7 +77,11 @@ func authenticateMarketWorkflow(w http.ResponseWriter, r *http.Request, database
 			writePhaseDError(w, http.StatusForbidden, "forbidden", "The credential lacks the required permission.")
 			return marketWorkflowAuth{}, false
 		}
-		return marketWorkflowAuth{actor: store.MutationActor{Category: "machine", ID: principal.PrincipalID, Permissions: []string{"portfolio:read", "holdings:write"}}}, true
+		permissions := []string{"portfolio:read", "holdings:write"}
+		if refreshRoute {
+			permissions = []string{"portfolio:read", "market_data:refresh"}
+		}
+		return marketWorkflowAuth{actor: store.MutationActor{Category: "machine", ID: principal.PrincipalID, Permissions: permissions}}, true
 	}
 	if sessionCount != 1 {
 		writeBearerUnauthorized(w)
