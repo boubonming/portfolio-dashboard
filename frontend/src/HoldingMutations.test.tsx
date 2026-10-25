@@ -52,12 +52,20 @@ function retainedHandler<T extends (...args: any[]) => unknown>(element: HTMLEle
   return handler as T
 }
 
-function expectNoLegacyMutationStyles(element: Element, state?: 'focus-visible' | 'disabled') {
+function expectNoLegacyMutationStyles(element: Element | null | undefined, state?: 'focus-visible' | 'disabled') {
+  expect(element).toBeInstanceOf(Element)
+  if (!element) throw new Error('Expected a DOM element for CSSOM evidence.')
   const legacyRules = matchingStyleRules(element, state).filter(({ selectorText }) => selectorText.includes('.holding-mutation-card'))
   expect(legacyRules).toEqual([])
   for (const property of ['background', 'border', 'padding', 'outline', 'accent-color', 'opacity']) {
     expect(hasMatchingDeclaration(element, property, property === 'opacity' ? '.65' : property === 'accent-color' ? '#52c7b8' : property === 'outline' ? '3px' : property === 'border' ? '1px' : property === 'padding' ? '.55rem' : '#172322', state)).toBe(false)
   }
+}
+
+function expectMUIClasses(element: Element | null | undefined, ...classes: string[]): asserts element is Element {
+  expect(element).toBeInstanceOf(Element)
+  if (!element) throw new Error('Expected a real MUI element.')
+  for (const className of classes) expect(element.classList.contains(className), `${className} missing from ${element.className}`).toBe(true)
 }
 
 afterEach(() => cleanup())
@@ -130,55 +138,122 @@ describe('HoldingMutations', () => {
       const renderRows = (renderActions: (lot: typeof holding) => ReactNode) => <div>{renderActions(holding)}</div>
       render(<HoldingMutations {...baseProps()} />)
       const add = screen.getByRole('button', { name: 'Add holding' })
+      expectMUIClasses(add, 'MuiButton-root', 'MuiButtonBase-root')
       expectNoLegacyMutationStyles(add)
-      expectNoLegacyMutationStyles(add.querySelector('svg') as SVGElement)
+      const addIcon = add.querySelector('svg')
+      expect(addIcon).toBeInstanceOf(SVGElement)
+      expectMUIClasses(addIcon, 'MuiSvgIcon-root')
+      expect(addIcon.getAttribute('aria-hidden')).toBe('true')
+      expectNoLegacyMutationStyles(addIcon)
 
       fireEvent.click(add)
       const dialog = screen.getByRole('dialog')
-      const dialogPaper = dialog.querySelector('.MuiDialog-paper') as HTMLElement
-      const dialogTitle = dialog.querySelector('.MuiDialogTitle-root') as HTMLElement
-      const dialogContent = dialog.querySelector('.MuiDialogContent-root') as HTMLElement
-      const dialogActions = dialog.querySelector('.MuiDialogActions-root') as HTMLElement
+      expectMUIClasses(dialog, 'MuiPaper-root', 'MuiDialog-paper')
+      const dialogRoot = dialog.closest('.MuiDialog-root')
+      expectMUIClasses(dialogRoot, 'MuiDialog-root')
+      expect(dialog.getAttribute('aria-labelledby')).toBe('holding-form-title')
+      const dialogPaper = dialog
+      const dialogTitle = dialog.querySelector('.MuiDialogTitle-root')
+      expect(dialogTitle).toBeInstanceOf(HTMLElement)
+      expectMUIClasses(dialogTitle, 'MuiDialogTitle-root')
+      expect(dialogTitle.id).toBe('holding-form-title')
+      const dialogContent = dialog.querySelector('.MuiDialogContent-root')
+      expect(dialogContent).toBeInstanceOf(HTMLElement)
+      expectMUIClasses(dialogContent, 'MuiDialogContent-root')
+      const dialogActions = dialog.querySelector('.MuiDialogActions-root')
+      expect(dialogActions).toBeInstanceOf(HTMLElement)
+      expectMUIClasses(dialogActions, 'MuiDialogActions-root')
       const textInput = screen.getByLabelText('Symbol')
+      expectMUIClasses(textInput, 'MuiInputBase-input')
+      expect(textInput.getAttribute('id')).toBe('symbol')
       const radioInput = screen.getByLabelText('New inline instrument')
-      const radioControl = radioInput.closest('label')?.querySelector('.MuiRadio-root') as HTMLElement
+      expectMUIClasses(radioInput, 'PrivateSwitchBase-input')
+      expect(radioInput.getAttribute('type')).toBe('radio')
+      const radioLabel = radioInput.closest('label')
+      expect(radioLabel).toBeInstanceOf(HTMLElement)
+      expectMUIClasses(radioLabel, 'MuiFormControlLabel-root')
+      const radioControl = radioLabel.querySelector('.MuiRadio-root')
+      expectMUIClasses(radioControl, 'MuiRadio-root', 'MuiButtonBase-root')
+      expect(radioLabel.contains(radioInput)).toBe(true)
+      expect(radioLabel.contains(radioControl)).toBe(true)
       const cancel = screen.getByRole('button', { name: 'Cancel' })
-      for (const element of [dialog, dialogPaper, dialogTitle, dialogContent, dialogActions, textInput, radioInput, radioControl, cancel]) expectNoLegacyMutationStyles(element)
+      expectMUIClasses(cancel, 'MuiButton-root', 'MuiButtonBase-root')
+      expect(cancel.querySelector('svg')).toBeNull()
+      for (const element of [dialogRoot, dialog, dialogPaper, dialogTitle, dialogContent, dialogActions, textInput, radioInput, radioControl, cancel]) expectNoLegacyMutationStyles(element)
       textInput.focus()
       expectNoLegacyMutationStyles(textInput, 'focus-visible')
       expectNoLegacyMutationStyles(radioInput)
       expectNoLegacyMutationStyles(radioControl)
-      expectNoLegacyMutationStyles(cancel.querySelector('svg') as SVGElement)
       fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
       const addAlert = screen.getByRole('alert')
+      expectMUIClasses(addAlert, 'MuiAlert-root')
       expectNoLegacyMutationStyles(addAlert)
 
       fireEvent.click(cancel)
-      fireEvent.click(screen.getByRole('button', { name: 'Archive a holding' }))
+      const archiveToggle = screen.getByRole('button', { name: 'Archive a holding' })
+      expectMUIClasses(archiveToggle, 'MuiButton-root', 'MuiButtonBase-root')
+      expectNoLegacyMutationStyles(archiveToggle)
+      fireEvent.click(archiveToggle)
       const nativeSelect = screen.getByLabelText('Holding to archive')
+      expectMUIClasses(nativeSelect, 'MuiNativeSelect-select', 'MuiInputBase-input')
+      expect(nativeSelect.getAttribute('id')).toBe('archive-holding')
+      expect(nativeSelect.closest('.MuiFormControl-root')).toBeInstanceOf(HTMLElement)
       expectNoLegacyMutationStyles(nativeSelect)
       fireEvent.change(nativeSelect, { target: { value: 'lot-a' } })
-      fireEvent.click(screen.getByRole('button', { name: 'Continue to archive' }))
+      const continueArchive = screen.getByRole('button', { name: 'Continue to archive' })
+      expectMUIClasses(continueArchive, 'MuiButton-root', 'MuiButtonBase-root')
+      expectNoLegacyMutationStyles(continueArchive)
+      fireEvent.click(continueArchive)
       const archiveDialog = screen.getByRole('dialog')
-      const archivePaper = archiveDialog.querySelector('.MuiDialog-paper') as HTMLElement
-      const archiveTitle = archiveDialog.querySelector('.MuiDialogTitle-root') as HTMLElement
-      const archiveContent = archiveDialog.querySelector('.MuiDialogContent-root') as HTMLElement
-      const archiveActions = archiveDialog.querySelector('.MuiDialogActions-root') as HTMLElement
+      expectMUIClasses(archiveDialog, 'MuiPaper-root', 'MuiDialog-paper')
+      const archiveDialogRoot = archiveDialog.closest('.MuiDialog-root')
+      expectMUIClasses(archiveDialogRoot, 'MuiDialog-root')
+      expect(archiveDialog.getAttribute('aria-labelledby')).toBe('archive-dialog-title')
+      expect(archiveDialog.getAttribute('aria-describedby')).toBe('archive-dialog-description')
+      const archivePaper = archiveDialog
+      const archiveTitle = archiveDialog.querySelector('.MuiDialogTitle-root')
+      expect(archiveTitle).toBeInstanceOf(HTMLElement)
+      expectMUIClasses(archiveTitle, 'MuiDialogTitle-root')
+      expect(archiveTitle.id).toBe('archive-dialog-title')
+      const archiveContent = archiveDialog.querySelector('.MuiDialogContent-root')
+      expect(archiveContent).toBeInstanceOf(HTMLElement)
+      expectMUIClasses(archiveContent, 'MuiDialogContent-root')
+      expect(archiveContent.querySelector('#archive-dialog-description')).toBeInstanceOf(HTMLElement)
+      const archiveActions = archiveDialog.querySelector('.MuiDialogActions-root')
+      expect(archiveActions).toBeInstanceOf(HTMLElement)
+      expectMUIClasses(archiveActions, 'MuiDialogActions-root')
       const confirm = screen.getByRole('button', { name: 'Confirm archive holding' })
       const cancelArchive = screen.getByRole('button', { name: 'Cancel archive' })
-      for (const element of [archiveDialog, archivePaper, archiveTitle, archiveContent, archiveActions, confirm, cancelArchive]) expectNoLegacyMutationStyles(element)
+      expectMUIClasses(confirm, 'MuiButton-root', 'MuiButtonBase-root')
+      expectMUIClasses(cancelArchive, 'MuiButton-root', 'MuiButtonBase-root')
+      for (const element of [archiveDialogRoot, archiveDialog, archivePaper, archiveTitle, archiveContent, archiveActions, confirm, cancelArchive]) expectNoLegacyMutationStyles(element)
       fireEvent.click(cancelArchive)
 
       cleanup()
       render(<HoldingMutations {...baseProps()}>{renderRows}</HoldingMutations>)
       const rowTrigger = screen.getByRole('button', { name: /Actions for AAA lot lot-a/ })
+      expectMUIClasses(rowTrigger, 'MuiIconButton-root', 'MuiButtonBase-root')
+      expect(rowTrigger.getAttribute('aria-haspopup')).toBe('menu')
+      expect(rowTrigger.getAttribute('data-archive-trigger-lot-id')).toBe('lot-a')
       expectNoLegacyMutationStyles(rowTrigger)
-      expectNoLegacyMutationStyles(rowTrigger.querySelector('svg') as SVGElement)
+      const rowIcon = rowTrigger.querySelector('svg')
+      expect(rowIcon).toBeInstanceOf(SVGElement)
+      expectMUIClasses(rowIcon, 'MuiSvgIcon-root')
+      expect(rowIcon.getAttribute('aria-hidden')).toBe('true')
+      expectNoLegacyMutationStyles(rowIcon)
       fireEvent.click(rowTrigger)
-      const menuPaper = document.querySelector('.MuiPopover-paper') as HTMLElement
+      const menuPaper = document.querySelector('.MuiPopover-paper')
+      expect(menuPaper).toBeInstanceOf(HTMLElement)
+      expectMUIClasses(menuPaper, 'MuiPopover-paper', 'MuiPaper-root', 'row-action-menu')
       const menu = screen.getByRole('menu')
+      expectMUIClasses(menu, 'MuiMenu-list', 'row-action-menu-list')
+      expect(menu.getAttribute('data-archive-menu-lot-id')).toBe('lot-a')
       const menuItem = screen.getByRole('menuitem', { name: 'Archive holding' })
-      const menuIcon = menuItem.querySelector('svg') as SVGElement
+      expectMUIClasses(menuItem, 'MuiMenuItem-root', 'MuiButtonBase-root')
+      const menuIcon = menuItem.querySelector('svg')
+      expect(menuIcon).toBeInstanceOf(SVGElement)
+      expectMUIClasses(menuIcon, 'MuiSvgIcon-root')
+      expect(menuIcon.getAttribute('aria-hidden')).toBe('true')
       for (const element of [menuPaper, menu, menuItem, menuIcon]) expectNoLegacyMutationStyles(element)
       fireEvent.keyDown(document, { key: 'Escape' })
     } finally {
