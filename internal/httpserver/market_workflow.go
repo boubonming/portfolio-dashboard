@@ -2,11 +2,8 @@ package httpserver
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -15,6 +12,7 @@ import (
 	"github.com/boubonming/portfolio-dashboard/internal/config"
 	"github.com/boubonming/portfolio-dashboard/internal/domain"
 	"github.com/boubonming/portfolio-dashboard/internal/marketdata"
+	"github.com/boubonming/portfolio-dashboard/internal/marketrefresh"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 )
 
@@ -23,6 +21,7 @@ type marketWorkflowEndpoint struct {
 	clients   map[marketdata.Provider]marketdata.ProviderClient
 	readiness []domain.ProviderReadiness
 	auth      *auth.Authenticator
+	workflow  *marketrefresh.Service
 }
 
 func (h *marketWorkflowEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -44,11 +43,13 @@ func newMarketWorkflowEndpoint(database *store.Store, cfg config.Config, authent
 			marketdata.ProviderOpenExchangeRates: marketdata.NewOpenExchangeRatesClient(cfg.ProviderKeys.OpenExchangeRates, marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.OpenExchangeRates}),
 		}
 	}
+	readiness := store.MarketProviders(keys)
 	return &marketWorkflowEndpoint{
 		database:  database,
 		clients:   clients,
-		readiness: store.MarketProviders(keys),
+		readiness: readiness,
 		auth:      authenticator,
+		workflow:  marketrefresh.New(database, clients, readiness),
 	}
 }
 
@@ -210,52 +211,23 @@ func (h *marketWorkflowEndpoint) refresh(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_refresh_request"})
 		return
 	}
-	setup, setupErr := h.database.MarketDataSetup(r.Context(), portfolioID, h.readiness)
-	if setupErr != nil {
-		if errors.Is(setupErr, store.ErrPortfolioNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "portfolio_not_found"})
-		} else {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
-		}
-		return
-	}
-	reportingCurrency := strings.TrimSpace(request.ReportingCurrency)
-	if reportingCurrency == "" {
-		if err := h.database.DB.QueryRowContext(r.Context(), "SELECT reporting_currency FROM portfolios WHERE id=?", portfolioID).Scan(&reportingCurrency); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
-			return
-		}
-		reportingCurrency = strings.TrimSpace(reportingCurrency)
-	}
-	if len(reportingCurrency) != 3 || reportingCurrency != strings.ToUpper(reportingCurrency) || strings.Trim(reportingCurrency, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_reporting_currency"})
-		return
-	}
-	fingerprintInput, _ := json.Marshal(struct {
-		PortfolioID       string `json:"portfolio_id"`
-		Operation         string `json:"operation"`
-		ReportingCurrency string `json:"reporting_currency"`
-	}{portfolioID, "refresh", reportingCurrency})
-	fingerprintBytes := sha256.Sum256(fingerprintInput)
-	fingerprint := hex.EncodeToString(fingerprintBytes[:])
-	missing := make([]string, 0)
-	for _, instrument := range setup.Instruments {
-		if len(instrument.Mappings) == 0 {
-			missing = append(missing, fmt.Sprintf("%s (%s)", instrument.Symbol, instrument.Currency))
-		}
-	}
 	requestAuth, actorOK := marketWorkflowAuthFromContext(r.Context())
 	if !actorOK {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	response, _, err := h.database.RefreshMarketDataIdempotent(r.Context(), store.MarketRefreshIdempotencyOptions{
-		ActorCategory: requestAuth.actor.Category, ActorID: requestAuth.actor.ID, PortfolioID: portfolioID, IdempotencyKey: key, RequestFingerprint: fingerprint,
-		Refresh:  store.RefreshOptions{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, Clients: h.clients},
-		Snapshot: store.SnapshotRequest{PortfolioID: portfolioID, ReportingCurrency: reportingCurrency, MaxAge: domain.DefaultFreshness}, Missing: missing,
+	response, _, err := h.workflow.Refresh(r.Context(), marketrefresh.Request{
+		PortfolioID:       portfolioID,
+		ReportingCurrency: request.ReportingCurrency,
+		IdempotencyKey:    key,
+		Actor:             requestAuth.actor,
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, store.ErrPortfolioNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "portfolio_not_found"})
+		case strings.Contains(err.Error(), "invalid reporting currency"):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_reporting_currency"})
 		case errors.Is(err, store.ErrMarketRefreshIdempotencyConflict):
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "idempotency_key_conflict"})
 		case errors.Is(err, store.ErrMarketRefreshInProgress):

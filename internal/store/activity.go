@@ -250,6 +250,10 @@ func safeActorCategory(actor string) string {
 		return "browser"
 	case actor == "machine" || strings.HasPrefix(actor, "machine-"):
 		return "machine"
+	case actor == "scheduler" || strings.HasPrefix(actor, "scheduler-") || actor == "market-refresh-scheduler":
+		return "scheduler"
+	case actor == "cli" || strings.HasPrefix(actor, "cli-") || actor == "market-refresh-cli":
+		return "cli"
 	default:
 		return "unknown"
 	}

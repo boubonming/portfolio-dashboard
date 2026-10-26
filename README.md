@@ -42,6 +42,21 @@ go run ./cmd/portfolio-dashboard
 
 Configuration is environment-driven. `PORTFOLIO_REPORTING_CURRENCY` defaults to `MYR`; timestamps stored by the application are UTC and human-facing dates use Singapore time in later phases.
 
+### Optional scheduled market refresh
+
+The in-process scheduler is disabled when `PORTFOLIO_MARKET_REFRESH_CRON` is
+blank. To enable a strict standard five-field cron expression, set the IANA
+timezone (default `Asia/Singapore`), bounded portfolio ID (default
+`portfolio-default`), and optionally an exact uppercase reporting currency.
+For example, `PORTFOLIO_MARKET_REFRESH_CRON='0 5 * * 1-5'` runs on Singapore
+weekday mornings. It does not run at startup or backfill missed slots. Each
+slot uses the same durable refresh, immutable snapshot, audit, Activity,
+missing-mapping, and replay workflow as the browser and machine endpoints.
+Scheduled work is attributed as `scheduler` / `market-refresh-scheduler`,
+does not use or expose the Hermes bearer, and is stopped with the server.
+Invalid enabled configuration fails before HTTP serving; provider failures are
+bounded and do not stop later slots.
+
 The HTTP server fails closed unless authentication is configured explicitly:
 `PORTFOLIO_AUTH_USERNAME`, a bcrypt `PORTFOLIO_AUTH_PASSWORD_HASH` (cost 10 or
 higher), `PORTFOLIO_PUBLIC_ORIGIN` (one exact `https://host[:port]` origin), and
@@ -70,15 +85,15 @@ in single quotes in `.env`, for example
 paste the hash or plaintext password into chat, and never commit either one.
 
 The optional least-privilege machine identity is an external Hermes bearer
-identity, not an embedded runtime. Configure all six settings together:
+identity, not an embedded runtime. Configure all seven settings together:
 `PORTFOLIO_MACHINE_PRINCIPAL_ID` (stable non-secret audit identity),
 `PORTFOLIO_MACHINE_PORTFOLIO_ID` (bound portfolio),
 `PORTFOLIO_MACHINE_BEARER_SECRET` (independent random printable secret),
 `PORTFOLIO_MACHINE_PORTFOLIO_READ` (scoped snapshot/context/read grant),
 `PORTFOLIO_MACHINE_REVIEWS_WRITE` (immutable advisory review submission
- grant), and `PORTFOLIO_MACHINE_HOLDINGS_WRITE` (independent holding
- create/archive grant). The fail-closed disabled state has the three
- identity/secret values blank and all three grants `false`; enabling a
+ grant), `PORTFOLIO_MACHINE_MARKET_REFRESH` (independent market-data
+ refresh trigger grant). The fail-closed disabled state has the three
+ identity/secret values blank and all four grants `false`; enabling a
  capability requires its explicit grant. A partial configuration,
 invalid grant, or bearer secret shorter than 32 printable random bytes fails
 closed. The bearer secret is never written to SQLite, logs, URLs, frontend
@@ -117,8 +132,36 @@ binding and `-confirm 'REVOKE HOLDINGS'`; inspect should then report
 `holdings_write:false`. Reopening the database or restarting the service cannot
 undo that persisted revocation; a new deliberate grant is required.
 
+### Explicit machine market-refresh grant lifecycle
+
+`PORTFOLIO_MACHINE_MARKET_REFRESH=true` is independent of holding mutation. The
+canonical refresh endpoint requires this runtime flag, the persisted
+`market_data:refresh` grant, and the persisted portfolio-read grant for the
+exact configured principal and portfolio. Grant or revoke it only after
+confirming the same binding and runtime read prerequisite:
+
+```sh
+PORTFOLIO_MACHINE_PRINCIPAL_ID=the-configured-id \
+PORTFOLIO_MACHINE_PORTFOLIO_ID=portfolio-default \
+PORTFOLIO_MACHINE_PORTFOLIO_READ=true \
+PORTFOLIO_MACHINE_MARKET_REFRESH=true \
+go run ./cmd/portfolio-dashboard machine-grant-market-refresh \
+  -db /path/to/portfolio-dashboard.sqlite \
+  -principal the-configured-id -portfolio portfolio-default \
+  -confirm 'GRANT MARKET DATA REFRESH'
+go run ./cmd/portfolio-dashboard machine-revoke-market-refresh \
+  -db /path/to/portfolio-dashboard.sqlite \
+  -principal the-configured-id -portfolio portfolio-default \
+  -confirm 'REVOKE MARKET DATA REFRESH'
+```
+
+Transitions are idempotent, append a secret-free operator audit event with
+portfolio ownership, and never create, reactivate, or grant holding authority.
+`machine-inspect` reports the persisted `market_data_refresh` state without
+exposing the bearer secret.
+
 `Store.Open` runs the forward migrations on startup. Existing databases must
-complete migration 011 before these commands are used; it preserves existing
+complete migration 015 before these commands are used; it preserves existing
 rows and makes both machine grant/revoke audit events and their portfolio
 ownership associations append-only.
 
@@ -246,7 +289,7 @@ never used as a tie-breaker.
 
 The authenticated browser setup also exposes `POST /api/v1/portfolios/{portfolioId}/market-data/discover`. It contacts configured CoinGecko `/api/v3/search`, Finnhub `/api/v1/search`, or Alpha Vantage `SYMBOL_SEARCH` endpoints with only the holding symbol/search query. Returned identifiers and metadata are bounded, unverified candidates: owners must choose or edit an exact listing and explicitly confirm the full batch before any mapping is saved. Discovery is setup- and ETag-bound, performs no mapping or audit writes, and never sends provider credentials to the browser or portfolio/lot data to provider search requests; provider authentication stays server-side.
 
-The same four market-data routes accept the explicitly scoped machine bearer alternative. It is limited to the exact configured principal and portfolio, a valid singleton bearer, `PORTFOLIO_MACHINE_PORTFOLIO_READ=true`, `PORTFOLIO_MACHINE_HOLDINGS_WRITE=true`, and the persisted portfolio-read plus holdings-write grant for that same principal and portfolio. Machine discovery remains read-only; mapping and refresh retain the machine principal in audit/activity and refresh idempotency records. Machine requests omit browser CSRF and never receive provider credentials, session secrets, or owner-session privileges; missing or revoked runtime/persisted grants fail closed.
+The same four market-data routes accept the explicitly scoped machine bearer alternative. Setup, discovery, and mapping remain limited to the exact configured principal and portfolio, a valid singleton bearer, `PORTFOLIO_MACHINE_PORTFOLIO_READ=true`, `PORTFOLIO_MACHINE_HOLDINGS_WRITE=true`, and the persisted portfolio-read plus holdings-write grant. The canonical refresh route instead requires `PORTFOLIO_MACHINE_PORTFOLIO_READ=true`, `PORTFOLIO_MACHINE_MARKET_REFRESH=true`, and the persisted `market_data:refresh` grant; it does not grant holding mutation authority. Machine discovery remains read-only; mapping and refresh retain the machine principal in audit/activity and refresh idempotency records. Machine requests omit browser CSRF and never receive provider credentials, session secrets, or owner-session privileges; missing or revoked runtime/persisted grants fail closed.
 
 `ALPHA_VANTAGE_API_KEY`, and `OPEN_EXCHANGE_RATES_APP_ID`. CoinGecko uses its
 public free endpoint in this slice. Credentials are not persisted, printed,
@@ -260,7 +303,7 @@ There are no live-key tests in this repository: adapter tests must use local
 `httptest` servers and the refresh command must be exercised with fake
 endpoints only.
 
-For operators who need the preserved CLI path, run a bounded, aggregate-only refresh after mappings are reviewed:
+For operators who need the preserved CLI path, run a bounded refresh after mappings are reviewed. The CLI uses the same durable refresh, immutable snapshot, audit, Activity, and replay workflow as the browser, machine, and scheduler callers. Its default retry key is derived from the portfolio and `-as-of` instant; pass `-idempotency-key` when coordinating an explicit retry:
 
 ```sh
 go run ./cmd/portfolio-dashboard market-refresh -db portfolio.sqlite \

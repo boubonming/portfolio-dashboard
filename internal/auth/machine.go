@@ -3,11 +3,14 @@ package auth
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -29,6 +32,7 @@ type MachineConfig struct {
 	PortfolioRead bool   `json:"portfolio_read"`
 	ReviewsWrite  bool   `json:"reviews_write"`
 	HoldingsWrite bool   `json:"holdings_write"`
+	MarketRefresh bool   `json:"market_refresh"`
 }
 
 // MachinePrincipal is the non-secret database identity and effective scope.
@@ -40,13 +44,14 @@ type MachinePrincipal struct {
 	PortfolioRead bool
 	ReviewsWrite  bool
 	HoldingsWrite bool
+	MarketRefresh bool
 }
 
 // Validate permits the machine credential to be disabled by leaving every
 // field empty, but rejects every partial or weak configuration.
 func (c MachineConfig) Validate() error {
 	empty := c.PrincipalID == "" && c.PortfolioID == "" && c.BearerSecret == ""
-	if empty && !c.PortfolioRead && !c.ReviewsWrite && !c.HoldingsWrite {
+	if empty && !c.PortfolioRead && !c.ReviewsWrite && !c.HoldingsWrite && !c.MarketRefresh {
 		return nil
 	}
 	if c.PrincipalID == "" || c.PortfolioID == "" || c.BearerSecret == "" {
@@ -77,19 +82,96 @@ func (c MachineConfig) Validate() error {
 func (c MachineConfig) Enabled() bool { return c.BearerSecret != "" }
 
 func (c MachineConfig) Principal() MachinePrincipal {
-	return MachinePrincipal{PrincipalID: c.PrincipalID, PortfolioID: c.PortfolioID, PortfolioRead: c.PortfolioRead, ReviewsWrite: c.ReviewsWrite, HoldingsWrite: c.HoldingsWrite}
+	return MachinePrincipal{PrincipalID: c.PrincipalID, PortfolioID: c.PortfolioID, PortfolioRead: c.PortfolioRead, ReviewsWrite: c.ReviewsWrite, HoldingsWrite: c.HoldingsWrite, MarketRefresh: c.MarketRefresh}
 }
+
+const (
+	machineDiagnosticFieldMax  = 128
+	machineDiagnosticOutputMax = 512
+)
 
 // String deliberately omits the bearer value. MachineConfig is passed through
 // startup and test diagnostics, where a default fmt rendering must not become
 // a credential disclosure path.
-func (c MachineConfig) String() string {
-	return fmt.Sprintf("MachineConfig{principal_id:%q portfolio_id:%q bearer_secret:<redacted> portfolio_read:%t reviews_write:%t holdings_write:%t}", c.PrincipalID, c.PortfolioID, c.PortfolioRead, c.ReviewsWrite, c.HoldingsWrite)
-}
+func (c MachineConfig) String() string { return c.redactedString() }
 
 // GoString keeps Go-syntax diagnostics from bypassing String and exposing the
 // in-memory credential with %#v.
-func (c MachineConfig) GoString() string { return c.String() }
+func (c MachineConfig) GoString() string { return c.redactedString() }
+
+// Format prevents fmt verbs other than %s from falling back to reflection,
+// which would include BearerSecret. Formatting is intentionally based only on
+// the bounded redacted representation; unknown verbs never receive raw data.
+func (c MachineConfig) Format(state fmt.State, verb rune) {
+	value := c.redactedString()
+	switch verb {
+	case 'q':
+		value = strconv.Quote(value)
+	case 'x':
+		value = hex.EncodeToString([]byte(value))
+	case 'X':
+		value = strings.ToUpper(hex.EncodeToString([]byte(value)))
+	}
+	if precision, ok := state.Precision(); ok {
+		value = truncateRunes(value, precision)
+	}
+	value = truncateBytes(value, machineDiagnosticOutputMax)
+
+	width := utf8.RuneCountInString(value)
+	if requested, ok := state.Width(); ok {
+		width = requested
+		if width > machineDiagnosticOutputMax {
+			width = machineDiagnosticOutputMax
+		}
+	}
+	padding := width - utf8.RuneCountInString(value)
+	if padding < 0 {
+		padding = 0
+	}
+	if state.Flag('-') {
+		value += strings.Repeat(" ", padding)
+	} else {
+		value = strings.Repeat(" ", padding) + value
+	}
+	_, _ = state.Write([]byte(truncateBytes(value, machineDiagnosticOutputMax)))
+}
+
+func (c MachineConfig) redactedString() string {
+	value := "MachineConfig{principal_id:" + strconv.Quote(truncateRunes(c.PrincipalID, machineDiagnosticFieldMax)) +
+		" portfolio_id:" + strconv.Quote(truncateRunes(c.PortfolioID, machineDiagnosticFieldMax)) +
+		" bearer_secret:<redacted> portfolio_read:" + strconv.FormatBool(c.PortfolioRead) +
+		" reviews_write:" + strconv.FormatBool(c.ReviewsWrite) +
+		" holdings_write:" + strconv.FormatBool(c.HoldingsWrite) +
+		" market_refresh:" + strconv.FormatBool(c.MarketRefresh) + "}"
+	return truncateBytes(value, machineDiagnosticOutputMax)
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	count := 0
+	for index := range value {
+		if count == limit {
+			return value[:index]
+		}
+		count++
+	}
+	return value
+}
+
+func truncateBytes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	for limit > 0 && !utf8.RuneStart(value[limit]) {
+		limit--
+	}
+	return value[:limit]
+}
 
 func validMachineSecret(secret string) bool {
 	b := []byte(secret)

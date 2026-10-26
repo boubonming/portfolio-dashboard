@@ -501,7 +501,7 @@ func TestRootEnvExampleIsTrackedAllowedAndMatchesCompatibilityTemplate(t *testin
 		}
 		values[name] = value
 	}
-	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET", "PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE", "PORTFOLIO_MACHINE_HOLDINGS_WRITE"} {
+	for _, name := range []string{"PORTFOLIO_MACHINE_PRINCIPAL_ID", "PORTFOLIO_MACHINE_PORTFOLIO_ID", "PORTFOLIO_MACHINE_BEARER_SECRET", "PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE", "PORTFOLIO_MACHINE_HOLDINGS_WRITE", "PORTFOLIO_MACHINE_MARKET_REFRESH"} {
 		if _, ok := values[name]; !ok {
 			t.Errorf(".env.example is missing machine setting %s", name)
 		}
@@ -511,7 +511,7 @@ func TestRootEnvExampleIsTrackedAllowedAndMatchesCompatibilityTemplate(t *testin
 			t.Errorf("machine identity/secret %s is not blank by default", name)
 		}
 	}
-	for _, name := range []string{"PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE", "PORTFOLIO_MACHINE_HOLDINGS_WRITE"} {
+	for _, name := range []string{"PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE", "PORTFOLIO_MACHINE_HOLDINGS_WRITE", "PORTFOLIO_MACHINE_MARKET_REFRESH"} {
 		if values[name] != "false" {
 			t.Errorf("machine grant %s = %q, want false by default", name, values[name])
 		}
@@ -651,7 +651,7 @@ func TestPrivateEnvTemplateOptionalConfigurationIsDisabled(t *testing.T) {
 			t.Errorf("optional %s is not blank", name)
 		}
 	}
-	for _, name := range []string{"PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE", "PORTFOLIO_MACHINE_HOLDINGS_WRITE"} {
+	for _, name := range []string{"PORTFOLIO_MACHINE_PORTFOLIO_READ", "PORTFOLIO_MACHINE_REVIEWS_WRITE", "PORTFOLIO_MACHINE_HOLDINGS_WRITE", "PORTFOLIO_MACHINE_MARKET_REFRESH"} {
 		if values[name] != "false" {
 			t.Errorf("optional %s = %q, want false", name, values[name])
 		}

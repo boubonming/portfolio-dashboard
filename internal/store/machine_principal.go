@@ -32,7 +32,7 @@ func (s *Store) RegisterMachinePrincipalIdentity(ctx context.Context, principal 
 		// whether a deployment has imported a particular portfolio.
 		return nil
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO machine_principals(id,portfolio_id,permission_portfolio_read,permission_reviews_write,permission_holdings_write,active,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET permission_portfolio_read=MIN(machine_principals.permission_portfolio_read,excluded.permission_portfolio_read), permission_reviews_write=MIN(machine_principals.permission_reviews_write,excluded.permission_reviews_write), permission_holdings_write=MIN(machine_principals.permission_holdings_write,excluded.permission_holdings_write)`, principal.PrincipalID, principal.PortfolioID, boolInt(principal.PortfolioRead), boolInt(principal.ReviewsWrite), boolInt(principal.HoldingsWrite), 1, canonicalSnapshotTime(time.Now().UTC()))
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO machine_principals(id,portfolio_id,permission_portfolio_read,permission_reviews_write,permission_holdings_write,permission_market_data_refresh,active,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET permission_portfolio_read=MIN(machine_principals.permission_portfolio_read,excluded.permission_portfolio_read), permission_reviews_write=MIN(machine_principals.permission_reviews_write,excluded.permission_reviews_write), permission_holdings_write=MIN(machine_principals.permission_holdings_write,excluded.permission_holdings_write), permission_market_data_refresh=MIN(machine_principals.permission_market_data_refresh,excluded.permission_market_data_refresh)`, principal.PrincipalID, principal.PortfolioID, boolInt(principal.PortfolioRead), boolInt(principal.ReviewsWrite), boolInt(principal.HoldingsWrite), boolInt(principal.MarketRefresh), 1, canonicalSnapshotTime(time.Now().UTC()))
 	return err
 }
 
@@ -102,4 +102,22 @@ func (s *Store) MachineHoldingPrincipalAllowedForRuntime(ctx context.Context, pr
 		return false, err
 	}
 	return active == 1 && read == 1 && write == 1, nil
+}
+
+// MachineMarketRefreshPrincipalAllowedForRuntime requires the independent
+// runtime and persisted refresh grants. HoldingsWrite never contributes to
+// this decision.
+func (s *Store) MachineMarketRefreshPrincipalAllowedForRuntime(ctx context.Context, principal auth.MachinePrincipal, requestedPortfolioID string) (bool, error) {
+	if requestedPortfolioID != principal.PortfolioID || !principal.PortfolioRead || !principal.MarketRefresh {
+		return false, nil
+	}
+	var active, read, refresh int
+	err := s.DB.QueryRowContext(ctx, `SELECT active,permission_portfolio_read,permission_market_data_refresh FROM machine_principals WHERE id=? AND portfolio_id=?`, principal.PrincipalID, requestedPortfolioID).Scan(&active, &read, &refresh)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return active == 1 && read == 1 && refresh == 1, nil
 }

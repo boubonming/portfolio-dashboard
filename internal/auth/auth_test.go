@@ -305,11 +305,40 @@ func TestMachineConfigValidationAndConstantTimeTokenBoundary(t *testing.T) {
 func TestMachineBearerGrammarAndRedaction(t *testing.T) {
 	secret := "machine-secret-with-enough-diversity-0123456789-ABCDEF"
 	config := MachineConfig{PrincipalID: "machine-reader", PortfolioID: "portfolio-api", BearerSecret: secret, PortfolioRead: true}
-	for _, format := range []string{"%v", "%+v", "%#v"} {
-		formatted := fmt.Sprintf(format, config)
-		if strings.Contains(formatted, secret) || !strings.Contains(formatted, "<redacted>") {
-			t.Fatalf("format %s exposed machine secret: %s", format, formatted)
+	formats := []struct {
+		verb  string
+		value any
+	}{
+		{verb: "%s", value: config}, {verb: "%q", value: config}, {verb: "%v", value: config},
+		{verb: "%+v", value: config}, {verb: "%#v", value: config}, {verb: "%x", value: config},
+		{verb: "%X", value: config}, {verb: "%d", value: config}, {verb: "%j", value: config}, {verb: "%p", value: &config},
+		{verb: "%40v", value: config}, {verb: "%-40v", value: config}, {verb: "%.40v", value: config},
+		{verb: "%+020.40v", value: config}, {verb: "%#-80.60x", value: config}, {verb: "%100000.100000v", value: config},
+	}
+	for _, test := range formats {
+		formatted := fmt.Sprintf(test.verb, test.value)
+		repeated := fmt.Sprintf(test.verb, test.value)
+		if formatted != repeated {
+			t.Errorf("format %s was not deterministic: %q != %q", test.verb, formatted, repeated)
 		}
+		if strings.Contains(formatted, secret) || len(formatted) > machineDiagnosticOutputMax {
+			t.Errorf("format %s exposed or exceeded bounds: %q", test.verb, formatted)
+		}
+	}
+	if got := config.String(); strings.Contains(got, secret) || !strings.Contains(got, "<redacted>") || len(got) > machineDiagnosticOutputMax {
+		t.Fatalf("String exposed or exceeded bounds: %q", got)
+	}
+	if got := config.GoString(); strings.Contains(got, secret) || !strings.Contains(got, "<redacted>") || len(got) > machineDiagnosticOutputMax {
+		t.Fatalf("GoString exposed or exceeded bounds: %q", got)
+	}
+	type machineEnvelope struct{ Machine MachineConfig }
+	envelope := fmt.Sprintf("%+v", machineEnvelope{Machine: config})
+	if strings.Contains(envelope, secret) || !strings.Contains(envelope, "<redacted>") {
+		t.Fatalf("struct formatting exposed machine secret: %q", envelope)
+	}
+	wrapped := fmt.Errorf("wrapped machine config: %w", fmt.Errorf("%+v", config))
+	if strings.Contains(wrapped.Error(), secret) || !strings.Contains(wrapped.Error(), "<redacted>") {
+		t.Fatalf("wrapped error exposed machine secret: %q", wrapped)
 	}
 	encoded, err := json.Marshal(config)
 	if err != nil {

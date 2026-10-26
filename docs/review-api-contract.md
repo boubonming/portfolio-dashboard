@@ -100,6 +100,7 @@ CREATE TABLE machine_principals (
   id TEXT PRIMARY KEY, portfolio_id TEXT NOT NULL REFERENCES portfolios(id),
   permission_portfolio_read INTEGER NOT NULL CHECK(permission_portfolio_read IN(0,1)),
   permission_reviews_write INTEGER NOT NULL CHECK(permission_reviews_write IN(0,1)),
+  permission_market_data_refresh INTEGER NOT NULL DEFAULT 0 CHECK(permission_market_data_refresh IN(0,1)),
   active INTEGER NOT NULL CHECK(active IN(0,1)), created_at TEXT NOT NULL,
   UNIQUE(id,portfolio_id),
   CHECK(length(created_at)=30 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z' AND substr(created_at,20,1)='.' AND strftime('%Y-%m-%d',julianday(substr(created_at,1,10)))=substr(created_at,1,10) AND substr(created_at,20,1)='.' AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59' AND substr(created_at,12,2) BETWEEN '00' AND '23' AND substr(created_at,15,2) BETWEEN '00' AND '59' AND substr(created_at,18,2) BETWEEN '00' AND '59')
