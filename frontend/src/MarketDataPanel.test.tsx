@@ -1,3 +1,4 @@
+import userEvent from '@testing-library/user-event'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import MarketDataPanel, { scheduleCronForPreset, schedulePresetFromCron, validScheduleTime } from './MarketDataPanel'
@@ -54,6 +55,47 @@ function mappingComboboxes() {
 
 function mappingCheckboxes() {
   return screen.getAllByRole('row').slice(1).map((row) => within(row).getByRole('checkbox'))
+}
+
+const scheduleEtag = (letter: string) => `"${letter.repeat(64)}"`
+const environmentSchedule = (overrides: Record<string, unknown> = {}) => ({ portfolio_id: 'portfolio-a', enabled: true, cron: '0 5 * * *', timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: scheduleEtag('a'), effective: true, degraded: false, runtime_status: 'active', ...overrides })
+const savedSchedule = (overrides: Record<string, unknown> = {}) => ({ ...environmentSchedule({ source: 'saved', revision: 1, updated_at: '2026-01-01T00:00:00.000000000Z', etag: scheduleEtag('b') }), ...overrides })
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise })
+  return { promise, resolve, reject }
+}
+
+function renderRoutedSchedule({
+  schedule = environmentSchedule(),
+  putResponse = json(savedSchedule()),
+  setupResponse = setup(),
+  portfolioID = 'portfolio-a',
+  onUnauthorized = vi.fn(),
+  onReload = vi.fn(),
+  scheduleGet,
+}: {
+  schedule?: unknown
+  putResponse?: Promise<Response>
+  setupResponse?: Record<string, unknown>
+  portfolioID?: string
+  onUnauthorized?: () => void
+  onReload?: () => void
+  scheduleGet?: Promise<Response>
+} = {}) {
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input)
+    if (path.endsWith('/market-data/schedule')) {
+      return init?.method === 'PUT' ? putResponse : (scheduleGet || json(schedule))
+    }
+    if (path.endsWith('/market-data/discover')) return json({ portfolio_id: portfolioID, etag: '"setup-1"', results: [] })
+    if (path.endsWith('/market-data')) return json({ ...setupResponse, portfolio_id: portfolioID })
+    return json({})
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  const rendered = render(<MarketDataPanel portfolioID={portfolioID} reportingCurrency="MYR" csrfToken="csrf-token" onUnauthorized={onUnauthorized} onReload={onReload} />)
+  return { rendered, fetchMock, onUnauthorized, onReload }
 }
 
 afterEach(() => {
@@ -328,14 +370,194 @@ describe('MarketDataPanel', () => {
     expect(screen.queryByRole('button', { name: 'Save all mappings' })).toBeNull()
   })
 
-  it('renders degraded schedules fail-closed with an accessible recovery announcement and disabled controls', async () => {
-    const degraded = { portfolio_id: 'portfolio-a', enabled: true, cron: '0 5 * * *', timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: `"${'d'.repeat(64)}"`, effective: false, degraded: true, runtime_status: 'degraded' }
-    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/schedule') ? json(degraded) : json(setup()))
-    renderPanel(fetchMock)
-    const announcement = await waitFor(() => screen.getByRole('alert'))
-    expect(announcement.textContent).toMatch(/retry or reconcile/i)
-    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByRole('checkbox', { name: /enable scheduled refreshes/i }) as HTMLInputElement).disabled).toBe(true)
-    expect((screen.getByRole('combobox', { name: 'Preset' }) as HTMLSelectElement).disabled).toBe(true)
+  it.each([
+    ['enabled environment', environmentSchedule(), true, 'environment', 'active'],
+    ['enabled saved', savedSchedule(), true, 'saved', 'active'],
+    ['saved disabled', savedSchedule({ enabled: false, cron: '', effective: false, runtime_status: 'disabled' }), false, 'saved', 'disabled'],
+    ['degraded environment', environmentSchedule({ degraded: true, effective: false, runtime_status: 'degraded' }), true, 'environment', 'degraded'],
+  ])('renders the %s schedule state with visible source and runtime status', async (_label, schedule, enabled, source, runtimeStatus) => {
+    renderRoutedSchedule({ schedule })
+    await waitFor(() => expect(screen.getByLabelText('Schedule source')).toBeTruthy())
+    expect(screen.getByLabelText('Schedule source').textContent).toContain(source)
+    expect(screen.getByLabelText('Schedule runtime status').textContent).toContain(runtimeStatus)
+    expect((screen.getByRole('checkbox', { name: /enable scheduled refreshes/i }) as HTMLInputElement).checked).toBe(enabled)
+    if (runtimeStatus === 'degraded') {
+      expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+      expect(screen.getByRole('alert').textContent).toMatch(/retry or reconcile/i)
+    }
+  })
+
+  it('drives preset, time, custom cron, enablement, timezone, and currency validation through user events', async () => {
+    const user = userEvent.setup()
+    const { fetchMock } = renderRoutedSchedule()
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Preset' })).toBeTruthy())
+    const preset = screen.getByRole('combobox', { name: 'Preset' })
+    const time = screen.getByLabelText('Schedule local time')
+    expect((time as HTMLInputElement).value).toBe('05:00')
+    await user.selectOptions(preset, 'weekdays')
+    await user.clear(time)
+    await user.type(time, '23:59')
+    await user.selectOptions(preset, 'custom')
+    const cron = screen.getByRole('textbox', { name: 'Custom five-field cron' })
+    expect((cron as HTMLInputElement).value).toBe('59 23 * * 1-5')
+    await user.clear(cron)
+    await user.type(cron, '0 4 * * 0')
+    const enabled = screen.getByRole('checkbox', { name: /enable scheduled refreshes/i })
+    await user.click(enabled)
+    expect((enabled as HTMLInputElement).checked).toBe(false)
+    await user.click(enabled)
+    expect((enabled as HTMLInputElement).checked).toBe(true)
+    const timezone = screen.getByRole('textbox', { name: 'Schedule timezone' })
+    await user.clear(timezone)
+    await user.type(timezone, 'bad timezone')
+    const currency = screen.getByRole('textbox', { name: 'Reporting currency' })
+    expect((currency as HTMLInputElement).value).toBe('')
+    fireEvent.change(currency, { target: { value: 'US' } })
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    expect(screen.getByRole('alert').textContent).toMatch(/valid bounded IANA timezone/i)
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(0)
+    await user.clear(timezone)
+    await user.type(timezone, 'UTC')
+    fireEvent.change(currency, { target: { value: '' } })
+    fireEvent.change(currency, { target: { value: 'USD' } })
+    expect((currency as HTMLInputElement).value).toBe('USD')
+  })
+
+  it('saves through the rendered button with exact request metadata and displays the returned revision and ETag', async () => {
+    const user = userEvent.setup()
+    const next = savedSchedule({ revision: 7, etag: scheduleEtag('c'), cron: '7 5 * * *' })
+    const { fetchMock } = renderRoutedSchedule({ putResponse: json(next) })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(1))
+    const call = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT') as unknown as [RequestInfo | URL, RequestInit]
+    expect(JSON.parse(String(call[1].body))).toEqual({ enabled: true, cron: '0 5 * * *', timezone: 'Asia/Singapore', reporting_currency: '' })
+    const headers = new Headers(call[1].headers)
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-token')
+    expect(headers.get('If-Match')).toBe(scheduleEtag('a'))
+    expect(call[1].credentials).toBe('same-origin')
+    expect(call[1].signal).toBeInstanceOf(AbortSignal)
+    await waitFor(() => expect(screen.getByLabelText('Schedule revision').textContent).toContain(`Schedule revision: 7 · ETag: ${scheduleEtag('c')}`))
+    expect(screen.getByLabelText('Schedule source').textContent).toContain('saved')
+  })
+
+  it('uses the in-flight save guard for double activation and recovers after the PUT resolves', async () => {
+    const user = userEvent.setup()
+    const pending = deferred<Response>()
+    const { fetchMock } = renderRoutedSchedule({ putResponse: pending.promise })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    const save = screen.getByRole('button', { name: 'Save schedule' })
+    await user.click(save)
+    await user.click(save)
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(1)
+    expect((save as HTMLButtonElement).disabled).toBe(true)
+    pending.resolve(await json(savedSchedule({ revision: 2, etag: scheduleEtag('d') })))
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(screen.getAllByRole('status').some((status) => status.textContent?.includes('Schedule saved.'))).toBe(true)
+  })
+
+  it('handles unauthorized, stale revision reload, and degraded PUT failures without leaving controls locked', async () => {
+    const user = userEvent.setup()
+    const onUnauthorized = vi.fn()
+    const unauthorized = renderRoutedSchedule({ putResponse: json({ error: 'unauthorized' }, 401), onUnauthorized })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledOnce())
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+    unauthorized.rendered.unmount()
+
+    let scheduleGets = 0
+    const latest = savedSchedule({ revision: 8, etag: scheduleEtag('e') })
+    const latestGet = deferred<Response>()
+    const onReload = vi.fn()
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/schedule')) return init?.method === 'PUT' ? json({ error: 'stale' }, 412) : (scheduleGets++ === 0 ? json(environmentSchedule()) : latestGet.promise)
+      if (path.endsWith('/discover')) return json({ portfolio_id: 'portfolio-a', etag: '"setup-1"', results: [] })
+      return json(setup())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="MYR" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={onReload} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(onReload).toHaveBeenCalledOnce())
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/changed in another window/i))
+    latestGet.resolve(await json(latest))
+    await waitFor(() => expect(screen.getByLabelText('Schedule revision').textContent).toContain('Schedule revision: 8'))
+    expect(screen.getByLabelText('Schedule revision').textContent).toContain('ETag: ' + scheduleEtag('e'))
+    cleanup()
+
+    const degradedFailure = renderRoutedSchedule({ putResponse: json({ error: 'runtime degraded' }, 503) })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/runtime recovery is unresolved/i))
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+    degradedFailure.rendered.unmount()
+  })
+
+  it.each([
+    ['malformed', { portfolio_id: 'portfolio-a' }],
+    ['unknown-field', { ...environmentSchedule(), unexpected: true }],
+    ['contradictory', environmentSchedule({ enabled: true, effective: false, runtime_status: 'active' })],
+  ])('fails closed for %s schedule success payloads', async (_label, payload) => {
+    renderRoutedSchedule({ schedule: payload })
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Invalid market refresh schedule response/i))
+    expect(screen.queryByRole('button', { name: 'Save schedule' })).toBeNull()
+    expect(screen.queryByRole('combobox', { name: 'Preset' })).toBeNull()
+  })
+
+  it('aborts every pending schedule request on scope change and unmount, ignoring stale completions', async () => {
+    const user = userEvent.setup()
+    const initialGet = deferred<Response>()
+    const pendingPut = deferred<Response>()
+    const signals: AbortSignal[] = []
+    let portfolio = 'portfolio-a'
+    const oldSchedule = environmentSchedule()
+    const newSchedule = environmentSchedule({ portfolio_id: 'portfolio-b', etag: scheduleEtag('f') })
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.signal) signals.push(init.signal)
+      const path = String(input)
+      if (path.endsWith('/schedule')) {
+        if (init?.method === 'PUT') return pendingPut.promise
+        return portfolio === 'portfolio-a' ? initialGet.promise : json(newSchedule)
+      }
+      if (path.endsWith('/discover')) return json({ portfolio_id: portfolio, etag: '"setup-1"', results: [] })
+      return json({ ...setup(), portfolio_id: portfolio })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const rendered = render(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="MYR" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(signals.length).toBeGreaterThanOrEqual(2))
+    initialGet.resolve(await json(oldSchedule))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toBe(true))
+    portfolio = 'portfolio-b'
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-b" reportingCurrency="MYR" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Schedule revision').textContent).toContain(newSchedule.etag))
+    pendingPut.resolve(await json(savedSchedule({ portfolio_id: 'portfolio-a', revision: 99, etag: scheduleEtag('9') })))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(screen.getByLabelText('Schedule revision').textContent).toContain(newSchedule.etag)
+    rendered.unmount()
+    expect(signals.every((signal) => signal.aborted)).toBe(true)
+  })
+
+  it('keeps the rendered schedule contract accessible and verifies production callbacks before activation', async () => {
+    const onUnauthorized = vi.fn()
+    const onReload = vi.fn()
+    const { fetchMock } = renderRoutedSchedule({ onUnauthorized, onReload })
+    expect(onUnauthorized).toBeDefined()
+    expect(onReload).toBeDefined()
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market refresh schedule' })).toBeTruthy())
+    expect(screen.getByRole('checkbox', { name: /enable scheduled refreshes/i }).getAttribute('aria-describedby')).toBeNull()
+    expect(screen.getByRole('combobox', { name: 'Preset' })).toBeTruthy()
+    expect(screen.getByLabelText('Schedule local time')).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: 'Schedule timezone' })).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: 'Reporting currency' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy()
+    expect(screen.getByLabelText('Schedule source').getAttribute('aria-label')).toBe('Schedule source')
+    expect(screen.getByLabelText('Schedule runtime status').getAttribute('aria-live')).toBe('polite')
+    expect(screen.getByLabelText('Schedule revision')).toBeTruthy()
+    expect(fetchMock).toHaveBeenCalled()
   })
 })

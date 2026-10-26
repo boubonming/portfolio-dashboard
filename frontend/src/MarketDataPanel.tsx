@@ -55,6 +55,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
   const discoveryControllerRef = useRef<AbortController | null>(null)
   const mutationControllerRef = useRef<AbortController | null>(null)
   const scheduleMutationRef = useRef<AbortController | null>(null)
+  const scheduleSavingRef = useRef(false)
   const savingRef = useRef(false)
 
   const generationRef = useRef(0)
@@ -63,12 +64,25 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
   const unauthorizedRef = useRef(onUnauthorized)
   unauthorizedRef.current = onUnauthorized
 
-  const load = () => {
+  const expireSession = () => {
+    generationRef.current += 1
+    mutationControllerRef.current?.abort()
+    scheduleMutationRef.current?.abort()
+    scheduleMutationRef.current = null
+    scheduleSavingRef.current = false
+    setScheduleSaving(false)
+    unauthorizedRef.current()
+  }
+
+  const load = (initialScheduleError = '') => {
     const generation = ++generationRef.current
-    controllerRef.current?.abort(); discoveryControllerRef.current?.abort()
+    controllerRef.current?.abort(); discoveryControllerRef.current?.abort(); scheduleMutationRef.current?.abort()
+    scheduleMutationRef.current = null
+    scheduleSavingRef.current = false
+    setScheduleSaving(false)
     const controller = new AbortController()
     controllerRef.current = controller
-    setState('loading'); setError(''); setMessage(''); setSchedule(null); setScheduleError(''); setScheduleMessage('')
+    setState('loading'); setError(''); setMessage(''); setSchedule(null); setScheduleError(initialScheduleError); setScheduleMessage('')
     getMarketRefreshSchedule(portfolioID, controller.signal).then((next) => {
       if (controller.signal.aborted || generation !== generationRef.current || next.portfolio_id !== scopeRef.current.portfolioID) return
       const preset = schedulePresetFromCron(next.cron)
@@ -78,7 +92,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       setScheduleError('')
     }).catch((reason: unknown) => {
       if (controller.signal.aborted || generation !== generationRef.current) return
-      if (reason instanceof APIError && reason.status === 401) { generationRef.current += 1; mutationControllerRef.current?.abort(); scheduleMutationRef.current?.abort(); unauthorizedRef.current(); return }
+      if (reason instanceof APIError && reason.status === 401) { expireSession(); return }
       if (reason instanceof APIError && reason.status === 503) { setScheduleError('Automatic refresh is inactive because runtime recovery is unresolved. Retry or reconcile the schedule with the operator before relying on it.'); return }
       setScheduleError(reason instanceof Error ? reason.message : 'Unable to load the refresh schedule')
     })
@@ -116,19 +130,19 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
         setMessage('Provider discovery completed. Suggestions remain unverified until you confirm them.')
       }).catch((reason: unknown) => {
         if (discoveryController.signal.aborted || generation !== generationRef.current) return
-        if (reason instanceof APIError && reason.status === 401) { generationRef.current += 1; mutationControllerRef.current?.abort(); unauthorizedRef.current(); return }
+        if (reason instanceof APIError && reason.status === 401) { expireSession(); return }
         setMessage('Provider discovery was unavailable. Enter and verify exact identifiers manually.')
       })
     }).catch((reason: unknown) => {
       if (controller.signal.aborted || generation !== generationRef.current) return
-      if (reason instanceof APIError && reason.status === 401) { generationRef.current += 1; mutationControllerRef.current?.abort(); unauthorizedRef.current(); return }
+      if (reason instanceof APIError && reason.status === 401) { expireSession(); return }
       setError(reason instanceof Error ? reason.message : 'Unable to load market-data setup'); setState('error')
     })
   }
 
   useEffect(() => {
     load()
-    return () => { generationRef.current += 1; controllerRef.current?.abort(); discoveryControllerRef.current?.abort(); mutationControllerRef.current?.abort(); scheduleMutationRef.current?.abort(); controllerRef.current = null; discoveryControllerRef.current = null; mutationControllerRef.current = null; scheduleMutationRef.current = null }
+    return () => { generationRef.current += 1; controllerRef.current?.abort(); discoveryControllerRef.current?.abort(); mutationControllerRef.current?.abort(); scheduleMutationRef.current?.abort(); scheduleSavingRef.current = false; controllerRef.current = null; discoveryControllerRef.current = null; mutationControllerRef.current = null; scheduleMutationRef.current = null }
   }, [portfolioID, reportingCurrency])
 
   const update = (id: string, field: keyof Draft, value: string | boolean) => setDrafts((current) => ({ ...current, [id]: { ...current[id], [field]: value } }))
@@ -152,7 +166,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
     if (schedulePreset !== 'custom' && validScheduleTime(time)) setScheduleCron(scheduleCronForPreset(schedulePreset, time))
   }
   const saveSchedule = async () => {
-    if (!schedule || scheduleSaving) return
+    if (!schedule || scheduleSavingRef.current) return
     if (schedule.degraded) { setScheduleError('Automatic refresh is inactive while runtime recovery is unresolved. Retry or reconcile the schedule before saving settings.'); return }
     if (!validScheduleTime(scheduleTime) && schedulePreset !== 'custom') { setScheduleError('Enter a local time between 00:00 and 23:59.'); return }
     if (!/^[A-Za-z][A-Za-z0-9_+./-]{0,63}$/.test(scheduleTimezone)) { setScheduleError('Enter a valid bounded IANA timezone.'); return }
@@ -160,7 +174,8 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
     if (scheduleEnabled && (scheduleCron.trim() === '' || scheduleCron.trim().split(/\s+/).length !== 5)) { setScheduleError('Enabled schedules require a standard five-field cron expression.'); return }
     const generation = generationRef.current
     const controller = new AbortController()
-    scheduleMutationRef.current?.abort(); scheduleMutationRef.current = controller
+    scheduleSavingRef.current = true
+    scheduleMutationRef.current = controller
     setScheduleSaving(true); setScheduleError(''); setScheduleMessage('Saving schedule…')
     try {
       const next = await saveMarketRefreshSchedule(portfolioID, { enabled: scheduleEnabled, cron: scheduleEnabled ? scheduleCron : '', timezone: scheduleTimezone, reporting_currency: scheduleCurrency }, schedule.etag, csrfToken, controller.signal)
@@ -168,12 +183,12 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       setSchedule(next); setScheduleMessage('Schedule saved.'); setScheduleError('')
     } catch (reason) {
       if (controller.signal.aborted || generation !== generationRef.current) return
-      if (reason instanceof APIError && reason.status === 401) { generationRef.current += 1; unauthorizedRef.current(); return }
-      if (reason instanceof APIError && reason.status === 412) { setScheduleError('This schedule changed in another window. Reloading the latest settings before saving again.'); setScheduleMessage(''); onReload(); load() }
+      if (reason instanceof APIError && reason.status === 401) { expireSession(); return }
+      if (reason instanceof APIError && reason.status === 412) { const staleMessage = 'This schedule changed in another window. Reloading the latest settings before saving again.'; setScheduleError(staleMessage); setScheduleMessage(''); onReload(); load(staleMessage) }
       else if (reason instanceof APIError && reason.status === 503) { setScheduleError('Automatic refresh is inactive because runtime recovery is unresolved. Retry or reconcile the schedule with the operator before saving.'); setScheduleMessage('') }
       else setScheduleError(reason instanceof Error ? reason.message : 'Unable to save the schedule')
     } finally {
-      if (generation === generationRef.current) setScheduleSaving(false)
+      if (generation === generationRef.current) { setScheduleSaving(false); scheduleSavingRef.current = false }
       if (scheduleMutationRef.current === controller) scheduleMutationRef.current = null
     }
   }
@@ -201,7 +216,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       load()
     } catch (reason) {
       if (controller.signal.aborted || generation !== generationRef.current) return
-      if (reason instanceof APIError && reason.status === 401) { generationRef.current += 1; unauthorizedRef.current(); return }
+      if (reason instanceof APIError && reason.status === 401) { expireSession(); return }
       setError(reason instanceof APIError && reason.status === 412 ? 'This setup changed in another window. Reload the setup before saving.' : reason instanceof Error ? reason.message : 'Unable to save mappings')
     } finally {
       if (generation === generationRef.current) { setSaving(false); savingRef.current = false }
@@ -215,11 +230,11 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
     <p className="muted">Mappings are explicit and human-reviewed. They are not required again for each refresh. International listings, ADRs and crypto IDs must use the exact provider identifier; the dashboard never guesses from a holding symbol.</p>
     <div className="provider-status" aria-label="Provider readiness">{setup?.providers.map((provider) => <span className={`provider-chip ${provider.configured ? 'ready' : 'not-ready'} `} key={provider.name}>{provider.name}: {provider.configured ? 'ready' : 'not configured'}</span>)}</div>
     {state === 'loading' && <p role="status" aria-live="polite">Loading market-data setup…</p>}
-    {state === 'error' && <p className="notice" role="status">Unable to load market-data setup. <button type="button" onClick={load}>Try again</button></p>}
+    {state === 'error' && <p className="notice" role="status">Unable to load market-data setup. <button type="button" onClick={() => load()}>Try again</button></p>}
     <section className="schedule-card" aria-labelledby="market-refresh-schedule-title">
       <div className="section-heading"><div><span className="eyebrow">Durable automation</span><h3 id="market-refresh-schedule-title">Market refresh schedule</h3></div><span className="muted">Portfolio: {portfolioID}</span></div>
       {!schedule && <p role="status" aria-live="polite">Loading schedule…</p>}
-      {!schedule && scheduleError && <p className="notice error" role="alert" aria-live="assertive">{scheduleError} <button type="button" onClick={load}>Reload</button></p>}
+      {!schedule && scheduleError && <p className="notice error" role="alert" aria-live="assertive">{scheduleError} <button type="button" onClick={() => load()}>Reload</button></p>}
       {schedule && <>
         {schedule.degraded && <p id="market-refresh-schedule-status" className="notice error" role="alert" aria-live="assertive">Automatic refresh is inactive: the scheduler is degraded. Retry or reconcile the schedule with the operator before relying on these settings.</p>}
         <label><input type="checkbox" checked={scheduleEnabled} disabled={schedule.degraded || scheduleSaving} onChange={(event) => setScheduleEnabled(event.target.checked)} aria-describedby={schedule.degraded ? 'market-refresh-schedule-status' : undefined} /> Enable scheduled refreshes</label>
@@ -229,10 +244,12 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
           <label>IANA timezone<input aria-label="Schedule timezone" value={scheduleTimezone} disabled={schedule.degraded || scheduleSaving} maxLength={64} onChange={(event) => setScheduleTimezone(event.target.value)} /></label>
           <label>Reporting currency (optional)<input aria-label="Reporting currency" value={scheduleCurrency} disabled={schedule.degraded || scheduleSaving} maxLength={3} onChange={(event) => setScheduleCurrency(event.target.value.toUpperCase())} placeholder="Inherit" /></label>
         </div>
-        <p className="muted">{schedule.source === 'saved' ? 'Saved in the portfolio database.' : 'Using deployment bootstrap defaults until you save a portfolio setting.'} {schedule.source === 'environment' && 'Daily example: 0 5 * * * in Asia/Singapore.'}</p>
+        <p className="muted" aria-label="Schedule source">Schedule source: {schedule.source} — {schedule.source === 'saved' ? 'Saved in the portfolio database.' : 'Using deployment bootstrap defaults until you save a portfolio setting.'} {schedule.source === 'environment' && 'Daily example: 0 5 * * * in Asia/Singapore.'}</p>
+        <p className="muted" role="status" aria-live="polite" aria-label="Schedule runtime status">Schedule runtime status: {schedule.runtime_status}{schedule.effective ? ' (effective)' : ' (not effective)'}</p>
+        <p className="muted" aria-label="Schedule revision">Schedule revision: {schedule.revision} · ETag: {schedule.etag}</p>
         <button type="button" onClick={saveSchedule} disabled={scheduleSaving || schedule.degraded}>{scheduleSaving ? 'Saving schedule…' : 'Save schedule'}</button>
         {scheduleMessage && <p role="status" aria-live="polite">{scheduleMessage}</p>}
-        {scheduleError && <p className="notice error" role="alert" aria-live="polite">{scheduleError} <button type="button" onClick={load}>Reload</button></p>}
+        {scheduleError && <p className="notice error" role="alert" aria-live="polite">{scheduleError} <button type="button" onClick={() => load()}>Reload</button></p>}
       </>}
     </section>
     {state === 'ready' && <>
