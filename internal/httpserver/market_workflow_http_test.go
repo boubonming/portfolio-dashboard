@@ -133,15 +133,23 @@ func (p *countingDiscoveryProvider) Search(context.Context, string) ([]marketdat
 type recordingScheduleRuntime struct {
 	configurations []appconfig.MarketRefreshConfig
 	fail           bool
+	failOnCall     int
+	calls          int
+	degraded       bool
 }
 
 func (r *recordingScheduleRuntime) Reconfigure(_ context.Context, configuration appconfig.MarketRefreshConfig) error {
 	r.configurations = append(r.configurations, configuration)
-	if r.fail {
+	r.calls++
+	if r.fail || r.calls == r.failOnCall {
+		r.degraded = true
 		return errors.New("fixture runtime failure")
 	}
+	r.degraded = false
 	return nil
 }
+
+func (r *recordingScheduleRuntime) ScheduleRuntimeDegraded(string) bool { return r.degraded }
 
 func scheduleResponseETag(t *testing.T, handler http.Handler, cookie *http.Cookie, csrf string) string {
 	t.Helper()
@@ -470,5 +478,43 @@ func TestMarketWorkflowSchedulePrepareApplyCommitRollback(t *testing.T) {
 	}
 	if restored := scheduleResponseETag(t, handler, cookie, csrf); restored != etag {
 		t.Fatalf("failed schedule changed ETag from %q to %q", etag, restored)
+	}
+}
+
+func TestMarketWorkflowScheduleRollbackFailureIsDegraded(t *testing.T) {
+	runtime := &recordingScheduleRuntime{failOnCall: 2}
+	handler, database, cookie, csrf := marketHTTPFixtureWithClientsAndRuntime(t, nil, runtime)
+	defer database.Close()
+	etag := scheduleResponseETag(t, handler, cookie, csrf)
+	if _, err := database.DB.Exec(`CREATE TRIGGER fail_schedule_audit BEFORE INSERT ON audit_events WHEN NEW.action='market.refresh.schedule.updated' BEGIN SELECT RAISE(ABORT, 'fixture schedule audit failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	response := scheduleSaveRequest(handler, cookie, csrf, etag, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore","reporting_currency":""}`)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "schedule_runtime_degraded") {
+		t.Fatalf("rollback failure status=%d body=%s", response.Code, response.Body.String())
+	}
+	status := marketRequest(handler, cookie, csrf, http.MethodGet, "/api/v1/portfolios/portfolio-market-http/market-data/schedule", "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"degraded":true`) || !strings.Contains(status.Body.String(), `"effective":false`) {
+		t.Fatalf("degraded schedule status=%d body=%s", status.Code, status.Body.String())
+	}
+	var schedules, audits, activities int
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM market_refresh_schedules`).Scan(&schedules); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action='market.refresh.schedule.updated'`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM activity_events WHERE action='market.refresh.schedule.updated'`).Scan(&activities); err != nil {
+		t.Fatal(err)
+	}
+	if schedules != 0 || audits != 0 || activities != 0 {
+		t.Fatalf("degraded failed mutation left durable effects: schedules=%d audits=%d activities=%d", schedules, audits, activities)
+	}
+	if err := runtime.Reconfigure(context.Background(), appconfig.MarketRefreshConfig{Cron: "0 5 * * *", Timezone: "Asia/Singapore", PortfolioID: "portfolio-market-http"}); err != nil {
+		t.Fatal(err)
+	}
+	status = marketRequest(handler, cookie, csrf, http.MethodGet, "/api/v1/portfolios/portfolio-market-http/market-data/schedule", "")
+	if strings.Contains(status.Body.String(), `"degraded":true`) {
+		t.Fatalf("runtime reconciliation remained degraded: %s", status.Body.String())
 	}
 }

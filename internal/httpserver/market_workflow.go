@@ -34,6 +34,10 @@ type MarketRefreshScheduleRuntime interface {
 	Reconfigure(context.Context, config.MarketRefreshConfig) error
 }
 
+type MarketRefreshScheduleRuntimeStatus interface {
+	ScheduleRuntimeDegraded(string) bool
+}
+
 func (h *marketWorkflowEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.serveHTTP(w, r)
 }
@@ -128,7 +132,9 @@ func (h *marketWorkflowEndpoint) serveHTTP(w http.ResponseWriter, r *http.Reques
 
 type marketRefreshScheduleResponse struct {
 	store.MarketRefreshSchedule
-	Effective bool `json:"effective"`
+	Effective     bool   `json:"effective"`
+	Degraded      bool   `json:"degraded"`
+	RuntimeStatus string `json:"runtime_status"`
 }
 
 func (h *marketWorkflowEndpoint) schedule(w http.ResponseWriter, r *http.Request, portfolioID string) {
@@ -142,8 +148,12 @@ func (h *marketWorkflowEndpoint) schedule(w http.ResponseWriter, r *http.Request
 		h.writeScheduleError(w, err)
 		return
 	}
+	degraded := false
+	if runtime, ok := h.scheduleRuntime.(MarketRefreshScheduleRuntimeStatus); ok {
+		degraded = runtime.ScheduleRuntimeDegraded(portfolioID)
+	}
 	w.Header().Set("ETag", schedule.ETag)
-	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: schedule.Enabled})
+	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: schedule.Enabled && !degraded, Degraded: degraded, RuntimeStatus: map[bool]string{true: "degraded", false: "healthy"}[degraded]})
 }
 
 func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Request, portfolioID string) {
@@ -213,9 +223,7 @@ func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Req
 	}
 	runtimeApplied := false
 	if h.scheduleRuntime != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		runtimeErr := h.scheduleRuntime.Reconfigure(ctx, newConfiguration)
-		cancel()
+		runtimeErr := h.scheduleRuntime.Reconfigure(r.Context(), newConfiguration)
 		if runtimeErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "schedule_runtime_unavailable"})
 			return
@@ -226,8 +234,15 @@ func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		if runtimeApplied {
 			rollbackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_ = h.scheduleRuntime.Reconfigure(rollbackCtx, previousConfiguration)
+			rollbackErr := h.scheduleRuntime.Reconfigure(rollbackCtx, previousConfiguration)
 			cancel()
+			if rollbackErr != nil {
+				// The durable row is still old, but the runtime may have stopped
+				// both schedules. Never report a successful/effective candidate;
+				// the runtime's degraded state is reconciled from this old row.
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "schedule_runtime_degraded"})
+				return
+			}
 		}
 		switch {
 		case errors.Is(err, store.ErrMarketRefreshScheduleConflict):

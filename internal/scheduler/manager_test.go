@@ -71,3 +71,28 @@ func TestManagerRestoresMultiplePortfoliosAndSerializesTransitions(t *testing.T)
 		t.Fatal(err)
 	}
 }
+
+func TestManagerUsesCallerContextForReconfigureAndRootForLifecycle(t *testing.T) {
+	manager := NewManager(marketrefresh.New(nil, nil, nil))
+	root, cancelRoot := context.WithCancel(context.Background())
+	defer cancelRoot()
+	initial := managerSchedule(t, "portfolio-context", "0 5 * * 1-5")
+	if err := manager.Start(root, initial); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.Reconfigure(canceled, managerSchedule(t, "portfolio-context", "30 6 * * *")); err != context.Canceled {
+		t.Fatalf("caller cancellation error=%v", err)
+	}
+	current := manager.schedulers["portfolio-context"]
+	if current == nil || current.configuration.Cron != initial.Cron {
+		t.Fatalf("caller cancellation changed schedule: %+v", current)
+	}
+	if current.lifecycle != root {
+		t.Fatal("installed scheduler did not retain manager lifecycle context")
+	}
+	if err := manager.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
