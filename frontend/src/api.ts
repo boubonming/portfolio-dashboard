@@ -239,13 +239,13 @@ function decodeMarketRefreshSchedule(value: unknown): MarketRefreshSchedule {
   const source = stringField(body.source, 'source', 'market refresh schedule', 16)
   if (source !== 'environment' && source !== 'saved') throw new APIError(200, 'Invalid market refresh schedule response: source.')
   if (typeof body.enabled !== 'boolean') throw new APIError(200, 'Invalid market refresh schedule response: enabled.')
-  const cron = stringField(body.cron, 'cron', 'market refresh schedule', 256)
+  const cron = body.cron === '' ? '' : stringField(body.cron, 'cron', 'market refresh schedule', 256)
   if ((cron && cron.trim() !== cron) || (cron && cron.split(/\s+/).length !== 5)) throw new APIError(200, 'Invalid market refresh schedule response: cron.')
   const timezone = stringField(body.timezone, 'timezone', 'market refresh schedule', 64)
   if (!/^[A-Za-z][A-Za-z0-9_+./-]{0,63}$/.test(timezone)) throw new APIError(200, 'Invalid market refresh schedule response: timezone.')
   const currency = body.reporting_currency === '' ? '' : currencyCode(body.reporting_currency, 'reporting_currency', 'market refresh schedule')
   const revision = boundedInteger(body.revision, 'revision', 'market refresh schedule')
-  if (typeof body.effective !== 'boolean' || body.effective !== (source === 'saved')) throw new APIError(200, 'Invalid market refresh schedule response: effective.')
+  if (typeof body.effective !== 'boolean' || body.effective !== body.enabled) throw new APIError(200, 'Invalid market refresh schedule response: effective.')
   const etag = stringField(body.etag, 'etag', 'market refresh schedule', 256)
   if (!/^\"[a-f0-9]{64}\"$/.test(etag)) throw new APIError(200, 'Invalid market refresh schedule response: etag.')
   const updatedAt = body.updated_at === undefined ? undefined : canonicalTime(body.updated_at, 'updated_at', 'market refresh schedule')
@@ -439,7 +439,7 @@ export async function saveMarketRefreshSchedule(portfolioID: string, schedule: P
     method: 'PUT', csrfToken, signal, headers: { 'Content-Type': 'application/json', 'If-Match': etag }, body: JSON.stringify(schedule),
   })
   const result = decodeMarketRefreshSchedule(await jsonResponse<unknown>(response))
-  if (result.portfolio_id !== portfolioID || result.source !== 'saved' || !result.effective) throw new APIError(200, 'Invalid market refresh schedule response: saved scope.')
+  if (result.portfolio_id !== portfolioID || result.source !== 'saved' || result.effective !== result.enabled) throw new APIError(200, 'Invalid market refresh schedule response: saved scope.')
   return result
 }
 

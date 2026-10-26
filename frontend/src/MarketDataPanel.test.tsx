@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import MarketDataPanel from './MarketDataPanel'
+import MarketDataPanel, { scheduleCronForPreset, schedulePresetFromCron, validScheduleTime } from './MarketDataPanel'
 import { hasMatchingDeclaration, installCommittedStyles } from './cssTestUtils'
 
 const providers = [
@@ -45,6 +45,18 @@ afterEach(() => {
 })
 
 describe('MarketDataPanel', () => {
+  it('converts Daily, Weekdays, and Custom schedule controls without accepting invalid local times', () => {
+    expect(scheduleCronForPreset('daily', '05:07')).toBe('7 5 * * *')
+    expect(scheduleCronForPreset('weekdays', '23:59')).toBe('59 23 * * 1-5')
+    expect(schedulePresetFromCron('7 5 * * *')).toBe('daily')
+    expect(schedulePresetFromCron('59 23 * * 1-5')).toBe('weekdays')
+    expect(schedulePresetFromCron('0 5 1 * *')).toBe('custom')
+    expect(validScheduleTime('00:00')).toBe(true)
+    expect(validScheduleTime('23:59')).toBe(true)
+    expect(validScheduleTime('24:00')).toBe(false)
+    expect(validScheduleTime('5:07')).toBe(false)
+  })
+
   it('binds real market-data controls and raw table cells to scoped legacy rules', async () => {
     const removeStyles = installCommittedStyles()
     const fetchMock = vi.fn(() => json(setup()))

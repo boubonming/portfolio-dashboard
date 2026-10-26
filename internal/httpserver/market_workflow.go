@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/auth"
@@ -26,6 +27,7 @@ type marketWorkflowEndpoint struct {
 	workflow            *marketrefresh.Service
 	marketConfiguration config.MarketRefreshConfig
 	scheduleRuntime     MarketRefreshScheduleRuntime
+	scheduleMu          sync.Mutex
 }
 
 type MarketRefreshScheduleRuntime interface {
@@ -141,7 +143,7 @@ func (h *marketWorkflowEndpoint) schedule(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.Header().Set("ETag", schedule.ETag)
-	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: schedule.Source == "saved"})
+	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: schedule.Enabled})
 }
 
 func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Request, portfolioID string) {
@@ -176,8 +178,57 @@ func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Req
 	if request.ReportingCurrency != nil {
 		currency = *request.ReportingCurrency
 	}
-	schedule, err := h.database.SaveMarketRefreshScheduleWithFallback(r.Context(), portfolioID, r.Header.Get("If-Match"), store.MarketRefreshScheduleUpdate{Enabled: *request.Enabled, Cron: *request.Cron, Timezone: *request.Timezone, ReportingCurrency: currency}, requestAuth.actor, h.marketConfiguration)
+	update := store.MarketRefreshScheduleUpdate{Enabled: *request.Enabled, Cron: *request.Cron, Timezone: *request.Timezone, ReportingCurrency: currency}
+
+	// The runtime scheduler and SQLite cannot share a transaction. Keep the
+	// browser update serialized and use an explicit prepare/apply/commit/
+	// rollback protocol: read and validate the old state, apply the candidate
+	// runtime, commit the durable row plus its audit/activity rows, then restore
+	// the old runtime if durable commit fails. SaveMarketRefreshSchedule remains
+	// the commit boundary, so failed validation/CAS/SQL never emits events.
+	h.scheduleMu.Lock()
+	defer h.scheduleMu.Unlock()
+	current, err := h.database.MarketRefreshSchedule(r.Context(), portfolioID, h.marketConfiguration)
 	if err != nil {
+		h.writeScheduleError(w, err)
+		return
+	}
+	if current.ETag != r.Header.Get("If-Match") {
+		writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": "stale_schedule"})
+		return
+	}
+	if !update.Enabled && update.Cron != "" || update.Enabled && update.Cron == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_schedule"})
+		return
+	}
+	previousConfiguration, parseErr := config.ParseMarketRefreshConfig(current.Cron, current.Timezone, portfolioID, current.ReportingCurrency)
+	if parseErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+		return
+	}
+	newConfiguration, parseErr := config.ParseMarketRefreshConfig(update.Cron, update.Timezone, portfolioID, update.ReportingCurrency)
+	if parseErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_schedule"})
+		return
+	}
+	runtimeApplied := false
+	if h.scheduleRuntime != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		runtimeErr := h.scheduleRuntime.Reconfigure(ctx, newConfiguration)
+		cancel()
+		if runtimeErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "schedule_runtime_unavailable"})
+			return
+		}
+		runtimeApplied = true
+	}
+	schedule, err := h.database.SaveMarketRefreshScheduleWithFallback(r.Context(), portfolioID, current.ETag, update, requestAuth.actor, h.marketConfiguration)
+	if err != nil {
+		if runtimeApplied {
+			rollbackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = h.scheduleRuntime.Reconfigure(rollbackCtx, previousConfiguration)
+			cancel()
+		}
 		switch {
 		case errors.Is(err, store.ErrMarketRefreshScheduleConflict):
 			writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": "stale_schedule"})
@@ -190,21 +241,8 @@ func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Req
 		}
 		return
 	}
-	if h.scheduleRuntime != nil {
-		configuration, parseErr := config.ParseMarketRefreshConfig(schedule.Cron, schedule.Timezone, portfolioID, schedule.ReportingCurrency)
-		if parseErr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := h.scheduleRuntime.Reconfigure(ctx, configuration); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "schedule_runtime_unavailable"})
-			return
-		}
-	}
 	w.Header().Set("ETag", schedule.ETag)
-	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: true})
+	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: schedule.Enabled})
 }
 
 func (h *marketWorkflowEndpoint) writeScheduleError(w http.ResponseWriter, err error) {

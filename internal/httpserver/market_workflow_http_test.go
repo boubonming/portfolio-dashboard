@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,6 +26,10 @@ func marketHTTPFixture(t *testing.T) (http.Handler, *store.Store, *http.Cookie, 
 }
 
 func marketHTTPFixtureWithClients(t *testing.T, clients map[marketdata.Provider]marketdata.ProviderClient) (http.Handler, *store.Store, *http.Cookie, string) {
+	return marketHTTPFixtureWithClientsAndRuntime(t, clients, nil)
+}
+
+func marketHTTPFixtureWithClientsAndRuntime(t *testing.T, clients map[marketdata.Provider]marketdata.ProviderClient, runtime MarketRefreshScheduleRuntime) (http.Handler, *store.Store, *http.Cookie, string) {
 	t.Helper()
 	database, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "market-http.sqlite"))
 	if err != nil {
@@ -57,12 +62,8 @@ func marketHTTPFixtureWithClients(t *testing.T, clients map[marketdata.Provider]
 	configuration := appconfig.Config{ProviderKeys: providerKeys, Auth: auth.Config{
 		Username: "fixture-user", PasswordHash: string(passwordHash), SessionSecret: base64.StdEncoding.EncodeToString([]byte("market-http-session-secret-with-diversity-123")), PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour,
 	}}
-	var handler http.Handler
-	if clients == nil {
-		handler, err = NewHandlerWithConfig(database, configuration)
-	} else {
-		handler, err = NewHandlerWithConfigAndMarketClients(database, configuration, clients)
-	}
+	configuration.MarketRefresh = appconfig.MarketRefreshConfig{Cron: "0 5 * * *", Timezone: "Asia/Singapore", PortfolioID: "portfolio-market-http", ReportingCurrency: "USD"}
+	handler, err := NewHandlerWithConfigAndMarketClientsAndScheduleRuntime(database, configuration, clients, runtime)
 	if err != nil {
 		database.Close()
 		t.Fatal(err)
@@ -127,6 +128,51 @@ type countingDiscoveryProvider struct {
 func (p *countingDiscoveryProvider) Search(context.Context, string) ([]marketdata.DiscoveryCandidate, error) {
 	p.searchCalls++
 	return []marketdata.DiscoveryCandidate{{Identifier: "fixture-id", Symbol: "HTTP", Name: "Fixture"}}, nil
+}
+
+type recordingScheduleRuntime struct {
+	configurations []appconfig.MarketRefreshConfig
+	fail           bool
+}
+
+func (r *recordingScheduleRuntime) Reconfigure(_ context.Context, configuration appconfig.MarketRefreshConfig) error {
+	r.configurations = append(r.configurations, configuration)
+	if r.fail {
+		return errors.New("fixture runtime failure")
+	}
+	return nil
+}
+
+func scheduleResponseETag(t *testing.T, handler http.Handler, cookie *http.Cookie, csrf string) string {
+	t.Helper()
+	response := marketRequest(handler, cookie, csrf, http.MethodGet, "/api/v1/portfolios/portfolio-market-http/market-data/schedule", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("schedule GET status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		ETag      string `json:"etag"`
+		Effective bool   `json:"effective"`
+		Source    string `json:"source"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Source != "environment" || !payload.Effective || payload.ETag == "" {
+		t.Fatalf("unexpected environment schedule response=%s", response.Body.String())
+	}
+	return payload.ETag
+}
+
+func scheduleSaveRequest(handler http.Handler, cookie *http.Cookie, csrf, etag, body string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPut, "https://example.test/api/v1/portfolios/portfolio-market-http/market-data/schedule", strings.NewReader(body))
+	request.AddCookie(cookie)
+	request.Header.Set("Origin", "https://example.test")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(auth.CSRFHeaderName, csrf)
+	request.Header.Set("If-Match", etag)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
 }
 
 func TestMarketWorkflowHTTPAuthETagAndAtomicBatch(t *testing.T) {
@@ -382,5 +428,47 @@ func TestMarketWorkflowHTTPFakeProviderEndToEndAndRestartReplay(t *testing.T) {
 	replay := refresh(restartedHandler, loginResponse.Result().Cookies()[0], loginPayload.CSRFToken)
 	if replay.Code != http.StatusOK || replay.Body.String() != first.Body.String() || quoteProvider.quoteCall != 1 || fxProvider.fxCall != 1 {
 		t.Fatalf("restart replay status=%d calls quote=%d fx=%d body=%s first=%s", replay.Code, quoteProvider.quoteCall, fxProvider.fxCall, replay.Body.String(), first.Body.String())
+	}
+}
+
+func TestMarketWorkflowSchedulePrepareApplyCommitRollback(t *testing.T) {
+	runtime := &recordingScheduleRuntime{}
+	handler, database, cookie, csrf := marketHTTPFixtureWithClientsAndRuntime(t, nil, runtime)
+	defer database.Close()
+	etag := scheduleResponseETag(t, handler, cookie, csrf)
+	update := `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore","reporting_currency":""}`
+
+	runtime.fail = true
+	runtimeFailure := scheduleSaveRequest(handler, cookie, csrf, etag, update)
+	if runtimeFailure.Code != http.StatusInternalServerError || !strings.Contains(runtimeFailure.Body.String(), "schedule_runtime_unavailable") {
+		t.Fatalf("runtime failure status=%d body=%s", runtimeFailure.Code, runtimeFailure.Body.String())
+	}
+
+	if _, err := database.DB.Exec(`CREATE TRIGGER fail_schedule_audit BEFORE INSERT ON audit_events WHEN NEW.action='market.refresh.schedule.updated' BEGIN SELECT RAISE(ABORT, 'fixture schedule audit failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	runtime.fail = false
+	commitFailure := scheduleSaveRequest(handler, cookie, csrf, etag, update)
+	if commitFailure.Code != http.StatusInternalServerError || !strings.Contains(commitFailure.Body.String(), "internal_error") {
+		t.Fatalf("commit failure status=%d body=%s", commitFailure.Code, commitFailure.Body.String())
+	}
+	if len(runtime.configurations) != 3 || runtime.configurations[0].Cron != "0 6 * * *" || runtime.configurations[1].Cron != "0 6 * * *" || runtime.configurations[2].Cron != "0 5 * * *" {
+		t.Fatalf("prepare/apply/rollback runtime sequence=%+v", runtime.configurations)
+	}
+	var schedules, audits, activities int
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM market_refresh_schedules`).Scan(&schedules); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action='market.refresh.schedule.updated'`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM activity_events WHERE action='market.refresh.schedule.updated'`).Scan(&activities); err != nil {
+		t.Fatal(err)
+	}
+	if schedules != 0 || audits != 0 || activities != 0 {
+		t.Fatalf("failed schedule mutation left durable effects: schedules=%d audits=%d activities=%d", schedules, audits, activities)
+	}
+	if restored := scheduleResponseETag(t, handler, cookie, csrf); restored != etag {
+		t.Fatalf("failed schedule changed ETag from %q to %q", etag, restored)
 	}
 }

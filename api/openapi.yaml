@@ -565,7 +565,7 @@ paths:
         '401': { $ref: '#/components/responses/UnauthorizedBearer' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { description: Portfolio not found }
-        '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGetPut' }
     put:
       summary: Save the portfolio market-refresh schedule
       description: Browser session plus same-origin CSRF and If-Match are required. The path portfolio is authoritative; invalid, stale, or machine-authenticated requests do not mutate schedule or audit state.
@@ -587,7 +587,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { description: Portfolio not found }
         '412': { description: Schedule changed; reload before saving }
-        '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGetPut' }
 
   /api/v1/portfolios/{portfolioId}/market-data/discover:
     post:
@@ -755,6 +755,17 @@ components:
         Vary: { $ref: '#/components/headers/PrivateVary' }
         X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
       content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
+    MethodNotAllowedGetPut:
+      description: Known schedule path with an unsupported method.
+      headers:
+        Allow:
+          description: Exact canonical methods for the schedule path.
+          schema: { type: string, enum: ['GET, PUT'] }
+          example: 'GET, PUT'
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+        Vary: { $ref: '#/components/headers/PrivateVary' }
+        X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
+      content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
     MethodNotAllowedGetPost:
       description: Known reviews collection path with an unsupported method.
       headers:
@@ -890,12 +901,12 @@ components:
         enabled: { type: boolean }
         cron: { type: string, maxLength: 256, description: Empty disables the schedule; otherwise strict standard five-field cron. }
         timezone: { type: string, minLength: 1, maxLength: 64, description: IANA timezone. }
-        reporting_currency: { type: string, pattern: '^[A-Z]{3}$', description: Blank means inherit. }
+        reporting_currency: { type: string, pattern: '^$|^[A-Z]{3}$', description: Blank means inherit. }
         revision: { type: integer, minimum: 0, maximum: 1000000 }
         updated_at: { $ref: '#/components/schemas/CanonicalDateTime' }
         source: { type: string, enum: [environment, saved] }
         etag: { type: string, pattern: '^"[a-f0-9]{64}"$' }
-        effective: { type: boolean }
+        effective: { type: boolean, description: Whether the configured enabled schedule is active in the runtime scheduler; source identifies origin and does not determine effectiveness. }
     MarketRefreshScheduleUpdate:
       type: object
       additionalProperties: false

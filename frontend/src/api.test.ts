@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, apiFetch, getMarketDataSetup, refreshMarketData, type MarketDataSetup } from './api'
+import { APIError, apiFetch, getMarketDataSetup, getMarketRefreshSchedule, refreshMarketData, saveMarketRefreshSchedule, type MarketDataSetup } from './api'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -28,6 +28,19 @@ describe('typed API helper', () => {
     await apiFetch('/api/v1/export.csv', { headers: { Accept: 'text/csv' } })
 
     expect((fetchMock.mock.calls[0][1]?.headers as Headers).get('Accept')).toBe('text/csv')
+  })
+
+  it('accepts enabled environment fallbacks and disabled saved schedules while preserving mutation headers', async () => {
+    const etag = `"${'a'.repeat(64)}"`
+    const environment = { portfolio_id: 'portfolio-a', enabled: true, cron: '0 5 * * *', timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, source: 'environment', etag, effective: true }
+    const savedDisabled = { portfolio_id: 'portfolio-a', enabled: false, cron: '', timezone: 'Asia/Singapore', reporting_currency: '', revision: 1, updated_at: '2026-01-01T00:00:00.000000000Z', source: 'saved', etag: `"${'b'.repeat(64)}"`, effective: false }
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => init?.method === 'PUT' ? savedDisabled : environment } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(getMarketRefreshSchedule('portfolio-a')).resolves.toMatchObject({ source: 'environment', effective: true })
+    await expect(saveMarketRefreshSchedule('portfolio-a', { enabled: false, cron: '', timezone: 'Asia/Singapore', reporting_currency: '' }, etag, 'csrf-token')).resolves.toMatchObject({ source: 'saved', enabled: false, effective: false })
+    const request = fetchMock.mock.calls[1][1] as RequestInit
+    expect(new Headers(request.headers).get('If-Match')).toBe(etag)
+    expect(new Headers(request.headers).get('X-CSRF-Token')).toBe('csrf-token')
   })
 
   it('accepts an empty mapping array in a market-data setup response', async () => {
