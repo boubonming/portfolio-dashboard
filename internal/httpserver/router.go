@@ -139,7 +139,7 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator, config
 // validation and disclose a route shape.
 func privatePathGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) || (holdingNamespacePath(r.URL.EscapedPath()) && unsafeHoldingPath(r.URL.EscapedPath())) {
+		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) || (holdingNamespacePath(r.URL.EscapedPath()) && unsafeHoldingPath(r.URL.EscapedPath())) || (marketNamespacePath(r.URL.EscapedPath()) && unsafeMarketPath(r.URL.EscapedPath())) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Vary", "Cookie")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -148,6 +148,36 @@ func privatePathGuard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func marketNamespacePath(escapedPath string) bool {
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		decodedPath = escapedPath
+	}
+	for _, candidate := range []string{escapedPath, decodedPath, path.Clean(escapedPath), path.Clean(decodedPath)} {
+		parts := strings.Split(strings.TrimPrefix(candidate, "/"), "/")
+		if len(parts) >= 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[4] == "market-data" {
+			return true
+		}
+	}
+	return false
+}
+
+func unsafeMarketPath(escapedPath string) bool {
+	if strings.Contains(escapedPath, "%") || escapedPath != path.Clean(escapedPath) || strings.HasSuffix(escapedPath, "/") {
+		return true
+	}
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil || decodedPath != escapedPath {
+		return true
+	}
+	for _, part := range strings.Split(strings.TrimPrefix(escapedPath, "/"), "/") {
+		if part == "." || part == ".." || part == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func snapshotNamespacePath(escapedPath string) bool {

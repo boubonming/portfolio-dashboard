@@ -38,6 +38,7 @@ END;
 CREATE TRIGGER market_refresh_schedule_audit_no_update
 BEFORE UPDATE ON audit_events
 WHEN OLD.action = 'market.refresh.schedule.updated'
+  OR NEW.action = 'market.refresh.schedule.updated'
 BEGIN
     SELECT RAISE(ABORT, 'market refresh schedule audits are append-only');
 END;
@@ -61,6 +62,7 @@ END;
 CREATE TRIGGER market_refresh_schedule_audit_owner_no_update
 BEFORE UPDATE ON audit_event_portfolios
 WHEN EXISTS (SELECT 1 FROM audit_events WHERE id = OLD.audit_event_id AND action = 'market.refresh.schedule.updated')
+   OR EXISTS (SELECT 1 FROM audit_events WHERE id = NEW.audit_event_id AND action = 'market.refresh.schedule.updated')
 BEGIN
     SELECT RAISE(ABORT, 'market refresh schedule audit ownership is append-only');
 END;
