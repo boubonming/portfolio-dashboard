@@ -32,22 +32,29 @@ type Scheduler struct {
 	job           jobFunc
 	now           func() time.Time
 
-	mu      sync.Mutex
-	running bool
-	cron    *cron.Cron
-	cancel  context.CancelFunc
+	mu            sync.Mutex
+	running       bool
+	runningDone   chan struct{}
+	cron          *cron.Cron
+	cancel        context.CancelFunc
+	reconfigureMu sync.Mutex
 }
 
 func New(service *marketrefresh.Service, configuration config.MarketRefreshConfig) *Scheduler {
-	return NewWithJob(configuration, func(ctx context.Context, fireAt time.Time) (domain.MarketRefreshResult, bool, error) {
+	scheduler := NewWithJob(configuration, nil)
+	scheduler.job = func(ctx context.Context, fireAt time.Time) (domain.MarketRefreshResult, bool, error) {
+		scheduler.mu.Lock()
+		current := scheduler.configuration
+		scheduler.mu.Unlock()
 		return service.Refresh(ctx, marketrefresh.Request{
-			PortfolioID:       configuration.PortfolioID,
-			ReportingCurrency: configuration.ReportingCurrency,
-			IdempotencyKey:    ScheduledIdempotencyKey(configuration.PortfolioID, fireAt),
+			PortfolioID:       current.PortfolioID,
+			ReportingCurrency: current.ReportingCurrency,
+			IdempotencyKey:    ScheduledIdempotencyKey(current.PortfolioID, fireAt),
 			Actor:             schedulerActor(),
 			AsOf:              fireAt.UTC(),
 		})
-	})
+	}
+	return scheduler
 }
 
 func NewWithJob(configuration config.MarketRefreshConfig, job func(context.Context, time.Time) (domain.MarketRefreshResult, bool, error)) *Scheduler {
@@ -76,7 +83,14 @@ func ScheduledIdempotencyKey(portfolioID string, fireAt time.Time) string {
 
 func SchedulerActor() (category, id string) { return schedulerActorCategory, schedulerActorID }
 
-func (s *Scheduler) Enabled() bool { return s != nil && s.configuration.Enabled() }
+func (s *Scheduler) Enabled() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.configuration.Enabled()
+}
 
 // Start never invokes the job immediately. A disabled schedule creates no
 // cron object and no goroutine.
@@ -84,7 +98,10 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	if s == nil || !s.Enabled() {
 		return nil
 	}
-	if s.configuration.Location == nil {
+	s.mu.Lock()
+	configuration := s.configuration
+	s.mu.Unlock()
+	if configuration.Location == nil {
 		return errors.New("market refresh scheduler timezone is not initialized")
 	}
 	s.mu.Lock()
@@ -94,11 +111,11 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	c := cron.New(
-		cron.WithLocation(s.configuration.Location),
+		cron.WithLocation(configuration.Location),
 		cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)),
 	)
-	if _, err := c.AddFunc(s.configuration.Cron, func() {
-		fireAt := s.now().In(s.configuration.Location).Truncate(time.Minute)
+	if _, err := c.AddFunc(configuration.Cron, func() {
+		fireAt := s.now().In(configuration.Location).Truncate(time.Minute)
 		result, _, err := s.RunSlot(runCtx, fireAt)
 		if (err != nil && !errors.Is(err, ErrOverlapSkipped) && !errors.Is(err, context.Canceled)) || (err == nil && !result.Complete) {
 			// Do not print provider or database error text: it may contain
@@ -120,20 +137,58 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 		return nil
 	}
 	s.mu.Lock()
-	c, cancel := s.cron, s.cancel
+	c, cancel, runningDone := s.cron, s.cancel, s.runningDone
 	s.cron, s.cancel = nil, nil
 	s.mu.Unlock()
 	if c == nil {
-		return nil
+		if runningDone == nil {
+			return nil
+		}
 	}
-	cancel()
-	stopped := c.Stop()
+	if cancel != nil {
+		cancel()
+	}
+	if c == nil {
+		select {
+		case <-runningDone:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	var stopped <-chan struct{}
+	stopped = c.Stop().Done()
 	select {
-	case <-stopped.Done():
+	case <-stopped:
+		if runningDone != nil {
+			select {
+			case <-runningDone:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Reconfigure applies a new setting without an immediate run. It serializes
+// stop/start so an active invocation is fully quiescent before a replacement
+// schedule is installed.
+func (s *Scheduler) Reconfigure(ctx context.Context, configuration config.MarketRefreshConfig) error {
+	if s == nil {
+		return errors.New("market refresh scheduler is nil")
+	}
+	s.reconfigureMu.Lock()
+	defer s.reconfigureMu.Unlock()
+	if err := s.Stop(ctx); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.configuration = configuration
+	s.mu.Unlock()
+	return s.Start(ctx)
 }
 
 // RunSlot is an injectable boundary for deterministic tests and operational
@@ -148,10 +203,14 @@ func (s *Scheduler) RunSlot(ctx context.Context, fireAt time.Time) (domain.Marke
 		return domain.MarketRefreshResult{}, false, ErrOverlapSkipped
 	}
 	s.running = true
+	s.runningDone = make(chan struct{})
+	runningDone := s.runningDone
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		s.running = false
+		close(runningDone)
+		s.runningDone = nil
 		s.mu.Unlock()
 	}()
 	if err := ctx.Err(); err != nil {
@@ -160,5 +219,8 @@ func (s *Scheduler) RunSlot(ctx context.Context, fireAt time.Time) (domain.Marke
 	if s.job == nil {
 		return domain.MarketRefreshResult{}, false, errors.New("market refresh scheduler job is not configured")
 	}
-	return s.job(ctx, fireAt.In(s.configuration.Location).Truncate(time.Minute))
+	s.mu.Lock()
+	location := s.configuration.Location
+	s.mu.Unlock()
+	return s.job(ctx, fireAt.In(location).Truncate(time.Minute))
 }

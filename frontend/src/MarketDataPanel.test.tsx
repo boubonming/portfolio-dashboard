@@ -275,11 +275,13 @@ describe('MarketDataPanel', () => {
       return new Promise<Response>(() => undefined)
     })
     const rendered = renderPanel(fetchMock)
-    await waitFor(() => expect(signals).toHaveLength(1))
+    await waitFor(() => expect(signals).toHaveLength(2))
     rendered.rerender(<MarketDataPanel portfolioID="portfolio-b" reportingCurrency="MYR" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
     await waitFor(() => expect(signals[0].aborted).toBe(true))
     rendered.unmount()
     expect(signals[1].aborted).toBe(true)
+    expect(signals[2].aborted).toBe(true)
+    expect(signals[3].aborted).toBe(true)
   })
 
   it('tears down the active workflow synchronously on session expiry', async () => {

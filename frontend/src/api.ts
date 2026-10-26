@@ -101,6 +101,7 @@ export type ProviderReadiness = { name: string; configured: boolean; public: boo
 export type MarketMapping = { provider: string; provider_symbol: string; quote_currency: string; active_from: string; provenance?: string }
 export type MarketInstrument = { instrument_id: string; symbol: string; description?: string; currency: string; mappings: MarketMapping[] }
 export type MarketDataSetup = { portfolio_id: string; etag: string; providers: ProviderReadiness[]; instruments: MarketInstrument[] }
+export type MarketRefreshSchedule = { portfolio_id: string; enabled: boolean; cron: string; timezone: string; reporting_currency: string; revision: number; updated_at?: string; source: 'environment' | 'saved'; etag: string; effective: boolean }
 export type MappingBatchItem = { instrument_id: string; provider: string; provider_symbol: string; quote_currency: string; provenance: string; confirm_unverified: boolean }
 export type QuoteObservation = { id: string; instrument_id: string; symbol: string; currency: string; source: string }
 export type FXObservation = { id: string; base_currency: string; quote_currency: string; source: string }
@@ -230,6 +231,26 @@ function decodeMarketSetup(value: unknown): MarketDataSetup {
     return { instrument_id: id, symbol: stringField(instrument.symbol, 'symbol', 'market-data instrument', 128), ...(instrument.description === undefined ? {} : { description: stringField(instrument.description, 'description', 'market-data instrument') }), currency, mappings }
   })
   return { portfolio_id: portfolioID, etag, providers, instruments }
+}
+
+function decodeMarketRefreshSchedule(value: unknown): MarketRefreshSchedule {
+  const body = objectResponse(value, 'market refresh schedule')
+  exactKeys(body, ['portfolio_id', 'enabled', 'cron', 'timezone', 'reporting_currency', 'revision', 'source', 'etag', 'effective'], ['updated_at'], 'market refresh schedule')
+  const source = stringField(body.source, 'source', 'market refresh schedule', 16)
+  if (source !== 'environment' && source !== 'saved') throw new APIError(200, 'Invalid market refresh schedule response: source.')
+  if (typeof body.enabled !== 'boolean') throw new APIError(200, 'Invalid market refresh schedule response: enabled.')
+  const cron = stringField(body.cron, 'cron', 'market refresh schedule', 256)
+  if ((cron && cron.trim() !== cron) || (cron && cron.split(/\s+/).length !== 5)) throw new APIError(200, 'Invalid market refresh schedule response: cron.')
+  const timezone = stringField(body.timezone, 'timezone', 'market refresh schedule', 64)
+  if (!/^[A-Za-z][A-Za-z0-9_+./-]{0,63}$/.test(timezone)) throw new APIError(200, 'Invalid market refresh schedule response: timezone.')
+  const currency = body.reporting_currency === '' ? '' : currencyCode(body.reporting_currency, 'reporting_currency', 'market refresh schedule')
+  const revision = boundedInteger(body.revision, 'revision', 'market refresh schedule')
+  if (typeof body.effective !== 'boolean' || body.effective !== (source === 'saved')) throw new APIError(200, 'Invalid market refresh schedule response: effective.')
+  const etag = stringField(body.etag, 'etag', 'market refresh schedule', 256)
+  if (!/^\"[a-f0-9]{64}\"$/.test(etag)) throw new APIError(200, 'Invalid market refresh schedule response: etag.')
+  const updatedAt = body.updated_at === undefined ? undefined : canonicalTime(body.updated_at, 'updated_at', 'market refresh schedule')
+  if ((source === 'saved' && updatedAt === undefined) || (source === 'environment' && updatedAt !== undefined)) throw new APIError(200, 'Invalid market refresh schedule response: updated_at.')
+  return { portfolio_id: canonicalID(body.portfolio_id, 'portfolio_id', 'market refresh schedule'), enabled: body.enabled, cron, timezone, reporting_currency: currency, revision, ...(updatedAt === undefined ? {} : { updated_at: updatedAt }), source: source as MarketRefreshSchedule['source'], etag, effective: body.effective }
 }
 
 function decodeMappingResult(value: unknown): MappingBatchResult {
@@ -404,6 +425,21 @@ function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDat
 export async function getMarketDataSetup(portfolioID: string, signal?: AbortSignal): Promise<MarketDataSetup> {
   const result = decodeMarketSetup(await jsonResponse<unknown>(await apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioID)}/market-data`, { signal })))
   if (result.portfolio_id !== portfolioID) throw new APIError(200, 'Invalid market-data setup response: stale portfolio scope.')
+  return result
+}
+
+export async function getMarketRefreshSchedule(portfolioID: string, signal?: AbortSignal): Promise<MarketRefreshSchedule> {
+  const result = decodeMarketRefreshSchedule(await jsonResponse<unknown>(await apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioID)}/market-data/schedule`, { signal })))
+  if (result.portfolio_id !== portfolioID) throw new APIError(200, 'Invalid market refresh schedule response: stale portfolio scope.')
+  return result
+}
+
+export async function saveMarketRefreshSchedule(portfolioID: string, schedule: Pick<MarketRefreshSchedule, 'enabled' | 'cron' | 'timezone' | 'reporting_currency'>, etag: string, csrfToken?: string, signal?: AbortSignal): Promise<MarketRefreshSchedule> {
+  const response = await apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioID)}/market-data/schedule`, {
+    method: 'PUT', csrfToken, signal, headers: { 'Content-Type': 'application/json', 'If-Match': etag }, body: JSON.stringify(schedule),
+  })
+  const result = decodeMarketRefreshSchedule(await jsonResponse<unknown>(response))
+  if (result.portfolio_id !== portfolioID || result.source !== 'saved' || !result.effective) throw new APIError(200, 'Invalid market refresh schedule response: saved scope.')
   return result
 }
 

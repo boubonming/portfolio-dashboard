@@ -51,7 +51,7 @@ func NewHandlerWithAuth(database *store.Store, config auth.Config) (http.Handler
 // server-side provider clients. The legacy constructor above remains useful
 // to callers that only need authenticated read routes.
 func NewHandlerWithConfig(database *store.Store, configuration appconfig.Config) (http.Handler, error) {
-	return newHandlerWithMarketClients(database, configuration, nil)
+	return newHandlerWithMarketClients(database, configuration, nil, nil)
 }
 
 // NewHandlerWithConfigAndMarketClients is the same authenticated production
@@ -59,10 +59,14 @@ func NewHandlerWithConfig(database *store.Store, configuration appconfig.Config)
 // constructs credential-backed adapters; tests can supply local deterministic
 // clients without exposing provider credentials or making live requests.
 func NewHandlerWithConfigAndMarketClients(database *store.Store, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient) (http.Handler, error) {
-	return newHandlerWithMarketClients(database, configuration, clients)
+	return newHandlerWithMarketClients(database, configuration, clients, nil)
 }
 
-func newHandlerWithMarketClients(database *store.Store, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient) (http.Handler, error) {
+func NewHandlerWithConfigAndMarketClientsAndScheduleRuntime(database *store.Store, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient, runtime MarketRefreshScheduleRuntime) (http.Handler, error) {
+	return newHandlerWithMarketClients(database, configuration, clients, runtime)
+}
+
+func newHandlerWithMarketClients(database *store.Store, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient, runtime MarketRefreshScheduleRuntime) (http.Handler, error) {
 	authenticator, err := auth.New(configuration.Auth)
 	if err != nil {
 		return nil, err
@@ -78,10 +82,10 @@ func newHandlerWithMarketClients(database *store.Store, configuration appconfig.
 			return nil, err
 		}
 	}
-	return newHandler(database, authenticator, configuration, clients)
+	return newHandler(database, authenticator, configuration, clients, runtime)
 }
 
-func newHandler(database *store.Store, authenticator *auth.Authenticator, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient) (http.Handler, error) {
+func newHandler(database *store.Store, authenticator *auth.Authenticator, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient, runtimes ...MarketRefreshScheduleRuntime) (http.Handler, error) {
 	files, err := web.Files()
 	if err != nil {
 		return nil, err
@@ -114,7 +118,7 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator, config
 		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings/{holdingId}", mutations)
 		overview := noStorePrivate(portfolioOverviewRoutes(database, authenticator))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/overview", overview)
-		market := noStorePrivate(marketWorkflowRoutes(database, authenticator, newMarketWorkflowEndpoint(database, configuration, authenticator, clients)))
+		market := noStorePrivate(marketWorkflowRoutes(database, authenticator, newMarketWorkflowEndpoint(database, configuration, authenticator, clients, runtimes...)))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/market-data", market)
 		mux.Handle("/api/v1/portfolios/{portfolioId}/market-data/", market)
 	}

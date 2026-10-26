@@ -2,11 +2,13 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/auth"
 	"github.com/boubonming/portfolio-dashboard/internal/config"
@@ -17,18 +19,24 @@ import (
 )
 
 type marketWorkflowEndpoint struct {
-	database  *store.Store
-	clients   map[marketdata.Provider]marketdata.ProviderClient
-	readiness []domain.ProviderReadiness
-	auth      *auth.Authenticator
-	workflow  *marketrefresh.Service
+	database            *store.Store
+	clients             map[marketdata.Provider]marketdata.ProviderClient
+	readiness           []domain.ProviderReadiness
+	auth                *auth.Authenticator
+	workflow            *marketrefresh.Service
+	marketConfiguration config.MarketRefreshConfig
+	scheduleRuntime     MarketRefreshScheduleRuntime
+}
+
+type MarketRefreshScheduleRuntime interface {
+	Reconfigure(context.Context, config.MarketRefreshConfig) error
 }
 
 func (h *marketWorkflowEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.serveHTTP(w, r)
 }
 
-func newMarketWorkflowEndpoint(database *store.Store, cfg config.Config, authenticator *auth.Authenticator, injected map[marketdata.Provider]marketdata.ProviderClient) *marketWorkflowEndpoint {
+func newMarketWorkflowEndpoint(database *store.Store, cfg config.Config, authenticator *auth.Authenticator, injected map[marketdata.Provider]marketdata.ProviderClient, runtimes ...MarketRefreshScheduleRuntime) *marketWorkflowEndpoint {
 	keys := map[marketdata.Provider]bool{
 		marketdata.ProviderFinnhub:           cfg.ProviderKeys.Finnhub != "",
 		marketdata.ProviderAlphaVantage:      cfg.ProviderKeys.AlphaVantage != "",
@@ -44,12 +52,18 @@ func newMarketWorkflowEndpoint(database *store.Store, cfg config.Config, authent
 		}
 	}
 	readiness := store.MarketProviders(keys)
+	var scheduleRuntime MarketRefreshScheduleRuntime
+	if len(runtimes) > 0 {
+		scheduleRuntime = runtimes[0]
+	}
 	return &marketWorkflowEndpoint{
-		database:  database,
-		clients:   clients,
-		readiness: readiness,
-		auth:      authenticator,
-		workflow:  marketrefresh.New(database, clients, readiness),
+		database:            database,
+		clients:             clients,
+		readiness:           readiness,
+		auth:                authenticator,
+		workflow:            marketrefresh.New(database, clients, readiness),
+		marketConfiguration: cfg.MarketRefresh,
+		scheduleRuntime:     scheduleRuntime,
 	}
 }
 
@@ -74,6 +88,16 @@ func (h *marketWorkflowEndpoint) serveHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	switch parts[5] {
+	case "schedule":
+		switch r.Method {
+		case http.MethodGet:
+			h.schedule(w, r, portfolioID)
+		case http.MethodPut:
+			h.saveSchedule(w, r, portfolioID)
+		default:
+			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPut)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		}
 	case "discover":
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -98,6 +122,97 @@ func (h *marketWorkflowEndpoint) serveHTTP(w http.ResponseWriter, r *http.Reques
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
 	}
+}
+
+type marketRefreshScheduleResponse struct {
+	store.MarketRefreshSchedule
+	Effective bool `json:"effective"`
+}
+
+func (h *marketWorkflowEndpoint) schedule(w http.ResponseWriter, r *http.Request, portfolioID string) {
+	requestAuth, ok := marketWorkflowAuthFromContext(r.Context())
+	if !ok || !requestAuth.browser {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	schedule, err := h.database.MarketRefreshSchedule(r.Context(), portfolioID, h.marketConfiguration)
+	if err != nil {
+		h.writeScheduleError(w, err)
+		return
+	}
+	w.Header().Set("ETag", schedule.ETag)
+	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: schedule.Source == "saved"})
+}
+
+func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Request, portfolioID string) {
+	requestAuth, ok := marketWorkflowAuthFromContext(r.Context())
+	if !ok || !requestAuth.browser {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	body, err := readJSONBody(w, r, 16<<10)
+	if err != nil || hasDuplicateJSONKeys(body) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_schedule"})
+		return
+	}
+	var request struct {
+		Enabled           *bool   `json:"enabled"`
+		Cron              *string `json:"cron"`
+		Timezone          *string `json:"timezone"`
+		ReportingCurrency *string `json:"reporting_currency"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_schedule"})
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF || request.Enabled == nil || request.Cron == nil || request.Timezone == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_schedule"})
+		return
+	}
+	currency := ""
+	if request.ReportingCurrency != nil {
+		currency = *request.ReportingCurrency
+	}
+	schedule, err := h.database.SaveMarketRefreshScheduleWithFallback(r.Context(), portfolioID, r.Header.Get("If-Match"), store.MarketRefreshScheduleUpdate{Enabled: *request.Enabled, Cron: *request.Cron, Timezone: *request.Timezone, ReportingCurrency: currency}, requestAuth.actor, h.marketConfiguration)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrMarketRefreshScheduleConflict):
+			writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": "stale_schedule"})
+		case errors.Is(err, store.ErrPortfolioNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "portfolio_not_found"})
+		case errors.Is(err, store.ErrInvalidMarketRefreshSchedule):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_schedule"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+		}
+		return
+	}
+	if h.scheduleRuntime != nil {
+		configuration, parseErr := config.ParseMarketRefreshConfig(schedule.Cron, schedule.Timezone, portfolioID, schedule.ReportingCurrency)
+		if parseErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := h.scheduleRuntime.Reconfigure(ctx, configuration); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "schedule_runtime_unavailable"})
+			return
+		}
+	}
+	w.Header().Set("ETag", schedule.ETag)
+	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: true})
+}
+
+func (h *marketWorkflowEndpoint) writeScheduleError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrPortfolioNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "portfolio_not_found"})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error"})
 }
 
 func (h *marketWorkflowEndpoint) setup(w http.ResponseWriter, r *http.Request, portfolioID string) {

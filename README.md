@@ -45,13 +45,17 @@ Configuration is environment-driven. `PORTFOLIO_REPORTING_CURRENCY` defaults to 
 ### Optional scheduled market refresh
 
 The in-process scheduler is disabled when `PORTFOLIO_MARKET_REFRESH_CRON` is
-blank. To enable a strict standard five-field cron expression, set the IANA
-timezone (default `Asia/Singapore`), bounded portfolio ID (default
+blank. These environment values are bootstrap defaults only: once a portfolio
+schedule is saved in the authenticated Market data UI, the saved row wins over
+environment values (including a saved disabled setting) across restarts. To
+bootstrap a strict standard five-field cron expression, set the IANA timezone
+(default `Asia/Singapore`), bounded portfolio ID (default
 `portfolio-default`), and optionally an exact uppercase reporting currency.
-For example, `PORTFOLIO_MARKET_REFRESH_CRON='0 5 * * 1-5'` runs on Singapore
-weekday mornings. It does not run at startup or backfill missed slots. Each
-slot uses the same durable refresh, immutable snapshot, audit, Activity,
-missing-mapping, and replay workflow as the browser and machine endpoints.
+For example, `PORTFOLIO_MARKET_REFRESH_CRON='0 5 * * *'` runs daily at 05:00 in
+Asia/Singapore; `0 5 * * 1-5` is the weekday variant. It does not run at
+startup or backfill missed slots. Each slot uses the same durable refresh,
+immutable snapshot, audit, Activity, missing-mapping, and replay workflow as
+the browser and machine endpoints.
 Scheduled work is attributed as `scheduler` / `market-refresh-scheduler`,
 does not use or expose the Hermes bearer, and is stopped with the server.
 Invalid enabled configuration fails before HTTP serving; provider failures are
