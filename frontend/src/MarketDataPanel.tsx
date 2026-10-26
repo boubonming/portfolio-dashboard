@@ -79,6 +79,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
     }).catch((reason: unknown) => {
       if (controller.signal.aborted || generation !== generationRef.current) return
       if (reason instanceof APIError && reason.status === 401) { generationRef.current += 1; mutationControllerRef.current?.abort(); scheduleMutationRef.current?.abort(); unauthorizedRef.current(); return }
+      if (reason instanceof APIError && reason.status === 503) { setScheduleError('Automatic refresh is inactive because runtime recovery is unresolved. Retry or reconcile the schedule with the operator before relying on it.'); return }
       setScheduleError(reason instanceof Error ? reason.message : 'Unable to load the refresh schedule')
     })
     getMarketDataSetup(portfolioID, controller.signal).then((next) => {
@@ -152,6 +153,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
   }
   const saveSchedule = async () => {
     if (!schedule || scheduleSaving) return
+    if (schedule.degraded) { setScheduleError('Automatic refresh is inactive while runtime recovery is unresolved. Retry or reconcile the schedule before saving settings.'); return }
     if (!validScheduleTime(scheduleTime) && schedulePreset !== 'custom') { setScheduleError('Enter a local time between 00:00 and 23:59.'); return }
     if (!/^[A-Za-z][A-Za-z0-9_+./-]{0,63}$/.test(scheduleTimezone)) { setScheduleError('Enter a valid bounded IANA timezone.'); return }
     if (scheduleCurrency !== '' && !/^[A-Z]{3}$/.test(scheduleCurrency)) { setScheduleError('Reporting currency must be blank or three uppercase letters.'); return }
@@ -167,7 +169,9 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
     } catch (reason) {
       if (controller.signal.aborted || generation !== generationRef.current) return
       if (reason instanceof APIError && reason.status === 401) { generationRef.current += 1; unauthorizedRef.current(); return }
-      if (reason instanceof APIError && reason.status === 412) { setScheduleError('This schedule changed in another window. Reload before saving.'); setScheduleMessage('') } else setScheduleError(reason instanceof Error ? reason.message : 'Unable to save the schedule')
+      if (reason instanceof APIError && reason.status === 412) { setScheduleError('This schedule changed in another window. Reloading the latest settings before saving again.'); setScheduleMessage(''); onReload(); load() }
+      else if (reason instanceof APIError && reason.status === 503) { setScheduleError('Automatic refresh is inactive because runtime recovery is unresolved. Retry or reconcile the schedule with the operator before saving.'); setScheduleMessage('') }
+      else setScheduleError(reason instanceof Error ? reason.message : 'Unable to save the schedule')
     } finally {
       if (generation === generationRef.current) setScheduleSaving(false)
       if (scheduleMutationRef.current === controller) scheduleMutationRef.current = null
@@ -215,16 +219,18 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
     <section className="schedule-card" aria-labelledby="market-refresh-schedule-title">
       <div className="section-heading"><div><span className="eyebrow">Durable automation</span><h3 id="market-refresh-schedule-title">Market refresh schedule</h3></div><span className="muted">Portfolio: {portfolioID}</span></div>
       {!schedule && <p role="status" aria-live="polite">Loading schedule…</p>}
+      {!schedule && scheduleError && <p className="notice error" role="alert" aria-live="assertive">{scheduleError} <button type="button" onClick={load}>Reload</button></p>}
       {schedule && <>
-        <label><input type="checkbox" checked={scheduleEnabled} onChange={(event) => setScheduleEnabled(event.target.checked)} /> Enable scheduled refreshes</label>
+        {schedule.degraded && <p id="market-refresh-schedule-status" className="notice error" role="alert" aria-live="assertive">Automatic refresh is inactive: the scheduler is degraded. Retry or reconcile the schedule with the operator before relying on these settings.</p>}
+        <label><input type="checkbox" checked={scheduleEnabled} disabled={schedule.degraded || scheduleSaving} onChange={(event) => setScheduleEnabled(event.target.checked)} aria-describedby={schedule.degraded ? 'market-refresh-schedule-status' : undefined} /> Enable scheduled refreshes</label>
         <div className="schedule-grid">
-          <label>Preset<select value={schedulePreset} onChange={(event) => changeSchedulePreset(event.target.value as SchedulePreset)}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="custom">Custom cron</option></select></label>
-          {schedulePreset !== 'custom' ? <label>Local time<input aria-label="Schedule local time" type="time" value={scheduleTime} onChange={(event) => changeScheduleTime(event.target.value)} /></label> : <label>Five-field cron<input aria-label="Custom five-field cron" value={scheduleCron} onChange={(event) => setScheduleCron(event.target.value)} placeholder="0 5 * * *" /></label>}
-          <label>IANA timezone<input aria-label="Schedule timezone" value={scheduleTimezone} maxLength={64} onChange={(event) => setScheduleTimezone(event.target.value)} /></label>
-          <label>Reporting currency (optional)<input aria-label="Reporting currency" value={scheduleCurrency} maxLength={3} onChange={(event) => setScheduleCurrency(event.target.value.toUpperCase())} placeholder="Inherit" /></label>
+          <label>Preset<select value={schedulePreset} disabled={schedule.degraded || scheduleSaving} onChange={(event) => changeSchedulePreset(event.target.value as SchedulePreset)}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="custom">Custom cron</option></select></label>
+          {schedulePreset !== 'custom' ? <label>Local time<input aria-label="Schedule local time" type="time" value={scheduleTime} disabled={schedule.degraded || scheduleSaving} onChange={(event) => changeScheduleTime(event.target.value)} /></label> : <label>Five-field cron<input aria-label="Custom five-field cron" value={scheduleCron} disabled={schedule.degraded || scheduleSaving} onChange={(event) => setScheduleCron(event.target.value)} placeholder="0 5 * * *" /></label>}
+          <label>IANA timezone<input aria-label="Schedule timezone" value={scheduleTimezone} disabled={schedule.degraded || scheduleSaving} maxLength={64} onChange={(event) => setScheduleTimezone(event.target.value)} /></label>
+          <label>Reporting currency (optional)<input aria-label="Reporting currency" value={scheduleCurrency} disabled={schedule.degraded || scheduleSaving} maxLength={3} onChange={(event) => setScheduleCurrency(event.target.value.toUpperCase())} placeholder="Inherit" /></label>
         </div>
         <p className="muted">{schedule.source === 'saved' ? 'Saved in the portfolio database.' : 'Using deployment bootstrap defaults until you save a portfolio setting.'} {schedule.source === 'environment' && 'Daily example: 0 5 * * * in Asia/Singapore.'}</p>
-        <button type="button" onClick={saveSchedule} disabled={scheduleSaving}>{scheduleSaving ? 'Saving schedule…' : 'Save schedule'}</button>
+        <button type="button" onClick={saveSchedule} disabled={scheduleSaving || schedule.degraded}>{scheduleSaving ? 'Saving schedule…' : 'Save schedule'}</button>
         {scheduleMessage && <p role="status" aria-live="polite">{scheduleMessage}</p>}
         {scheduleError && <p className="notice error" role="alert" aria-live="polite">{scheduleError} <button type="button" onClick={load}>Reload</button></p>}
       </>}

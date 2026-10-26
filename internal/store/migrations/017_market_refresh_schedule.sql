@@ -22,6 +22,13 @@ BEGIN
     SELECT RAISE(ABORT, 'market refresh schedule revision must increase');
 END;
 
+CREATE TRIGGER market_refresh_schedules_no_replacement_insert
+BEFORE INSERT ON market_refresh_schedules
+WHEN EXISTS (SELECT 1 FROM market_refresh_schedules WHERE portfolio_id = NEW.portfolio_id)
+BEGIN
+    SELECT RAISE(ABORT, 'market refresh schedules cannot be replaced');
+END;
+
 CREATE TRIGGER market_refresh_schedules_no_delete
 BEFORE DELETE ON market_refresh_schedules
 BEGIN
@@ -31,6 +38,15 @@ END;
 CREATE TRIGGER market_refresh_schedule_audit_no_update
 BEFORE UPDATE ON audit_events
 WHEN OLD.action = 'market.refresh.schedule.updated'
+BEGIN
+    SELECT RAISE(ABORT, 'market refresh schedule audits are append-only');
+END;
+
+CREATE TRIGGER market_refresh_schedule_audit_no_replacement_insert
+BEFORE INSERT ON audit_events
+WHEN EXISTS (SELECT 1 FROM audit_events WHERE id = NEW.id)
+ AND (NEW.action = 'market.refresh.schedule.updated'
+      OR EXISTS (SELECT 1 FROM audit_events WHERE id = NEW.id AND action = 'market.refresh.schedule.updated'))
 BEGIN
     SELECT RAISE(ABORT, 'market refresh schedule audits are append-only');
 END;
@@ -54,4 +70,14 @@ BEFORE DELETE ON audit_event_portfolios
 WHEN EXISTS (SELECT 1 FROM audit_events WHERE id = OLD.audit_event_id AND action = 'market.refresh.schedule.updated')
 BEGIN
     SELECT RAISE(ABORT, 'market refresh schedule audit ownership is append-only');
+END;
+
+CREATE TRIGGER market_refresh_schedule_audit_owner_insert_guard
+BEFORE INSERT ON audit_event_portfolios
+WHEN EXISTS (SELECT 1 FROM audit_events WHERE id = NEW.audit_event_id AND action = 'market.refresh.schedule.updated')
+BEGIN
+    SELECT RAISE(ABORT, 'market refresh schedule audit ownership is append-only')
+    WHERE EXISTS (SELECT 1 FROM audit_event_portfolios WHERE audit_event_id = NEW.audit_event_id)
+       OR NEW.portfolio_id IS NOT json_extract((SELECT payload FROM audit_events WHERE id = NEW.audit_event_id), '$.portfolio_id')
+       OR NEW.retain_until IS NOT (SELECT retain_until FROM audit_events WHERE id = NEW.audit_event_id);
 END;

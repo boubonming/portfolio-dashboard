@@ -101,7 +101,7 @@ export type ProviderReadiness = { name: string; configured: boolean; public: boo
 export type MarketMapping = { provider: string; provider_symbol: string; quote_currency: string; active_from: string; provenance?: string }
 export type MarketInstrument = { instrument_id: string; symbol: string; description?: string; currency: string; mappings: MarketMapping[] }
 export type MarketDataSetup = { portfolio_id: string; etag: string; providers: ProviderReadiness[]; instruments: MarketInstrument[] }
-export type MarketRefreshSchedule = { portfolio_id: string; enabled: boolean; cron: string; timezone: string; reporting_currency: string; revision: number; updated_at?: string; source: 'environment' | 'saved'; etag: string; effective: boolean }
+export type MarketRefreshSchedule = { portfolio_id: string; enabled: boolean; cron: string; timezone: string; reporting_currency: string; revision: number; updated_at: string | null; source: 'environment' | 'saved'; etag: string; effective: boolean; degraded: boolean; runtime_status: 'active' | 'disabled' | 'degraded' }
 export type MappingBatchItem = { instrument_id: string; provider: string; provider_symbol: string; quote_currency: string; provenance: string; confirm_unverified: boolean }
 export type QuoteObservation = { id: string; instrument_id: string; symbol: string; currency: string; source: string }
 export type FXObservation = { id: string; base_currency: string; quote_currency: string; source: string }
@@ -175,6 +175,17 @@ function boundedInteger(value: unknown, field: string, label: string): number {
   return value
 }
 
+function strictCron(value: unknown, field: string, label: string, enabled: boolean): string {
+  if (typeof value !== 'string' || value.length > 256 || /[\u0000-\u001f\u007f]/.test(value) || value.trim() !== value) throw new APIError(200, `Invalid ${label} response: ${field}.`)
+  if (!enabled) {
+    if (value !== '') throw new APIError(200, `Invalid ${label} response: ${field}.`)
+    return value
+  }
+  const fields = value.split(' ')
+  if (fields.length !== 5 || fields.some((part) => part === '' || !/^[0-9*/?,\-]+$/.test(part))) throw new APIError(200, `Invalid ${label} response: ${field}.`)
+  return value
+}
+
 function decimal(value: unknown, field: string, label: string, allowNegative = false): string {
   const result = stringField(value, field, label, 80)
   const pattern = allowNegative ? /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/ : /^(?:0|[1-9]\d*)(?:\.\d+)?$/
@@ -235,22 +246,28 @@ function decodeMarketSetup(value: unknown): MarketDataSetup {
 
 function decodeMarketRefreshSchedule(value: unknown): MarketRefreshSchedule {
   const body = objectResponse(value, 'market refresh schedule')
-  exactKeys(body, ['portfolio_id', 'enabled', 'cron', 'timezone', 'reporting_currency', 'revision', 'source', 'etag', 'effective'], ['updated_at'], 'market refresh schedule')
+  exactKeys(body, ['portfolio_id', 'enabled', 'cron', 'timezone', 'reporting_currency', 'revision', 'updated_at', 'source', 'etag', 'effective', 'degraded', 'runtime_status'], [], 'market refresh schedule')
   const source = stringField(body.source, 'source', 'market refresh schedule', 16)
   if (source !== 'environment' && source !== 'saved') throw new APIError(200, 'Invalid market refresh schedule response: source.')
   if (typeof body.enabled !== 'boolean') throw new APIError(200, 'Invalid market refresh schedule response: enabled.')
-  const cron = body.cron === '' ? '' : stringField(body.cron, 'cron', 'market refresh schedule', 256)
-  if ((cron && cron.trim() !== cron) || (cron && cron.split(/\s+/).length !== 5)) throw new APIError(200, 'Invalid market refresh schedule response: cron.')
+  const cron = strictCron(body.cron, 'cron', 'market refresh schedule', body.enabled)
   const timezone = stringField(body.timezone, 'timezone', 'market refresh schedule', 64)
   if (!/^[A-Za-z][A-Za-z0-9_+./-]{0,63}$/.test(timezone)) throw new APIError(200, 'Invalid market refresh schedule response: timezone.')
   const currency = body.reporting_currency === '' ? '' : currencyCode(body.reporting_currency, 'reporting_currency', 'market refresh schedule')
   const revision = boundedInteger(body.revision, 'revision', 'market refresh schedule')
-  if (typeof body.effective !== 'boolean' || body.effective !== body.enabled) throw new APIError(200, 'Invalid market refresh schedule response: effective.')
+  if (body.updated_at !== null && typeof body.updated_at !== 'string') throw new APIError(200, 'Invalid market refresh schedule response: updated_at.')
+  if (body.updated_at !== null) canonicalTime(body.updated_at, 'updated_at', 'market refresh schedule')
+  if (source === 'environment' && (revision !== 0 || body.updated_at !== null)) throw new APIError(200, 'Invalid market refresh schedule response: environment revision.')
+  if (source === 'saved' && (revision < 1 || typeof body.updated_at !== 'string')) throw new APIError(200, 'Invalid market refresh schedule response: saved revision.')
+  if (typeof body.degraded !== 'boolean') throw new APIError(200, 'Invalid market refresh schedule response: degraded.')
+  const runtimeStatus = stringField(body.runtime_status, 'runtime_status', 'market refresh schedule', 16)
+  if (!['active', 'disabled', 'degraded'].includes(runtimeStatus)) throw new APIError(200, 'Invalid market refresh schedule response: runtime_status.')
+  if (body.degraded !== (runtimeStatus === 'degraded')) throw new APIError(200, 'Invalid market refresh schedule response: contradictory degraded status.')
+  if (typeof body.effective !== 'boolean' || body.effective !== (body.enabled && runtimeStatus === 'active')) throw new APIError(200, 'Invalid market refresh schedule response: effective.')
+  if (runtimeStatus === 'active' && !body.enabled || runtimeStatus === 'disabled' && body.enabled) throw new APIError(200, 'Invalid market refresh schedule response: contradictory runtime status.')
   const etag = stringField(body.etag, 'etag', 'market refresh schedule', 256)
   if (!/^\"[a-f0-9]{64}\"$/.test(etag)) throw new APIError(200, 'Invalid market refresh schedule response: etag.')
-  const updatedAt = body.updated_at === undefined ? undefined : canonicalTime(body.updated_at, 'updated_at', 'market refresh schedule')
-  if ((source === 'saved' && updatedAt === undefined) || (source === 'environment' && updatedAt !== undefined)) throw new APIError(200, 'Invalid market refresh schedule response: updated_at.')
-  return { portfolio_id: canonicalID(body.portfolio_id, 'portfolio_id', 'market refresh schedule'), enabled: body.enabled, cron, timezone, reporting_currency: currency, revision, ...(updatedAt === undefined ? {} : { updated_at: updatedAt }), source: source as MarketRefreshSchedule['source'], etag, effective: body.effective }
+  return { portfolio_id: canonicalID(body.portfolio_id, 'portfolio_id', 'market refresh schedule'), enabled: body.enabled, cron, timezone, reporting_currency: currency, revision, updated_at: body.updated_at as string | null, source: source as MarketRefreshSchedule['source'], etag, effective: body.effective, degraded: body.degraded, runtime_status: runtimeStatus as MarketRefreshSchedule['runtime_status'] }
 }
 
 function decodeMappingResult(value: unknown): MappingBatchResult {

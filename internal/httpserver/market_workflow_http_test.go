@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -517,4 +519,53 @@ func TestMarketWorkflowScheduleRollbackFailureIsDegraded(t *testing.T) {
 	if strings.Contains(status.Body.String(), `"degraded":true`) {
 		t.Fatalf("runtime reconciliation remained degraded: %s", status.Body.String())
 	}
+}
+
+func TestMarketWorkflowScheduleGetAndPutShareExactResponseContract(t *testing.T) {
+	runtime := &recordingScheduleRuntime{}
+	handler, database, cookie, csrf := marketHTTPFixtureWithClientsAndRuntime(t, nil, runtime)
+	defer database.Close()
+	get := marketRequest(handler, cookie, csrf, http.MethodGet, "/api/v1/portfolios/portfolio-market-http/market-data/schedule", "")
+	if get.Code != http.StatusOK {
+		t.Fatalf("schedule GET status=%d body=%s", get.Code, get.Body.String())
+	}
+	var environment map[string]any
+	if err := json.Unmarshal(get.Body.Bytes(), &environment); err != nil {
+		t.Fatal(err)
+	}
+	expectedKeys := []string{"portfolio_id", "enabled", "cron", "timezone", "reporting_currency", "revision", "updated_at", "source", "etag", "effective", "degraded", "runtime_status"}
+	sort.Strings(expectedKeys)
+	if !reflect.DeepEqual(sortedMapKeys(environment), expectedKeys) {
+		t.Fatalf("GET keys=%v", sortedMapKeys(environment))
+	}
+	if environment["runtime_status"] != "active" || environment["degraded"] != false || environment["effective"] != true || environment["updated_at"] != nil {
+		t.Fatalf("environment contract=%v", environment)
+	}
+	etag := get.Header().Get("ETag")
+	if etag == "" || environment["etag"] != etag {
+		t.Fatalf("GET ETag header=%q body=%v", etag, environment["etag"])
+	}
+	savedResponse := scheduleSaveRequest(handler, cookie, csrf, etag, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore","reporting_currency":""}`)
+	if savedResponse.Code != http.StatusOK {
+		t.Fatalf("schedule PUT status=%d body=%s", savedResponse.Code, savedResponse.Body.String())
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(savedResponse.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sortedMapKeys(saved), expectedKeys) || saved["runtime_status"] != "active" || saved["degraded"] != false || saved["effective"] != true {
+		t.Fatalf("PUT contract=%v", saved)
+	}
+	if savedResponse.Header().Get("ETag") == "" || saved["etag"] != savedResponse.Header().Get("ETag") {
+		t.Fatalf("PUT ETag header=%q body=%v", savedResponse.Header().Get("ETag"), saved["etag"])
+	}
+}
+
+func sortedMapKeys(value map[string]any) []string {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

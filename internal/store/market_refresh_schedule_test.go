@@ -52,3 +52,40 @@ func TestMarketRefreshScheduleBootstrapCASAndSavedDisabled(t *testing.T) {
 		t.Fatalf("audit=%d activity=%d", auditCount, activityCount)
 	}
 }
+
+func TestMarketRefreshScheduleDatabaseGuardsRejectReplacementAndMisdirectedOwnership(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "schedule-guards.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := "2026-01-01T00:00:00.000000000Z"
+	for _, portfolioID := range []string{"guard-portfolio", "other-portfolio"} {
+		if _, err := s.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, portfolioID, portfolioID, "MYR", now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fallback := config.MarketRefreshConfig{Cron: "0 5 * * *", Timezone: "Asia/Singapore", PortfolioID: "guard-portfolio", ReportingCurrency: "USD"}
+	initial, err := s.MarketRefreshSchedule(ctx, "guard-portfolio", fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := MutationActor{Category: "browser_user", ID: "local-owner", Permissions: []string{"portfolio:read"}}
+	if _, err := s.SaveMarketRefreshScheduleWithFallback(ctx, "guard-portfolio", initial.ETag, MarketRefreshScheduleUpdate{Timezone: "Asia/Singapore"}, actor, fallback); err != nil {
+		t.Fatal(err)
+	}
+	var auditID, payload, retainUntil string
+	if err := s.DB.QueryRow(`SELECT id,payload,retain_until FROM audit_events WHERE action='market.refresh.schedule.updated'`).Scan(&auditID, &payload, &retainUntil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT OR REPLACE INTO market_refresh_schedules(portfolio_id,enabled,cron,timezone,reporting_currency,revision,updated_at,source) VALUES(?,?,?,?,?,?,?,?)`, "guard-portfolio", 1, "0 6 * * *", "Asia/Singapore", "USD", 2, now, "saved"); err == nil {
+		t.Fatal("schedule replacement unexpectedly succeeded")
+	}
+	if _, err := s.DB.Exec(`INSERT OR REPLACE INTO audit_events(id,actor,action,entity_type,entity_id,payload,created_at,retain_until) VALUES(?,?,?,?,?,?,?,?)`, auditID, "replacement", "market.refresh.schedule.updated", "market_refresh_schedule", "guard-portfolio", payload, now, retainUntil); err == nil {
+		t.Fatal("audit replacement unexpectedly succeeded")
+	}
+	if _, err := s.DB.Exec(`INSERT INTO audit_event_portfolios(audit_event_id,portfolio_id,retain_until) VALUES(?,?,?)`, auditID, "other-portfolio", retainUntil); err == nil {
+		t.Fatal("misdirected audit ownership unexpectedly succeeded")
+	}
+}

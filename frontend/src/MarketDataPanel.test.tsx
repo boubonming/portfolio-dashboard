@@ -27,7 +27,17 @@ function json(body: unknown, status = 200) {
 }
 
 function renderPanel(fetchMock: ReturnType<typeof vi.fn>, props: Partial<React.ComponentProps<typeof MarketDataPanel>> = {}) {
-  vi.stubGlobal('fetch', fetchMock)
+  const schedule = { portfolio_id: 'portfolio-a', enabled: true, cron: '0 5 * * *', timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: `"${'a'.repeat(64)}"`, effective: true, degraded: false, runtime_status: 'active' }
+  const routedFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await (fetchMock as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>)(input, init)
+    if (String(input).endsWith('/market-data/schedule') && response.status === 200) {
+      const body = await response.json()
+      if (body && typeof body === 'object' && 'providers' in body) return json(schedule)
+      return json(body, response.status)
+    }
+    return response
+  })
+  vi.stubGlobal('fetch', routedFetch)
   return render(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="MYR" csrfToken="csrf" onUnauthorized={vi.fn()} onReload={vi.fn()} {...props} />)
 }
 
@@ -36,6 +46,14 @@ function completeMapping(row: HTMLElement, index = 0) {
   fireEvent.change(within(row).getByPlaceholderText('Exact listing / coin ID'), { target: { value: `coin-${index}` } })
   fireEvent.change(within(row).getByPlaceholderText('Where you verified it'), { target: { value: 'provider listing' } })
   fireEvent.click(within(row).getByRole('checkbox'))
+}
+
+function mappingComboboxes() {
+  return screen.getAllByRole('row').slice(1).map((row) => within(row).getByRole('combobox'))
+}
+
+function mappingCheckboxes() {
+  return screen.getAllByRole('row').slice(1).map((row) => within(row).getByRole('checkbox'))
 }
 
 afterEach(() => {
@@ -62,7 +80,7 @@ describe('MarketDataPanel', () => {
     const fetchMock = vi.fn(() => json(setup()))
     try {
       renderPanel(fetchMock)
-      const provider = await waitFor(() => screen.getAllByRole('combobox')[0])
+      const provider = await waitFor(() => mappingComboboxes()[0])
       const identifier = screen.getAllByPlaceholderText('Exact listing / coin ID')[0]
       const save = screen.getByRole('button', { name: 'Save all mappings' })
       expect(hasMatchingDeclaration(provider, 'background', '#172322')).toBe(true)
@@ -95,11 +113,11 @@ describe('MarketDataPanel', () => {
     })
     const fetchMock = vi.fn((input: RequestInfo | URL) => json(configuredSetup))
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(3))
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(3))
     expect(screen.queryByDisplayValue('bitcoin')).toBeNull()
     expect(screen.queryByDisplayValue('MSFT')).toBeNull()
     expect(screen.queryByDisplayValue('7203')).toBeNull()
-    expect(screen.getAllByRole('checkbox').every((checkbox) => !(checkbox as HTMLInputElement).checked)).toBe(true)
+    expect(mappingCheckboxes().every((checkbox) => !(checkbox as HTMLInputElement).checked)).toBe(true)
     expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/market-data/discover'))).toBe(true)
   })
@@ -124,8 +142,8 @@ describe('MarketDataPanel', () => {
     }) }
     const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => String(input).endsWith('/market-data/mappings') ? json({ status: 'saved', etag: '"setup-2"', outcomes }) : String(input).endsWith('/market-data/discover') ? json(discovery) : json(configuredSetup))
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getAllByRole('checkbox')).toHaveLength(3))
-    for (const checkbox of screen.getAllByRole('checkbox')) fireEvent.click(checkbox)
+    await waitFor(() => expect(mappingCheckboxes()).toHaveLength(3))
+    for (const checkbox of mappingCheckboxes()) fireEvent.click(checkbox)
     expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/market-data/mappings'))).toBe(true))
@@ -138,7 +156,7 @@ describe('MarketDataPanel', () => {
   it.each(['', '   ', 'US', 'USDD', 'usd', 'U2D', 'U$D'])('blocks a mapping with invalid quote currency %j without a save request', async (quoteCurrency) => {
     const fetchMock = vi.fn((_input: RequestInfo | URL) => json(setup({ instruments: [setup().instruments[0]] })))
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(1))
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(1))
     const row = screen.getAllByRole('row')[1]
     completeMapping(row)
     const quoteInput = within(row).getByRole('textbox', { name: 'Quote currency for SAME (First company)' })
@@ -152,7 +170,7 @@ describe('MarketDataPanel', () => {
   it('does not enable save until valid quote currency joins every other complete and confirmed field', async () => {
     const fetchMock = vi.fn(() => json(setup()))
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
     const rows = screen.getAllByRole('row').slice(1)
     completeMapping(rows[0])
     expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
@@ -165,7 +183,7 @@ describe('MarketDataPanel', () => {
     const outcomes = [{ instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-a', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }]
     const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/mappings') ? json({ status: 'saved', etag: '"setup-2"', outcomes }) : json(committedSetup))
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(1))
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(1))
     const row = screen.getAllByRole('row')[1]
     const quoteInput = within(row).getByRole('textbox', { name: 'Quote currency for SAME (First company)' })
     fireEvent.change(quoteInput, { target: { value: 'usd' } })
@@ -197,7 +215,7 @@ describe('MarketDataPanel', () => {
       ? json({ status: 'saved', etag: '"setup-2"', outcomes: [{ instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-0', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }, { instrument_id: 'authority-b', status: 'saved', mapping: { id: 'mapping-b', instrument_id: 'authority-b', provider: 'coingecko', provider_symbol: 'coin-1', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }] })
       : json(setup()))
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
     const rows = screen.getAllByRole('row').slice(1)
     for (const [index, row] of rows.entries()) {
       fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'coingecko' } })
@@ -224,7 +242,7 @@ describe('MarketDataPanel', () => {
       ? json({ status: 'saved', etag: '"setup-2"', outcomes })
       : json(setup()))
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
     const rows = screen.getAllByRole('row').slice(1)
     for (const [index, row] of rows.entries()) {
       fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'coingecko' } })
@@ -244,7 +262,7 @@ describe('MarketDataPanel', () => {
     ]
     const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/mappings') ? json({ status: 'saved', etag: '"setup-2"', outcomes: mappings }) : json(setup()))
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
     const rows = screen.getAllByRole('row').slice(1)
     for (const [index, row] of rows.entries()) {
       fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'coingecko' } })
@@ -261,7 +279,7 @@ describe('MarketDataPanel', () => {
   it('reports a stale ETag without pretending the batch was saved', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/mappings') ? json({ error: 'stale_mapping_setup' }, 412) : json(setup()))
     renderPanel(fetchMock)
-    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2))
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
     for (const [index, row] of screen.getAllByRole('row').slice(1).entries()) {
       fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'coingecko' } })
       fireEvent.change(within(row).getByPlaceholderText('Exact listing / coin ID'), { target: { value: `coin-${index}` } })
@@ -308,5 +326,16 @@ describe('MarketDataPanel', () => {
     renderPanel(fetchMock)
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Invalid market-data setup response/i))
     expect(screen.queryByRole('button', { name: 'Save all mappings' })).toBeNull()
+  })
+
+  it('renders degraded schedules fail-closed with an accessible recovery announcement and disabled controls', async () => {
+    const degraded = { portfolio_id: 'portfolio-a', enabled: true, cron: '0 5 * * *', timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: `"${'d'.repeat(64)}"`, effective: false, degraded: true, runtime_status: 'degraded' }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/schedule') ? json(degraded) : json(setup()))
+    renderPanel(fetchMock)
+    const announcement = await waitFor(() => screen.getByRole('alert'))
+    expect(announcement.textContent).toMatch(/retry or reconcile/i)
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('checkbox', { name: /enable scheduled refreshes/i }) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByRole('combobox', { name: 'Preset' }) as HTMLSelectElement).disabled).toBe(true)
   })
 })

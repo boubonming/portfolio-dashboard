@@ -130,11 +130,43 @@ func (h *marketWorkflowEndpoint) serveHTTP(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// marketRefreshScheduleResponse is the single success payload used by both
+// schedule GET and PUT. Keep nullable updated_at explicit so an environment
+// fallback and a saved row have the same JSON keys.
 type marketRefreshScheduleResponse struct {
-	store.MarketRefreshSchedule
-	Effective     bool   `json:"effective"`
-	Degraded      bool   `json:"degraded"`
-	RuntimeStatus string `json:"runtime_status"`
+	PortfolioID       string  `json:"portfolio_id"`
+	Enabled           bool    `json:"enabled"`
+	Cron              string  `json:"cron"`
+	Timezone          string  `json:"timezone"`
+	ReportingCurrency string  `json:"reporting_currency"`
+	Revision          int     `json:"revision"`
+	UpdatedAt         *string `json:"updated_at"`
+	Source            string  `json:"source"`
+	ETag              string  `json:"etag"`
+	Effective         bool    `json:"effective"`
+	Degraded          bool    `json:"degraded"`
+	RuntimeStatus     string  `json:"runtime_status"`
+}
+
+func marketRefreshScheduleResponseFor(schedule store.MarketRefreshSchedule, degraded bool) marketRefreshScheduleResponse {
+	var updatedAt *string
+	if schedule.UpdatedAt != "" {
+		value := schedule.UpdatedAt
+		updatedAt = &value
+	}
+	status := "disabled"
+	if degraded {
+		status = "degraded"
+	} else if schedule.Enabled {
+		status = "active"
+	}
+	return marketRefreshScheduleResponse{
+		PortfolioID: schedule.PortfolioID, Enabled: schedule.Enabled, Cron: schedule.Cron,
+		Timezone: schedule.Timezone, ReportingCurrency: schedule.ReportingCurrency,
+		Revision: schedule.Revision, UpdatedAt: updatedAt, Source: schedule.Source,
+		ETag: schedule.ETag, Effective: schedule.Enabled && status == "active",
+		Degraded: degraded, RuntimeStatus: status,
+	}
 }
 
 func (h *marketWorkflowEndpoint) schedule(w http.ResponseWriter, r *http.Request, portfolioID string) {
@@ -153,7 +185,7 @@ func (h *marketWorkflowEndpoint) schedule(w http.ResponseWriter, r *http.Request
 		degraded = runtime.ScheduleRuntimeDegraded(portfolioID)
 	}
 	w.Header().Set("ETag", schedule.ETag)
-	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: schedule.Enabled && !degraded, Degraded: degraded, RuntimeStatus: map[bool]string{true: "degraded", false: "healthy"}[degraded]})
+	writeJSON(w, http.StatusOK, marketRefreshScheduleResponseFor(schedule, degraded))
 }
 
 func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Request, portfolioID string) {
@@ -240,7 +272,10 @@ func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Req
 				// The durable row is still old, but the runtime may have stopped
 				// both schedules. Never report a successful/effective candidate;
 				// the runtime's degraded state is reconciled from this old row.
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "schedule_runtime_degraded"})
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+					"error":    "schedule_runtime_degraded",
+					"guidance": "Automatic refresh is inactive; retry or reconcile the schedule before relying on it.",
+				})
 				return
 			}
 		}
@@ -257,7 +292,11 @@ func (h *marketWorkflowEndpoint) saveSchedule(w http.ResponseWriter, r *http.Req
 		return
 	}
 	w.Header().Set("ETag", schedule.ETag)
-	writeJSON(w, http.StatusOK, marketRefreshScheduleResponse{MarketRefreshSchedule: schedule, Effective: schedule.Enabled})
+	degraded := false
+	if runtime, ok := h.scheduleRuntime.(MarketRefreshScheduleRuntimeStatus); ok {
+		degraded = runtime.ScheduleRuntimeDegraded(portfolioID)
+	}
+	writeJSON(w, http.StatusOK, marketRefreshScheduleResponseFor(schedule, degraded))
 }
 
 func (h *marketWorkflowEndpoint) writeScheduleError(w http.ResponseWriter, err error) {
