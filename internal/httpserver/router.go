@@ -51,7 +51,7 @@ func NewHandlerWithAuth(database *store.Store, config auth.Config) (http.Handler
 // server-side provider clients. The legacy constructor above remains useful
 // to callers that only need authenticated read routes.
 func NewHandlerWithConfig(database *store.Store, configuration appconfig.Config) (http.Handler, error) {
-	return newHandlerWithMarketClients(database, configuration, nil)
+	return newHandlerWithMarketClients(database, configuration, nil, nil)
 }
 
 // NewHandlerWithConfigAndMarketClients is the same authenticated production
@@ -59,10 +59,14 @@ func NewHandlerWithConfig(database *store.Store, configuration appconfig.Config)
 // constructs credential-backed adapters; tests can supply local deterministic
 // clients without exposing provider credentials or making live requests.
 func NewHandlerWithConfigAndMarketClients(database *store.Store, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient) (http.Handler, error) {
-	return newHandlerWithMarketClients(database, configuration, clients)
+	return newHandlerWithMarketClients(database, configuration, clients, nil)
 }
 
-func newHandlerWithMarketClients(database *store.Store, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient) (http.Handler, error) {
+func NewHandlerWithConfigAndMarketClientsAndScheduleRuntime(database *store.Store, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient, runtime MarketRefreshScheduleRuntime) (http.Handler, error) {
+	return newHandlerWithMarketClients(database, configuration, clients, runtime)
+}
+
+func newHandlerWithMarketClients(database *store.Store, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient, runtime MarketRefreshScheduleRuntime) (http.Handler, error) {
 	authenticator, err := auth.New(configuration.Auth)
 	if err != nil {
 		return nil, err
@@ -78,10 +82,10 @@ func newHandlerWithMarketClients(database *store.Store, configuration appconfig.
 			return nil, err
 		}
 	}
-	return newHandler(database, authenticator, configuration, clients)
+	return newHandler(database, authenticator, configuration, clients, runtime)
 }
 
-func newHandler(database *store.Store, authenticator *auth.Authenticator, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient) (http.Handler, error) {
+func newHandler(database *store.Store, authenticator *auth.Authenticator, configuration appconfig.Config, clients map[marketdata.Provider]marketdata.ProviderClient, runtimes ...MarketRefreshScheduleRuntime) (http.Handler, error) {
 	files, err := web.Files()
 	if err != nil {
 		return nil, err
@@ -114,7 +118,7 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator, config
 		mux.Handle("/api/v1/portfolios/{portfolioId}/holdings/{holdingId}", mutations)
 		overview := noStorePrivate(portfolioOverviewRoutes(database, authenticator))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/overview", overview)
-		market := noStorePrivate(marketWorkflowRoutes(database, authenticator, newMarketWorkflowEndpoint(database, configuration, authenticator, clients)))
+		market := noStorePrivate(marketWorkflowRoutes(database, authenticator, newMarketWorkflowEndpoint(database, configuration, authenticator, clients, runtimes...)))
 		mux.Handle("/api/v1/portfolios/{portfolioId}/market-data", market)
 		mux.Handle("/api/v1/portfolios/{portfolioId}/market-data/", market)
 	}
@@ -135,7 +139,7 @@ func newHandler(database *store.Store, authenticator *auth.Authenticator, config
 // validation and disclose a route shape.
 func privatePathGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) || (holdingNamespacePath(r.URL.EscapedPath()) && unsafeHoldingPath(r.URL.EscapedPath())) {
+		if (snapshotNamespacePath(r.URL.EscapedPath()) && unsafeSnapshotPath(r.URL.EscapedPath())) || (reviewNamespacePath(r.URL.EscapedPath()) && unsafeReviewPath(r.URL.EscapedPath())) || (holdingNamespacePath(r.URL.EscapedPath()) && unsafeHoldingPath(r.URL.EscapedPath())) || (marketNamespacePath(r.URL.EscapedPath()) && unsafeMarketPath(r.URL.EscapedPath())) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Vary", "Cookie")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -144,6 +148,36 @@ func privatePathGuard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func marketNamespacePath(escapedPath string) bool {
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		decodedPath = escapedPath
+	}
+	for _, candidate := range []string{escapedPath, decodedPath, path.Clean(escapedPath), path.Clean(decodedPath)} {
+		parts := strings.Split(strings.TrimPrefix(candidate, "/"), "/")
+		if len(parts) >= 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "portfolios" && parts[4] == "market-data" {
+			return true
+		}
+	}
+	return false
+}
+
+func unsafeMarketPath(escapedPath string) bool {
+	if strings.Contains(escapedPath, "%") || escapedPath != path.Clean(escapedPath) || strings.HasSuffix(escapedPath, "/") {
+		return true
+	}
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil || decodedPath != escapedPath {
+		return true
+	}
+	for _, part := range strings.Split(strings.TrimPrefix(escapedPath, "/"), "/") {
+		if part == "." || part == ".." || part == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func snapshotNamespacePath(escapedPath string) bool {

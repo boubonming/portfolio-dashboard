@@ -53,35 +53,55 @@ func main() {
 		marketdata.ProviderCoinGecko:         marketdata.NewCoinGeckoClient(marketdata.ClientOptions{BaseURL: cfg.ProviderURLs.CoinGecko}),
 		marketdata.ProviderOpenExchangeRates: NewOXRFromConfig(cfg),
 	}
-	handler, err := httpserver.NewHandlerWithConfigAndMarketClients(database, cfg, clients)
-	if err != nil {
-		fatal(err)
-	}
 	refreshService := marketrefresh.New(database, clients, store.MarketProviders(map[marketdata.Provider]bool{
 		marketdata.ProviderFinnhub:           cfg.ProviderKeys.Finnhub != "",
 		marketdata.ProviderAlphaVantage:      cfg.ProviderKeys.AlphaVantage != "",
 		marketdata.ProviderOpenExchangeRates: cfg.ProviderKeys.OpenExchangeRates != "",
 	}))
-	refreshScheduler := scheduler.New(refreshService, cfg.MarketRefresh)
-	serverContext := context.Background()
-	var stopSignals context.CancelFunc
-	if cfg.MarketRefresh.Enabled() {
-		serverContext, stopSignals = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stopSignals()
-		if err := refreshScheduler.Start(serverContext); err != nil {
+	refreshScheduler := scheduler.NewManager(refreshService)
+	effectiveConfiguration := cfg.MarketRefresh
+	if saved, loadErr := database.MarketRefreshSchedule(ctx, cfg.MarketRefresh.PortfolioID, cfg.MarketRefresh); loadErr == nil {
+		parsed, parseErr := config.ParseMarketRefreshConfig(saved.Cron, saved.Timezone, saved.PortfolioID, saved.ReportingCurrency)
+		if parseErr != nil {
+			fatal(parseErr)
+		}
+		effectiveConfiguration = parsed
+	} else if !errors.Is(loadErr, store.ErrPortfolioNotFound) {
+		fatal(loadErr)
+	}
+	savedSchedules, err := database.SavedMarketRefreshSchedules(ctx)
+	if err != nil {
+		fatal(err)
+	}
+	serverContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	handler, err := httpserver.NewHandlerWithConfigAndMarketClientsAndScheduleRuntime(database, cfg, clients, refreshScheduler)
+	if err != nil {
+		fatal(err)
+	}
+	if err := refreshScheduler.Start(serverContext, effectiveConfiguration); err != nil {
+		fatal(err)
+	}
+	for _, saved := range savedSchedules {
+		if saved.PortfolioID == effectiveConfiguration.PortfolioID {
+			continue
+		}
+		parsed, parseErr := config.ParseMarketRefreshConfig(saved.Cron, saved.Timezone, saved.PortfolioID, saved.ReportingCurrency)
+		if parseErr != nil {
+			fatal(parseErr)
+		}
+		if err := refreshScheduler.Reconfigure(serverContext, parsed); err != nil {
 			fatal(err)
 		}
 	}
 	fmt.Fprintf(os.Stderr, "portfolio dashboard listening on %s\n", cfg.BindAddress)
 	server := newHTTPServer(cfg.BindAddress, handler)
-	if cfg.MarketRefresh.Enabled() {
-		go func() {
-			<-serverContext.Done()
-			shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_ = server.Shutdown(shutdownContext)
-		}()
-	}
+	go func() {
+		<-serverContext.Done()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownContext)
+	}()
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		_ = refreshScheduler.Stop(context.Background())
 		fatal(err)

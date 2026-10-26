@@ -551,6 +551,45 @@ paths:
         '404': { description: Portfolio not found }
         '405': { $ref: '#/components/responses/MethodNotAllowedGet' }
 
+  /api/v1/portfolios/{portfolioId}/market-data/schedule:
+    get:
+      summary: Read the effective market-refresh schedule
+      description: Environment values are bootstrap defaults only; a saved portfolio setting wins across restarts. This browser-only endpoint never exposes provider credentials or machine authority.
+      operationId: getMarketRefreshSchedule
+      security:
+        - sessionCookie: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+      responses:
+        '200': { description: Effective schedule, headers: { ETag: { schema: { type: string } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' } }, content: { application/json: { schema: { $ref: '#/components/schemas/MarketRefreshSchedule' } } } }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Portfolio not found }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGetPut' }
+    put:
+      summary: Save the portfolio market-refresh schedule
+      description: Browser session plus same-origin CSRF and If-Match are required. The path portfolio is authoritative; invalid, stale, or machine-authenticated requests do not mutate schedule or audit state.
+      operationId: saveMarketRefreshSchedule
+      security:
+        - sessionCookie: []
+      parameters:
+        - { name: portfolioId, in: path, required: true, schema: { $ref: '#/components/schemas/PortfolioId' } }
+        - { name: If-Match, in: header, required: true, schema: { type: string } }
+        - { name: Origin, in: header, required: true, schema: { type: string, format: uri } }
+        - { name: X-CSRF-Token, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MarketRefreshScheduleUpdate' } } }
+      responses:
+        '200': { description: Saved schedule, headers: { ETag: { schema: { type: string } }, Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' } }, content: { application/json: { schema: { $ref: '#/components/schemas/MarketRefreshSchedule' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/UnauthorizedBearer' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Portfolio not found }
+        '412': { description: Schedule changed; reload before saving }
+        '503': { $ref: '#/components/responses/ScheduleRuntimeDegraded' }
+        '405': { $ref: '#/components/responses/MethodNotAllowedGetPut' }
+
   /api/v1/portfolios/{portfolioId}/market-data/discover:
     post:
       summary: Discover provider-backed market mapping candidates
@@ -717,6 +756,17 @@ components:
         Vary: { $ref: '#/components/headers/PrivateVary' }
         X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
       content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
+    MethodNotAllowedGetPut:
+      description: Known schedule path with an unsupported method.
+      headers:
+        Allow:
+          description: Exact canonical methods for the schedule path.
+          schema: { type: string, enum: ['GET, PUT'] }
+          example: 'GET, PUT'
+        Cache-Control: { $ref: '#/components/headers/NoStore' }
+        Vary: { $ref: '#/components/headers/PrivateVary' }
+        X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' }
+      content: { application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } } }
     MethodNotAllowedGetPost:
       description: Known reviews collection path with an unsupported method.
       headers:
@@ -805,6 +855,10 @@ components:
       description: Safe generic server failure; details are available only in redacted server logs by request ID.
       headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
       content: { application/json: { schema: { $ref: '#/components/schemas/InternalErrorResponse' } } }
+    ScheduleRuntimeDegraded:
+      description: Runtime recovery is unresolved; automatic refresh is inactive and the browser must not claim the requested settings were applied.
+      headers: { Cache-Control: { $ref: '#/components/headers/NoStore' }, Vary: { $ref: '#/components/headers/PrivateVary' }, X-Content-Type-Options: { $ref: '#/components/headers/NoSniff' } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ScheduleRuntimeDegradedError' } } }
   schemas:
     ProviderReadiness:
       type: object
@@ -843,6 +897,39 @@ components:
         etag: { type: string, minLength: 1, maxLength: 256 }
         providers: { type: array, maxItems: 32, items: { $ref: '#/components/schemas/ProviderReadiness' } }
         instruments: { type: array, items: { $ref: '#/components/schemas/MarketInstrument' } }
+    ScheduleRuntimeDegradedError:
+      type: object
+      additionalProperties: false
+      required: [error, guidance]
+      properties:
+        error: { type: string, enum: [schedule_runtime_degraded] }
+        guidance: { type: string, minLength: 1, maxLength: 256 }
+    MarketRefreshSchedule:
+      type: object
+      additionalProperties: false
+      required: [portfolio_id, enabled, cron, timezone, reporting_currency, revision, updated_at, source, etag, effective, degraded, runtime_status]
+      properties:
+        portfolio_id: { $ref: '#/components/schemas/PortfolioId' }
+        enabled: { type: boolean }
+        cron: { type: string, maxLength: 256, description: Empty disables the schedule; otherwise strict standard five-field cron. }
+        timezone: { type: string, minLength: 1, maxLength: 64, description: IANA timezone. }
+        reporting_currency: { type: string, pattern: '^$|^[A-Z]{3}$', description: Blank means inherit. }
+        revision: { type: integer, minimum: 0, maximum: 1000000 }
+        updated_at: { oneOf: [{ $ref: '#/components/schemas/CanonicalDateTime' }, { type: 'null' }], description: Null for an environment fallback; a canonical timestamp for a saved schedule. }
+        source: { type: string, enum: [environment, saved] }
+        etag: { type: string, pattern: '^"[a-f0-9]{64}"$' }
+        effective: { type: boolean, description: True only when enabled and runtime_status is active. }
+        degraded: { type: boolean, description: True exactly when runtime_status is degraded. }
+        runtime_status: { type: string, enum: [active, disabled, degraded], description: Bounded runtime state; degraded means automatic refresh is inactive pending recovery or reconciliation. }
+    MarketRefreshScheduleUpdate:
+      type: object
+      additionalProperties: false
+      required: [enabled, cron, timezone]
+      properties:
+        enabled: { type: boolean }
+        cron: { type: string, maxLength: 256 }
+        timezone: { type: string, minLength: 1, maxLength: 64 }
+        reporting_currency: { type: string, pattern: '^$|^[A-Z]{3}$' }
     MarketDiscoveryCandidate:
       type: object
       additionalProperties: false

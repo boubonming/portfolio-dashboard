@@ -84,6 +84,9 @@ func ParseMarketRefreshConfig(expression, timezone, portfolioID, currency string
 	if timezone == "" {
 		timezone = "Asia/Singapore"
 	}
+	if len(timezone) > 64 {
+		return MarketRefreshConfig{}, MarketRefreshConfigError{"PORTFOLIO_MARKET_REFRESH_TIMEZONE", "must be at most 64 characters"}
+	}
 	location, err := time.LoadLocation(timezone)
 	if err != nil {
 		return MarketRefreshConfig{}, MarketRefreshConfigError{"PORTFOLIO_MARKET_REFRESH_TIMEZONE", "must be a valid IANA timezone"}
