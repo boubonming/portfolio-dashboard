@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/auth"
+	appconfig "github.com/boubonming/portfolio-dashboard/internal/config"
 )
 
 func scheduleRawRequest(handler http.Handler, cookie *http.Cookie, csrf, method, target, body, contentType, origin, etag string) *httptest.ResponseRecorder {
@@ -50,6 +53,66 @@ func scheduleDurableCounts(t *testing.T, database *sql.DB) [3]int {
 	return [3]int{schedules, audits, activities}
 }
 
+type scheduleInvariantState struct {
+	rowExists         bool
+	enabled           int
+	cron              string
+	timezone          string
+	reportingCurrency string
+	revision          int
+	updatedAt         string
+	source            string
+	etag              string
+	durableCounts     [3]int
+	runtimeCalls      int
+	runtimeConfigs    []appconfig.MarketRefreshConfig
+	runtimeDegraded   bool
+}
+
+func scheduleInvariantSnapshot(t *testing.T, database *sql.DB, runtime *recordingScheduleRuntime, etag string) scheduleInvariantState {
+	t.Helper()
+	state := scheduleInvariantState{etag: etag, durableCounts: scheduleDurableCounts(t, database), runtimeCalls: runtime.calls, runtimeDegraded: runtime.degraded}
+	state.runtimeConfigs = append([]appconfig.MarketRefreshConfig(nil), runtime.configurations...)
+	err := database.QueryRow(`SELECT enabled, cron, timezone, reporting_currency, revision, updated_at, source FROM market_refresh_schedules WHERE portfolio_id=?`, "portfolio-market-http").Scan(&state.enabled, &state.cron, &state.timezone, &state.reportingCurrency, &state.revision, &state.updatedAt, &state.source)
+	switch err {
+	case nil:
+		state.rowExists = true
+	case sql.ErrNoRows:
+	default:
+		t.Fatal(err)
+	}
+	return state
+}
+
+func assertScheduleInvariant(t *testing.T, handler http.Handler, database *sql.DB, cookie *http.Cookie, csrf string, runtime *recordingScheduleRuntime, want scheduleInvariantState) {
+	t.Helper()
+	gotETag := scheduleResponseETag(t, handler, cookie, csrf)
+	if gotETag != want.etag {
+		t.Fatalf("failed request changed ETag from %q to %q", want.etag, gotETag)
+	}
+	got := scheduleInvariantSnapshot(t, database, runtime, gotETag)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("failed request changed schedule/runtime state: before=%+v after=%+v", want, got)
+	}
+}
+
+type deadlineScheduleRuntime struct {
+	started    chan struct{}
+	finished   chan struct{}
+	attempts   int
+	configured bool
+}
+
+func (r *deadlineScheduleRuntime) Reconfigure(ctx context.Context, _ appconfig.MarketRefreshConfig) error {
+	r.attempts++
+	close(r.started)
+	<-ctx.Done()
+	close(r.finished)
+	return ctx.Err()
+}
+
+func (r *deadlineScheduleRuntime) ScheduleRuntimeDegraded(string) bool { return false }
+
 func TestScheduleHTTPAuthenticationHeadersMethodsAndPathMatrix(t *testing.T) {
 	runtime := &recordingScheduleRuntime{}
 	handler, database, cookie, csrf := marketHTTPFixtureWithClientsAndRuntime(t, nil, runtime)
@@ -79,6 +142,25 @@ func TestScheduleHTTPAuthenticationHeadersMethodsAndPathMatrix(t *testing.T) {
 		t.Fatalf("PUT status=%d old_etag=%q new_etag=%q body=%s", put.Code, etag, put.Header().Get("ETag"), put.Body.String())
 	}
 	checkPrivateHeaders(t, put)
+
+	if _, err := database.DB.Exec(`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`, "portfolio-market-http-wrong", "Wrong Market HTTP", "USD", "2026-01-01T00:00:00.000000000Z", "2026-01-01T00:00:00.000000000Z"); err != nil {
+		t.Fatal(err)
+	}
+	wrongPath := "/api/v1/portfolios/portfolio-market-http-wrong/market-data/schedule"
+	wrongGet := marketRequest(handler, cookie, csrf, http.MethodGet, wrongPath, "")
+	if wrongGet.Code != http.StatusOK || !strings.Contains(wrongGet.Body.String(), `"portfolio_id":"portfolio-market-http-wrong"`) {
+		t.Fatalf("existing wrong-portfolio GET status=%d body=%s", wrongGet.Code, wrongGet.Body.String())
+	}
+	if wrongGet.Header().Get("ETag") == put.Header().Get("ETag") {
+		t.Fatalf("cross-portfolio GET reused the original ETag: %q", wrongGet.Header().Get("ETag"))
+	}
+	wrongPut := scheduleRawRequest(handler, cookie, csrf, http.MethodPut, wrongPath, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore"}`, "application/json", "https://example.test", put.Header().Get("ETag"))
+	if wrongPut.Code != http.StatusPreconditionFailed || !strings.Contains(wrongPut.Body.String(), `"error":"stale_schedule"`) {
+		t.Fatalf("cross-portfolio If-Match status=%d body=%s", wrongPut.Code, wrongPut.Body.String())
+	}
+	if got := scheduleDurableCounts(t, database.DB); got != [3]int{1, 1, 1} || runtime.calls != 1 {
+		t.Fatalf("cross-portfolio denial changed state: durable=%v runtime_calls=%d", got, runtime.calls)
+	}
 
 	unauthenticated := httptest.NewRequest(http.MethodGet, "https://example.test"+schedulePath, nil)
 	unauthenticatedResponse := httptest.NewRecorder()
@@ -134,37 +216,34 @@ func TestScheduleHTTPInvalidBodiesContentTypeAndFieldsAreAtomic(t *testing.T) {
 	defer database.Close()
 	const schedulePath = "/api/v1/portfolios/portfolio-market-http/market-data/schedule"
 	etag := scheduleResponseETag(t, handler, cookie, csrf)
-	beforeCounts := scheduleDurableCounts(t, database.DB)
-	beforeCalls := runtime.calls
+	before := scheduleInvariantSnapshot(t, database.DB, runtime, etag)
 	invalidBodies := []string{"", `null`, `[]`, `{}`, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore","unknown":1}`, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore"} {}`, `{"enabled":true,"enabled":false,"cron":"0 6 * * *","timezone":"Asia/Singapore"}`}
 	for _, body := range invalidBodies {
 		response := scheduleSaveRequest(handler, cookie, csrf, etag, body)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("body=%q status=%d response=%s", body, response.Code, response.Body.String())
 		}
-		if got := scheduleDurableCounts(t, database.DB); got != beforeCounts {
-			t.Fatalf("body=%q changed durable counts: before=%v after=%v", body, beforeCounts, got)
-		}
-		if runtime.calls != beforeCalls {
-			t.Fatalf("body=%q reached runtime: calls=%d before=%d", body, runtime.calls, beforeCalls)
-		}
+		assertScheduleInvariant(t, handler, database.DB, cookie, csrf, runtime, before)
 	}
 	for _, contentType := range []string{"", "text/plain", "application/json-patch+json"} {
 		response := scheduleRawRequest(handler, cookie, csrf, http.MethodPut, schedulePath, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore"}`, contentType, "https://example.test", etag)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("content type=%q status=%d body=%s", contentType, response.Code, response.Body.String())
 		}
+		assertScheduleInvariant(t, handler, database.DB, cookie, csrf, runtime, before)
 	}
 	for _, csrfValue := range []string{"", "wrong-csrf"} {
 		response := scheduleRawRequest(handler, cookie, csrfValue, http.MethodPut, schedulePath, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore"}`, "application/json", "https://example.test", etag)
 		if response.Code != http.StatusForbidden {
 			t.Fatalf("csrf=%q status=%d body=%s", csrfValue, response.Code, response.Body.String())
 		}
+		assertScheduleInvariant(t, handler, database.DB, cookie, csrf, runtime, before)
 	}
 	wrongOrigin := scheduleRawRequest(handler, cookie, csrf, http.MethodPut, schedulePath, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore"}`, "application/json", "https://evil.example", etag)
 	if wrongOrigin.Code != http.StatusForbidden {
 		t.Fatalf("wrong origin status=%d body=%s", wrongOrigin.Code, wrongOrigin.Body.String())
 	}
+	assertScheduleInvariant(t, handler, database.DB, cookie, csrf, runtime, before)
 	for _, test := range []struct {
 		name   string
 		update string
@@ -184,24 +263,104 @@ func TestScheduleHTTPInvalidBodiesContentTypeAndFieldsAreAtomic(t *testing.T) {
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("%s status=%d body=%s", test.name, response.Code, response.Body.String())
 		}
-		if got := scheduleDurableCounts(t, database.DB); got != beforeCounts {
-			t.Fatalf("%s changed durable counts: before=%v after=%v", test.name, beforeCounts, got)
-		}
-		if runtime.calls != beforeCalls {
-			t.Fatalf("%s reached runtime: calls=%d before=%d", test.name, runtime.calls, beforeCalls)
-		}
+		assertScheduleInvariant(t, handler, database.DB, cookie, csrf, runtime, before)
 	}
 	for name, suppliedETag := range map[string]string{"missing If-Match": "", "stale If-Match": `"stale"`} {
 		response := scheduleRawRequest(handler, cookie, csrf, http.MethodPut, schedulePath, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore"}`, "application/json", "https://example.test", suppliedETag)
 		if response.Code != http.StatusPreconditionFailed {
 			t.Fatalf("%s status=%d body=%s", name, response.Code, response.Body.String())
 		}
-		if got := scheduleDurableCounts(t, database.DB); got != beforeCounts {
-			t.Fatalf("%s changed durable counts: before=%v after=%v", name, beforeCounts, got)
-		}
+		assertScheduleInvariant(t, handler, database.DB, cookie, csrf, runtime, before)
 	}
 	if got := scheduleResponseETag(t, handler, cookie, csrf); got != etag {
 		t.Fatalf("invalid requests changed ETag from %q to %q", etag, got)
+	}
+}
+
+func TestScheduleHTTPAcceptsContractContentTypeVariants(t *testing.T) {
+	runtime := &recordingScheduleRuntime{}
+	handler, database, cookie, csrf := marketHTTPFixtureWithClientsAndRuntime(t, nil, runtime)
+	defer database.Close()
+	const schedulePath = "/api/v1/portfolios/portfolio-market-http/market-data/schedule"
+	etag := scheduleResponseETag(t, handler, cookie, csrf)
+	for index, contentType := range []string{"application/json", "application/json; charset=utf-8", "Application/JSON", "application/json;charset=UTF-8"} {
+		response := scheduleRawRequest(handler, cookie, csrf, http.MethodPut, schedulePath, `{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore","reporting_currency":"USD"}`, contentType, "https://example.test", etag)
+		if response.Code != http.StatusOK {
+			t.Fatalf("content type=%q status=%d body=%s", contentType, response.Code, response.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || payload["reporting_currency"] != "USD" || payload["etag"] != response.Header().Get("ETag") {
+			t.Fatalf("content type=%q response=%s err=%v", contentType, response.Body.String(), err)
+		}
+		if runtime.calls != index+1 {
+			t.Fatalf("content type=%q runtime calls=%d want=%d", contentType, runtime.calls, index+1)
+		}
+		etag = response.Header().Get("ETag")
+	}
+}
+
+func TestScheduleHTTPRuntimeReconfigureCancellationAndTimeoutAreAtomic(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		cancel func(context.Context) (context.Context, context.CancelFunc)
+	}{
+		{name: "caller cancellation", cancel: func(parent context.Context) (context.Context, context.CancelFunc) { return context.WithCancel(parent) }},
+		{name: "request deadline", cancel: func(parent context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(parent, 20*time.Millisecond)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &deadlineScheduleRuntime{started: make(chan struct{}), finished: make(chan struct{})}
+			handler, database, cookie, csrf := marketHTTPFixtureWithClientsAndRuntime(t, nil, runtime)
+			defer database.Close()
+			const schedulePath = "/api/v1/portfolios/portfolio-market-http/market-data/schedule"
+			etag := scheduleResponseETag(t, handler, cookie, csrf)
+			before := scheduleInvariantSnapshot(t, database.DB, &recordingScheduleRuntime{}, etag)
+			ctx, cancel := test.cancel(context.Background())
+			defer cancel()
+			request := httptest.NewRequestWithContext(ctx, http.MethodPut, "https://example.test"+schedulePath, strings.NewReader(`{"enabled":true,"cron":"0 6 * * *","timezone":"Asia/Singapore"}`))
+			request.AddCookie(cookie)
+			request.Header.Set("Origin", "https://example.test")
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set(auth.CSRFHeaderName, csrf)
+			request.Header.Set("If-Match", etag)
+			responses := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				responses <- response
+			}()
+			select {
+			case <-runtime.started:
+			case <-time.After(time.Second):
+				t.Fatal("runtime reconfigure did not become pending")
+			}
+			if test.name == "caller cancellation" {
+				cancel()
+			}
+			var response *httptest.ResponseRecorder
+			select {
+			case response = <-responses:
+			case <-time.After(time.Second):
+				t.Fatal("runtime cancellation did not return")
+			}
+			if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), `"error":"schedule_runtime_unavailable"`) {
+				t.Fatalf("runtime %s status=%d body=%s", test.name, response.Code, response.Body.String())
+			}
+			select {
+			case <-runtime.finished:
+			case <-time.After(time.Second):
+				t.Fatal("runtime did not observe cancellation")
+			}
+			if runtime.attempts != 1 || runtime.configured {
+				t.Fatalf("runtime state after %s: %+v", test.name, runtime)
+			}
+			gotETag := scheduleResponseETag(t, handler, cookie, csrf)
+			got := scheduleInvariantSnapshot(t, database.DB, &recordingScheduleRuntime{}, gotETag)
+			if !reflect.DeepEqual(got, before) {
+				t.Fatalf("runtime %s changed durable schedule state: before=%+v after=%+v", test.name, before, got)
+			}
+		})
 	}
 }
 

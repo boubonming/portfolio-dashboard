@@ -387,40 +387,46 @@ describe('MarketDataPanel', () => {
     }
   })
 
-  it('drives preset, time, custom cron, enablement, timezone, and currency validation through user events', async () => {
+  it('drives Daily, Weekdays, and Custom cron bodies plus currency validation through user events', async () => {
     const user = userEvent.setup()
     const { fetchMock } = renderRoutedSchedule()
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Preset' })).toBeTruthy())
     const preset = screen.getByRole('combobox', { name: 'Preset' })
     const time = screen.getByLabelText('Schedule local time')
     expect((time as HTMLInputElement).value).toBe('05:00')
+
+    const currency = screen.getByRole('textbox', { name: 'Reporting currency' })
+    await user.type(currency, 'US')
+    expect((currency as HTMLInputElement).value).toBe('US')
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    expect(screen.getByRole('alert').textContent).toMatch(/blank or three uppercase letters/i)
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(0)
+    await user.clear(currency)
+    await user.type(currency, 'usd')
+    expect((currency as HTMLInputElement).value).toBe('USD')
+
+    await user.selectOptions(preset, 'daily')
+    await user.clear(time)
+    await user.type(time, '05:07')
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(1))
+    expect(JSON.parse(String((fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT') as [RequestInfo | URL, RequestInit])[1].body))).toEqual({ enabled: true, cron: '7 5 * * *', timezone: 'Asia/Singapore', reporting_currency: 'USD' })
+
     await user.selectOptions(preset, 'weekdays')
     await user.clear(time)
     await user.type(time, '23:59')
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(2))
+    expect(JSON.parse(String((fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')[1] as [RequestInfo | URL, RequestInit])[1].body))).toEqual({ enabled: true, cron: '59 23 * * 1-5', timezone: 'Asia/Singapore', reporting_currency: 'USD' })
+
     await user.selectOptions(preset, 'custom')
     const cron = screen.getByRole('textbox', { name: 'Custom five-field cron' })
     expect((cron as HTMLInputElement).value).toBe('59 23 * * 1-5')
     await user.clear(cron)
     await user.type(cron, '0 4 * * 0')
-    const enabled = screen.getByRole('checkbox', { name: /enable scheduled refreshes/i })
-    await user.click(enabled)
-    expect((enabled as HTMLInputElement).checked).toBe(false)
-    await user.click(enabled)
-    expect((enabled as HTMLInputElement).checked).toBe(true)
-    const timezone = screen.getByRole('textbox', { name: 'Schedule timezone' })
-    await user.clear(timezone)
-    await user.type(timezone, 'bad timezone')
-    const currency = screen.getByRole('textbox', { name: 'Reporting currency' })
-    expect((currency as HTMLInputElement).value).toBe('')
-    fireEvent.change(currency, { target: { value: 'US' } })
     await user.click(screen.getByRole('button', { name: 'Save schedule' }))
-    expect(screen.getByRole('alert').textContent).toMatch(/valid bounded IANA timezone/i)
-    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(0)
-    await user.clear(timezone)
-    await user.type(timezone, 'UTC')
-    fireEvent.change(currency, { target: { value: '' } })
-    fireEvent.change(currency, { target: { value: 'USD' } })
-    expect((currency as HTMLInputElement).value).toBe('USD')
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(3))
+    expect(JSON.parse(String((fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')[2] as [RequestInfo | URL, RequestInit])[1].body))).toEqual({ enabled: true, cron: '0 4 * * 0', timezone: 'Asia/Singapore', reporting_currency: 'USD' })
   })
 
   it('saves through the rendered button with exact request metadata and displays the returned revision and ETag', async () => {
@@ -510,36 +516,56 @@ describe('MarketDataPanel', () => {
   it('aborts every pending schedule request on scope change and unmount, ignoring stale completions', async () => {
     const user = userEvent.setup()
     const initialGet = deferred<Response>()
+    const nextGet = deferred<Response>()
+    const finalGet = deferred<Response>()
     const pendingPut = deferred<Response>()
-    const signals: AbortSignal[] = []
+    const scheduleGetSignals: AbortSignal[] = []
+    let pendingPutSignal: AbortSignal | null | undefined
     let portfolio = 'portfolio-a'
     const oldSchedule = environmentSchedule()
     const newSchedule = environmentSchedule({ portfolio_id: 'portfolio-b', etag: scheduleEtag('f') })
+    const finalSchedule = environmentSchedule({ portfolio_id: 'portfolio-c', etag: scheduleEtag('8') })
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.signal) signals.push(init.signal)
       const path = String(input)
       if (path.endsWith('/schedule')) {
-        if (init?.method === 'PUT') return pendingPut.promise
-        return portfolio === 'portfolio-a' ? initialGet.promise : json(newSchedule)
+        if (init?.method === 'PUT') {
+          pendingPutSignal = init.signal
+          return pendingPut.promise
+        }
+        if (init?.signal) scheduleGetSignals.push(init.signal)
+        if (portfolio === 'portfolio-a') return initialGet.promise
+        if (portfolio === 'portfolio-b') return nextGet.promise
+        return finalGet.promise
       }
       if (path.endsWith('/discover')) return json({ portfolio_id: portfolio, etag: '"setup-1"', results: [] })
       return json({ ...setup(), portfolio_id: portfolio })
     })
     vi.stubGlobal('fetch', fetchMock)
     const rendered = render(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="MYR" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
-    await waitFor(() => expect(signals.length).toBeGreaterThanOrEqual(2))
-    initialGet.resolve(await json(oldSchedule))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
-    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
-    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toBe(true))
+    await waitFor(() => expect(scheduleGetSignals).toHaveLength(1))
     portfolio = 'portfolio-b'
     rendered.rerender(<MarketDataPanel portfolioID="portfolio-b" reportingCurrency="MYR" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(scheduleGetSignals).toHaveLength(2))
+    expect(scheduleGetSignals[0].aborted).toBe(true)
+    nextGet.resolve(await json(newSchedule))
     await waitFor(() => expect(screen.getByLabelText('Schedule revision').textContent).toContain(newSchedule.etag))
-    pendingPut.resolve(await json(savedSchedule({ portfolio_id: 'portfolio-a', revision: 99, etag: scheduleEtag('9') })))
+    initialGet.resolve(await json(oldSchedule))
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(screen.getByLabelText('Schedule revision').textContent).toContain(newSchedule.etag)
+
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(pendingPutSignal).toBeInstanceOf(AbortSignal))
+    portfolio = 'portfolio-c'
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-c" reportingCurrency="MYR" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(pendingPutSignal?.aborted).toBe(true))
+    await waitFor(() => expect(scheduleGetSignals).toHaveLength(3))
+    finalGet.resolve(await json(finalSchedule))
+    await waitFor(() => expect(screen.getByLabelText('Schedule revision').textContent).toContain(finalSchedule.etag))
+    pendingPut.resolve(await json(savedSchedule({ portfolio_id: 'portfolio-a', revision: 99, etag: scheduleEtag('9') })))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(screen.getByLabelText('Schedule revision').textContent).toContain(finalSchedule.etag)
     rendered.unmount()
-    expect(signals.every((signal) => signal.aborted)).toBe(true)
+    expect(scheduleGetSignals.every((signal) => signal.aborted)).toBe(true)
   })
 
   it('keeps the rendered schedule contract accessible and verifies production callbacks before activation', async () => {
