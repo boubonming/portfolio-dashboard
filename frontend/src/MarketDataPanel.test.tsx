@@ -568,6 +568,58 @@ describe('MarketDataPanel', () => {
     expect(scheduleGetSignals.every((signal) => signal.aborted)).toBe(true)
   })
 
+  it('aborts a pending rendered schedule PUT on unmount and ignores its stale response', async () => {
+    const user = userEvent.setup()
+    const pendingPut = deferred<Response>()
+    const onUnauthorized = vi.fn()
+    const onReload = vi.fn()
+    let pendingPutSignal: AbortSignal | null | undefined
+    let staleResponseRead = false
+    const staleSchedule = savedSchedule({ revision: 99, etag: scheduleEtag('9') })
+    const stalePutResponse = { ok: true, status: 200, headers: new Headers(), json: async () => { staleResponseRead = true; return staleSchedule } } as Response
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/market-data/schedule')) {
+        if (init?.method === 'PUT') {
+          pendingPutSignal = init.signal
+          return pendingPut.promise
+        }
+        return json(environmentSchedule())
+      }
+      if (path.endsWith('/market-data/discover')) return json({ portfolio_id: 'portfolio-a', etag: '"setup-1"', results: [] })
+      return json(setup())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const rendered = render(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="MYR" csrfToken="csrf-token" onUnauthorized={onUnauthorized} onReload={onReload} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    const baselineRevision = screen.getByLabelText('Schedule revision').textContent
+    const baselineSource = screen.getByLabelText('Schedule source').textContent
+    expect(baselineRevision).toContain(`Schedule revision: 0 · ETag: ${scheduleEtag('a')}`)
+    expect(baselineSource).toContain('environment')
+
+    const observer = new MutationObserver(() => undefined)
+    observer.observe(rendered.container, { attributes: true, characterData: true, childList: true, subtree: true })
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(pendingPutSignal).toBeInstanceOf(AbortSignal))
+    const putCall = fetchMock.mock.calls.find(([input, request]) => String(input).endsWith('/market-data/schedule') && request?.method === 'PUT') as unknown as [RequestInfo | URL, RequestInit]
+    expect(putCall[1].signal).toBeInstanceOf(AbortSignal)
+    expect(putCall[1].signal).toBe(pendingPutSignal)
+    observer.takeRecords()
+
+    rendered.unmount()
+    observer.takeRecords()
+    expect(pendingPutSignal?.aborted).toBe(true)
+
+    pendingPut.resolve(stalePutResponse)
+    await waitFor(() => expect(staleResponseRead).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(observer.takeRecords()).toHaveLength(0)
+    expect(onReload).not.toHaveBeenCalled()
+    expect(onUnauthorized).not.toHaveBeenCalled()
+    expect(fetchMock.mock.calls.filter(([input, request]) => String(input).endsWith('/market-data/schedule') && request?.method !== 'PUT')).toHaveLength(1)
+    observer.disconnect()
+  })
+
   it('keeps the rendered schedule contract accessible and verifies production callbacks before activation', async () => {
     const onUnauthorized = vi.fn()
     const onReload = vi.fn()
