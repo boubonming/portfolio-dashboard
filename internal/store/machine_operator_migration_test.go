@@ -176,6 +176,16 @@ func TestMarketRefreshCLIActorMigrationGuard(t *testing.T) {
 	if _, err := database.ExecContext(ctx, `INSERT INTO market_refresh_idempotency(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, valid...); err != nil {
 		t.Fatalf("valid CLI receipt rejected: %v", err)
 	}
+	if _, err := database.ExecContext(ctx, `UPDATE market_refresh_idempotency SET permission_market_data_refresh=0 WHERE actor_category='cli' AND actor_id='market-refresh-cli' AND idempotency_key='cli-migration-key'`); err == nil {
+		t.Fatal("CLI receipt permission downgrade was accepted")
+	}
+	var permission int
+	if err := database.QueryRowContext(ctx, `SELECT permission_market_data_refresh FROM market_refresh_idempotency WHERE actor_category='cli' AND actor_id='market-refresh-cli' AND idempotency_key='cli-migration-key'`).Scan(&permission); err != nil {
+		t.Fatal(err)
+	}
+	if permission != 1 {
+		t.Fatalf("CLI receipt permission after rejected downgrade=%d", permission)
+	}
 	for _, actorID := range []string{"not-the-cli", "market-refresh-scheduler"} {
 		invalid := append([]any(nil), valid...)
 		invalid[1] = actorID
@@ -189,5 +199,22 @@ func TestMarketRefreshCLIActorMigrationGuard(t *testing.T) {
 	invalidCategory[4] = "cli-invalid-category"
 	if _, err := database.ExecContext(ctx, `INSERT INTO market_refresh_idempotency(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, invalidCategory...); err == nil {
 		t.Fatal("unsupported market refresh actor category was accepted")
+	}
+	scheduler := append([]any(nil), valid...)
+	scheduler[0] = "scheduler"
+	scheduler[1] = "market-refresh-scheduler"
+	scheduler[4] = "scheduler-migration-key"
+	scheduler[9] = "refresh-scheduler"
+	if _, err := database.ExecContext(ctx, `INSERT INTO market_refresh_idempotency(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, scheduler...); err != nil {
+		t.Fatalf("valid scheduler receipt rejected: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE market_refresh_idempotency SET permission_market_data_refresh=0 WHERE actor_category='scheduler' AND actor_id='market-refresh-scheduler' AND idempotency_key='scheduler-migration-key'`); err == nil {
+		t.Fatal("scheduler receipt permission downgrade was accepted")
+	}
+	if err := database.QueryRowContext(ctx, `SELECT permission_market_data_refresh FROM market_refresh_idempotency WHERE actor_category='scheduler' AND actor_id='market-refresh-scheduler' AND idempotency_key='scheduler-migration-key'`).Scan(&permission); err != nil {
+		t.Fatal(err)
+	}
+	if permission != 1 {
+		t.Fatalf("scheduler receipt permission after rejected downgrade=%d", permission)
 	}
 }

@@ -112,7 +112,7 @@ BEGIN
 END;
 
 CREATE TRIGGER market_refresh_idempotency_scheduler_actor_update_guard
-BEFORE UPDATE OF actor_category,actor_id ON market_refresh_idempotency
+BEFORE UPDATE OF actor_category,actor_id,permission_market_data_refresh ON market_refresh_idempotency
 WHEN NEW.actor_category = 'scheduler' AND (NEW.actor_id <> 'market-refresh-scheduler' OR NEW.permission_market_data_refresh <> 1)
 BEGIN
     SELECT RAISE(ABORT, 'scheduled market refresh requires the canonical scheduler actor');
@@ -126,7 +126,7 @@ BEGIN
 END;
 
 CREATE TRIGGER market_refresh_idempotency_cli_actor_update_guard
-BEFORE UPDATE OF actor_category,actor_id ON market_refresh_idempotency
+BEFORE UPDATE OF actor_category,actor_id,permission_market_data_refresh ON market_refresh_idempotency
 WHEN NEW.actor_category = 'cli' AND (NEW.actor_id <> 'market-refresh-cli' OR NEW.permission_market_data_refresh <> 1)
 BEGIN
     SELECT RAISE(ABORT, 'CLI market refresh requires the canonical CLI actor');
