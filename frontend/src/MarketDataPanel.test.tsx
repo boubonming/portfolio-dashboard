@@ -604,11 +604,13 @@ describe('MarketDataPanel', () => {
     const putCall = fetchMock.mock.calls.find(([input, request]) => String(input).endsWith('/market-data/schedule') && request?.method === 'PUT') as unknown as [RequestInfo | URL, RequestInit]
     expect(putCall[1].signal).toBeInstanceOf(AbortSignal)
     expect(putCall[1].signal).toBe(pendingPutSignal)
+    const abortSignal = putCall[1].signal as AbortSignal
+    expect(abortSignal.aborted).toBe(false)
     observer.takeRecords()
 
     rendered.unmount()
     observer.takeRecords()
-    expect(pendingPutSignal?.aborted).toBe(true)
+    expect(abortSignal.aborted).toBe(true)
 
     pendingPut.resolve(stalePutResponse)
     await waitFor(() => expect(staleResponseRead).toBe(true))
