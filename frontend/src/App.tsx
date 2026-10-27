@@ -37,6 +37,7 @@ import ThesisEditor from './ThesisEditor'
 import Reviews, { type FeedbackAttemptStore } from './Reviews'
 import HoldingMutations, { validatePortfolioETag } from './HoldingMutations'
 import MarketDataPanel from './MarketDataPanel'
+import SettingsPanel from './SettingsPanel'
 
 export type Freshness = {
   status: 'fresh' | 'stale' | 'missing' | 'future' | 'invalid' | string
@@ -476,7 +477,7 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
 
 export default function App() {
   const [currency, setCurrency] = useState('MYR')
-  const [view, setView] = useState<'overview' | 'holdings' | 'market' | 'activity' | 'reviews'>('holdings')
+  const [view, setView] = useState<'overview' | 'holdings' | 'market' | 'activity' | 'reviews' | 'settings'>('holdings')
   const [reviewsHoldingId, setReviewsHoldingId] = useState<string | undefined>(undefined)
   const [data, setData] = useState<PortfolioOverview | null>(null)
   const [overviewETag, setOverviewETag] = useState<string | undefined>(undefined)
@@ -958,6 +959,7 @@ export default function App() {
     { value: 'activity', label: 'Activity' },
     { value: 'reviews', label: 'Review', ariaLabel: 'Reviews' },
     { value: 'market', label: 'Market Data', ariaLabel: 'Market data' },
+    { value: 'settings', label: 'Settings' },
   ]
 
   return (
@@ -1034,7 +1036,8 @@ export default function App() {
       )}
       </>}
       {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={(keyboardActivated) => loadActivity(activity?.next_cursor, true, keyboardActivated)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
-      {view === 'market' && <MarketDataPanel portfolioID={data?.portfolio.id || activityPortfolioID} reportingCurrency={currency} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} onReload={() => load()} />}
+      {view === 'market' && <MarketDataPanel portfolioID={data?.portfolio.id || activityPortfolioID} reportingCurrency={currency} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} />}
+      {view === 'settings' && data && <Box component="section" className="settings-page" aria-labelledby="settings-title" sx={{ mt: 3 }}><Typography component="h1" id="settings-title" variant="h4" sx={{ mb: 2 }}>Settings</Typography><SettingsPanel portfolioID={data.portfolio.id} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} onReload={() => load()} /></Box>}
       {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} feedbackAttempts={feedbackAttemptsRef.current} onUnauthorized={handleThesisUnauthorized} onBackToOverview={closeReviews} />}
       </>}
     </Box>

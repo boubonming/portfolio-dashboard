@@ -532,8 +532,8 @@ describe('Portfolio Dashboard', () => {
     expect(headerElement.className).toContain('MuiAppBar-root')
     expect(headerElement.querySelector('.MuiToolbar-dense')).toBeTruthy()
     expect(headerElement.querySelector('.MuiTabs-root')).toBeTruthy()
-    expect(headerElement.querySelectorAll('.MuiTab-root')).toHaveLength(5)
-    expect(within(headerElement).getAllByRole('tab')).toHaveLength(5)
+    expect(headerElement.querySelectorAll('.MuiTab-root')).toHaveLength(6)
+    expect(within(headerElement).getAllByRole('tab')).toHaveLength(6)
     expect(headerElement.querySelectorAll('.nav-compat-button')).toHaveLength(0)
     expect(within(headerElement).queryAllByRole('button', { name: /^(Overview|Holdings|Activity|Reviews|Market data)$/ })).toHaveLength(0)
     expect(screen.getByRole('tab', { name: 'Holdings' }).getAttribute('aria-selected')).toBe('true')
@@ -543,6 +543,30 @@ describe('Portfolio Dashboard', () => {
     expect(screen.getByRole('menuitem', { name: 'Archive holding' })).toBeTruthy()
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() => expect(document.activeElement).toBe(triggers[1]))
+  })
+
+  it('routes Market Data without schedule requests and Settings to the portfolio schedule surface', async () => {
+    const schedule = { portfolio_id: 'portfolio-default', enabled: true, cron: '0 5 * * *', timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: `"${'a'.repeat(64)}"`, effective: true, degraded: false, runtime_status: 'active' }
+    const fetchMock = authenticatedFetch((input) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/schedule')) return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => schedule } as Response)
+      if (url.endsWith('/market-data/discover')) return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({ portfolio_id: 'portfolio-default', etag: '"setup-1"', results: [] }) } as Response)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => marketSetup } as Response)
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market data' })).toBeTruthy())
+    expect(screen.queryByRole('heading', { name: 'Market refresh schedule' })).toBeNull()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/schedule'))).toHaveLength(0)
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy())
+    expect(screen.getByRole('tab', { name: 'Settings' }).getAttribute('aria-selected')).toBe('true')
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Market refresh schedule' })).toBeTruthy())
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/schedule'))).toHaveLength(1)
+    expect(String(fetchMock.mock.calls.find(([input]) => String(input).endsWith('/market-data/schedule'))?.[0])).toContain('/portfolios/portfolio-default/market-data/schedule')
   })
 
   it('renders the migrated Holdings controls and table with MUI semantics', async () => {
