@@ -12,7 +12,7 @@ button { cursor: pointer; }
 .reviews-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select),
 .review-detail :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select),
 .thesis-surface :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select),
-.market-data-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select),
+:is(.market-data-card, .settings-surface) :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select),
 .holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):not(.PrivateSwitchBase-input) {
   background: #172322;
   border: 1px solid #41615d;
@@ -25,7 +25,7 @@ button { cursor: pointer; }
 .reviews-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):focus-visible,
 .review-detail :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):focus-visible,
 .thesis-surface :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):focus-visible,
-.market-data-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):focus-visible,
+:is(.market-data-card, .settings-surface) :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):focus-visible,
 .holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):not(.PrivateSwitchBase-input):focus-visible {
   border-color: #75d5c7;
   outline: 3px solid #75d5c7;
@@ -35,13 +35,13 @@ button { cursor: pointer; }
 .reviews-card button:not(.MuiButtonBase-root),
 .review-detail button:not(.MuiButtonBase-root),
 .thesis-surface button:not(.MuiButtonBase-root),
-.market-data-card button:not(.MuiButtonBase-root),
+:is(.market-data-card, .settings-surface) button:not(.MuiButtonBase-root),
 .holding-mutation-card button:not(.MuiButtonBase-root) { cursor: pointer; }
 .activity-card :is(input[type="checkbox"], input[type="radio"]),
 .reviews-card :is(input[type="checkbox"], input[type="radio"]),
 .review-detail :is(input[type="checkbox"], input[type="radio"]),
 .thesis-surface :is(input[type="checkbox"], input[type="radio"]),
-.market-data-card :is(input[type="checkbox"], input[type="radio"]),
+:is(.market-data-card, .settings-surface) :is(input[type="checkbox"], input[type="radio"]),
 .holding-mutation-card :is(input[type="checkbox"], input[type="radio"]):not(.PrivateSwitchBase-input) {
   accent-color: #52c7b8;
   padding: 0;
@@ -50,7 +50,7 @@ button { cursor: pointer; }
 .reviews-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):disabled,
 .review-detail :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):disabled,
 .thesis-surface :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):disabled,
-.market-data-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):disabled,
+:is(.market-data-card, .settings-surface) :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):disabled,
 .holding-mutation-card :is(button, input, select, textarea):not(.MuiButtonBase-root):not(.MuiInputBase-input):not(.MuiInput-input):not(.MuiOutlinedInput-input):not(.MuiSelect-select):not(.MuiNativeSelect-select):not(.PrivateSwitchBase-input):disabled {
   cursor: not-allowed;
   opacity: .65;
@@ -185,7 +185,7 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .archive-row { align-items: center; border-bottom: 1px solid #2d4441; display: flex; gap: 1rem; justify-content: space-between; min-width: 0; padding: .7rem 0; }
 .archive-row:last-child { border-bottom: 0; }
 .archive-row > span { min-width: 0; overflow-wrap: anywhere; }
-.market-data-card { background: #172322; border: 1px solid #41615d; border-radius: 12px; margin-top: 1.5rem; padding: clamp(1rem, 3vw, 2rem); }
+:is(.market-data-card, .settings-surface) { background: #172322; border: 1px solid #41615d; border-radius: 12px; margin-top: 1.5rem; padding: clamp(1rem, 3vw, 2rem); }
 .schedule-card { border: 1px solid #41615d; border-radius: 10px; margin: 1rem 0 1.5rem; padding: 1rem; }
 .schedule-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); margin: 1rem 0; }
 .schedule-grid label { display: grid; gap: .35rem; }
