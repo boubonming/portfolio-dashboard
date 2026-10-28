@@ -287,6 +287,15 @@ func (s *Store) AddFXRate(ctx context.Context, input FXInput) (domain.FXRate, er
 // deliberately do not open or commit a transaction; all source, audit, and
 // activity rows therefore share one atomic boundary.
 func (s *Store) persistQuoteTx(ctx context.Context, tx *sql.Tx, quote domain.Quote, provided []string) error {
+	marketAt, err := normalizeObservation(quote.MarketAt, false, s.now())
+	if err != nil {
+		return fmt.Errorf("normalize quote market timestamp: %w", err)
+	}
+	fetchedAt, err := normalizeObservation(quote.FetchedAt, false, s.now())
+	if err != nil {
+		return fmt.Errorf("normalize quote fetched timestamp: %w", err)
+	}
+	quote.MarketAt, quote.FetchedAt = marketAt, fetchedAt
 	portfolioIDs, err := portfoliosForInstrument(ctx, tx, quote.InstrumentID)
 	if err != nil {
 		return fmt.Errorf("find quote portfolios: %w", err)
@@ -331,6 +340,15 @@ func (s *Store) persistQuoteTx(ctx context.Context, tx *sql.Tx, quote domain.Quo
 }
 
 func (s *Store) persistFXTx(ctx context.Context, tx *sql.Tx, fx domain.FXRate, provided []string) error {
+	marketAt, err := normalizeObservation(fx.MarketAt, false, s.now())
+	if err != nil {
+		return fmt.Errorf("normalize FX market timestamp: %w", err)
+	}
+	fetchedAt, err := normalizeObservation(fx.FetchedAt, false, s.now())
+	if err != nil {
+		return fmt.Errorf("normalize FX fetched timestamp: %w", err)
+	}
+	fx.MarketAt, fx.FetchedAt = marketAt, fetchedAt
 	portfolioIDs, err := portfoliosForFX(ctx, tx, fx.BaseCurrency, fx.QuoteCurrency)
 	if err != nil {
 		return fmt.Errorf("find FX portfolios: %w", err)

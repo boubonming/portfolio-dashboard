@@ -10,9 +10,24 @@ import (
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/auth"
+	"github.com/boubonming/portfolio-dashboard/internal/domain"
+	"github.com/boubonming/portfolio-dashboard/internal/marketdata"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
+
+type snapshotTimestampClient struct {
+	marketAt  string
+	fetchedAt string
+}
+
+func (snapshotTimestampClient) Name() marketdata.Provider { return marketdata.ProviderFinnhub }
+func (snapshotTimestampClient) FX(context.Context, marketdata.FXRequest) (domain.FXRate, error) {
+	return domain.FXRate{}, marketdata.ErrUnsupportedOperation
+}
+func (c snapshotTimestampClient) Quote(_ context.Context, request marketdata.QuoteRequest) (domain.Quote, error) {
+	return domain.Quote{ID: "http-refresh-quote", InstrumentID: request.InstrumentID, Symbol: request.Symbol, Price: "123.45", Currency: request.Currency, Source: marketdata.ProviderFinnhub.String(), MarketAt: c.marketAt, FetchedAt: c.fetchedAt, Basis: "close", Provenance: "HTTP fixture"}, nil
+}
 
 func machineFixtureHandler(t *testing.T) (http.Handler, func()) {
 	t.Helper()
@@ -166,6 +181,69 @@ func TestSnapshotMachineReadsCompleteIncompleteAndHistoricalBranches(t *testing.
 	if latest["snapshot_id"] != second.SnapshotID {
 		t.Fatalf("latest snapshot=%v want=%s", latest["snapshot_id"], second.SnapshotID)
 	}
+}
+
+func TestSnapshotMachineReadsRefreshedCanonicalObservationAtLatestAndExactTargets(t *testing.T) {
+	database := apiFixture(t)
+	defer database.Close()
+	ctx := context.Background()
+	if _, err := database.AddProviderMapping(ctx, store.ProviderMappingInput{InstrumentID: "instrument-api", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "FIX", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "HTTP fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	fetchedAt := now.Add(-time.Minute).Truncate(time.Second)
+	refresh, err := database.Refresh(ctx, store.RefreshOptions{PortfolioID: "portfolio-api", Providers: []marketdata.Provider{marketdata.ProviderFinnhub}, Clients: map[marketdata.Provider]marketdata.ProviderClient{marketdata.ProviderFinnhub: snapshotTimestampClient{marketAt: fetchedAt.Format(time.RFC3339), fetchedAt: fetchedAt.Format(time.RFC3339)}}, AsOf: now})
+	if err != nil || refresh.Status != "complete" {
+		t.Fatalf("refresh=%+v err=%v", refresh, err)
+	}
+	status, err := database.CreateSnapshot(ctx, store.SnapshotRequest{PortfolioID: "portfolio-api", ReportingCurrency: "MYR", CalculationVersion: "machine.refresh.timestamp.v1", AsOf: now, MaxAge: 2 * time.Hour})
+	if err != nil || !status.Complete {
+		t.Fatalf("snapshot=%+v err=%v", status, err)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte("fixture-only-value"), bcrypt.MinCost+6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "machine-fixture-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ-abcdef"
+	handler, err := NewHandlerWithAuth(database, auth.Config{Username: "fixture-user", PasswordHash: string(hash), SessionSecret: fixtureSessionSecret(), PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour, Machine: auth.MachineConfig{PrincipalID: "machine-fixture", PortfolioID: "portfolio-api", BearerSecret: secret, PortfolioRead: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(path string) map[string]any {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer "+secret)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	for _, body := range []map[string]any{get("/api/v1/portfolios/portfolio-api/snapshots/latest"), get("/api/v1/portfolios/portfolio-api/snapshots/" + status.SnapshotID)} {
+		if body["snapshot_id"] != status.SnapshotID || body["state"] != "complete" || body["complete"] != true {
+			t.Fatalf("snapshot body=%v", body)
+		}
+		holdings, ok := body["holdings"].([]any)
+		if !ok || len(holdings) == 0 {
+			t.Fatalf("snapshot holdings=%v", body["holdings"])
+		}
+		if !strings.Contains(responseJSON(t, body), ".000000000Z") {
+			t.Fatalf("snapshot timestamps were not canonical: %v", body)
+		}
+	}
+}
+
+func responseJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
 }
 
 func TestSnapshotErrorsUsePhaseDEnvelope(t *testing.T) {

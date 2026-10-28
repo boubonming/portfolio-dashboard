@@ -249,4 +249,94 @@ func TestValidCurrencyUsesExactOpenAPIGrammar(t *testing.T) {
 	}
 }
 
+func TestReviewSnapshotAcceptsHistoricalObservationRepresentationAfterHashVerification(t *testing.T) {
+	fixture := newReviewRegressionFixture(t)
+	defer fixture.close()
+	ctx := context.Background()
+	payload, ok := mustSnapshotPayload(t, fixture.store, fixture.snapshot.SnapshotID)
+	if !ok {
+		t.Fatal("snapshot payload type mismatch")
+	}
+	legacyID := "legacy-observation-representation"
+	payload.SnapshotID = legacyID
+	payload.CalculationVersion = "legacy.v1"
+	payload.Input.Quotes[0].MarketAt = "2026-01-02T12:00:00Z"
+	payload.Input.Quotes[0].FetchedAt = "2026-01-02T12:00:00Z"
+	payload.Valuation.Lots[0].Freshness = domain.ClassifyFreshness(payload.Input.Quotes[0].MarketAt, payload.Input.AsOf, payload.MaxAge)
+	payload.Valuation.SourceTimestamps = []string{payload.Input.Quotes[0].MarketAt}
+	createdAt, err := time.Parse("2006-01-02T15:04:05.000000000Z", payload.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload.CreatedAt = canonicalSnapshotTime(createdAt.Add(time.Second))
+	digest, err := snapshotInputDigest(payload.CalculationVersion, payload.MaxAge, payload.Input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fixture.store.DB.Exec(`INSERT INTO snapshots(id,portfolio_id,calculation_version,payload,created_at,input_hash) VALUES(?,?,?,?,?,?)`, payload.SnapshotID, payload.PortfolioID, payload.CalculationVersion, encoded, payload.CreatedAt, hex.EncodeToString(digest[:])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fixture.store.DB.Exec(`INSERT INTO review_snapshots(portfolio_id,snapshot_id,calculation_version) VALUES(?,?,?)`, payload.PortfolioID, payload.SnapshotID, payload.CalculationVersion); err != nil {
+		t.Fatal(err)
+	}
+	for _, lot := range payload.Input.Lots {
+		if _, err = fixture.store.DB.Exec(`INSERT INTO snapshot_holdings(portfolio_id,snapshot_id,holding_id,instrument_id) VALUES(?,?,?,?)`, payload.PortfolioID, payload.SnapshotID, lot.ID, lot.InstrumentID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var hashBefore string
+	if err = fixture.store.DB.QueryRow(`SELECT input_hash FROM snapshots WHERE id=?`, payload.SnapshotID).Scan(&hashBefore); err != nil {
+		t.Fatal(err)
+	}
+	exact, err := fixture.store.ReviewSnapshot(ctx, payload.PortfolioID, payload.SnapshotID, false)
+	if err != nil {
+		t.Fatalf("historical exact review: %v", err)
+	}
+	if exact.SnapshotID != legacyID || exact.Holdings[0].MarketAt != "2026-01-02T12:00:00.000000000Z" {
+		t.Fatalf("historical exact result=%+v", exact)
+	}
+	latest, err := fixture.store.ReviewSnapshot(ctx, payload.PortfolioID, "ignored", true)
+	if err != nil || latest.SnapshotID != legacyID {
+		t.Fatalf("historical latest=%+v err=%v", latest, err)
+	}
+	var hashAfter string
+	if err = fixture.store.DB.QueryRow(`SELECT input_hash FROM snapshots WHERE id=?`, payload.SnapshotID).Scan(&hashAfter); err != nil {
+		t.Fatal(err)
+	}
+	if hashAfter != hashBefore {
+		t.Fatalf("historical read changed input hash from %q to %q", hashBefore, hashAfter)
+	}
+	canonicalInput, err := canonicalizeSnapshotInput(payload.Input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalDigest, err := snapshotInputDigest(payload.CalculationVersion, payload.MaxAge, canonicalInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fixture.store.DB.Exec(`DROP TRIGGER snapshots_immutable_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fixture.store.DB.Exec(`UPDATE snapshots SET input_hash=? WHERE id=?`, hex.EncodeToString(canonicalDigest[:]), legacyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fixture.store.ReviewSnapshot(ctx, payload.PortfolioID, payload.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
+		t.Fatalf("canonicalized hash accepted for historical payload: %v", err)
+	}
+}
+
 func stringPtr(value string) *string { return &value }
+
+func mustSnapshotPayload(t *testing.T, s *Store, snapshotID string) (snapshotPayload, bool) {
+	t.Helper()
+	raw, err := s.SnapshotShow(context.Background(), snapshotID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := raw.(snapshotPayload)
+	return payload, ok
+}

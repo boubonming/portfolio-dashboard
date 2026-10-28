@@ -95,7 +95,17 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	if err != nil || subtle.ConstantTimeCompare(expectedDigest[:], storedDigest[:]) != 1 {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
-	if !canonicalSnapshotLots(payload.Input.Lots, payload.Valuation.Lots) {
+	// Historical snapshots may contain valid RFC3339 observation strings emitted
+	// before the writer canonicalized them. The hash above deliberately covers
+	// the original representation; only after it verifies do we normalize a
+	// copy for strict semantic and wire validation.
+	canonicalInput, err := canonicalizeSnapshotInput(payload.Input)
+	if err != nil {
+		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
+	}
+	canonicalPayload := payload
+	canonicalPayload.Input = canonicalInput
+	if !canonicalSnapshotLots(canonicalPayload.Input.Lots, canonicalPayload.Valuation.Lots) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
 	var reviewVersion string
@@ -111,7 +121,7 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	if len(payload.Valuation.Lots) != len(payload.Input.Lots) || len(payload.Valuation.MissingDependencies) > 100 || len(payload.Valuation.StaleDependencies) > 100 || len(payload.Valuation.InvalidDependencies) > 100 {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
-	if !validSnapshotInput(payload) {
+	if !validSnapshotInput(canonicalPayload) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
 	seenDependencies := make(map[string]struct{})
@@ -138,7 +148,7 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	if !payload.Valuation.Complete && len(seenDependencies) == 0 && !hasIncompleteHolding(payload.Valuation.Lots) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
-	if !payload.Valuation.Complete && !incompleteDependenciesMatch(payload.Input, payload.Valuation.Lots, payload.Valuation.MissingDependencies, payload.Valuation.StaleDependencies, payload.Valuation.InvalidDependencies, payload.Valuation.ReportingCurrency) {
+	if !payload.Valuation.Complete && !incompleteDependenciesMatch(canonicalPayload.Input, canonicalPayload.Valuation.Lots, canonicalPayload.Valuation.MissingDependencies, canonicalPayload.Valuation.StaleDependencies, canonicalPayload.Valuation.InvalidDependencies, canonicalPayload.Valuation.ReportingCurrency) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
 
@@ -170,9 +180,9 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	} else {
 		result.State = "incomplete"
 	}
-	result.Holdings = make([]domain.ReviewHoldingContext, 0, len(payload.Input.Lots))
-	quotes := make(map[string]domain.Quote, len(payload.Input.Quotes))
-	for _, quote := range payload.Input.Quotes {
+	result.Holdings = make([]domain.ReviewHoldingContext, 0, len(canonicalPayload.Input.Lots))
+	quotes := make(map[string]domain.Quote, len(canonicalPayload.Input.Quotes))
+	for _, quote := range canonicalPayload.Input.Quotes {
 		if !validID(quote.ID, 128) || !validID(quote.InstrumentID, 128) || !validDecimal(quote.Price) || !validCurrency(quote.Currency) || !validCanonicalTime(quote.MarketAt) || strings.TrimSpace(quote.Source) == "" || len(quote.Source) > 128 {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 		}
@@ -181,7 +191,7 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 		}
 		quotes[quote.ID] = quote
 	}
-	for index, inputLot := range payload.Input.Lots {
+	for index, inputLot := range canonicalPayload.Input.Lots {
 		valuedLot := payload.Valuation.Lots[index]
 		if !validID(inputLot.ID, 128) || valuedLot.LotID != inputLot.ID || valuedLot.Symbol != inputLot.Symbol || valuedLot.InstrumentID != inputLot.InstrumentID || valuedLot.Currency != inputLot.Currency || valuedLot.Quantity != inputLot.Quantity || !validDecimal(inputLot.Quantity) || !validID(inputLot.InstrumentID, 128) || !validSymbol(inputLot.Symbol) || !validCurrency(inputLot.Currency) || !validDecimalPointer(inputLot.UnitCost) || !validDecimalPointer(inputLot.CostBasis) {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
@@ -236,6 +246,9 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	// cardinality, version, and order checks. The JSON representation is the
 	// payload's canonical representation, so this compares every serialized
 	// field without converting decimals through REAL or applying tolerance.
+	// Recompute with the original representation so the exact valuation JSON
+	// remains comparable for legacy payloads whose freshness/source timestamp
+	// strings are not yet canonical.
 	recomputeInput := payload.Input
 	recomputeInput.MaxAge = payload.MaxAge
 	recomputed, err := domain.Calculate(recomputeInput)
@@ -415,6 +428,45 @@ func validCurrency(value string) bool {
 		}
 	}
 	return true
+}
+
+func canonicalizeSnapshotInput(input domain.ValuationInput) (domain.ValuationInput, error) {
+	canonical := input
+	canonical.Quotes = append([]domain.Quote(nil), input.Quotes...)
+	for index := range canonical.Quotes {
+		marketAt, err := canonicalizeHistoricalObservation(canonical.Quotes[index].MarketAt)
+		if err != nil {
+			return domain.ValuationInput{}, err
+		}
+		fetchedAt, err := canonicalizeHistoricalObservation(canonical.Quotes[index].FetchedAt)
+		if err != nil {
+			return domain.ValuationInput{}, err
+		}
+		canonical.Quotes[index].MarketAt = marketAt
+		canonical.Quotes[index].FetchedAt = fetchedAt
+	}
+	canonical.FXRates = append([]domain.FXRate(nil), input.FXRates...)
+	for index := range canonical.FXRates {
+		marketAt, err := canonicalizeHistoricalObservation(canonical.FXRates[index].MarketAt)
+		if err != nil {
+			return domain.ValuationInput{}, err
+		}
+		fetchedAt, err := canonicalizeHistoricalObservation(canonical.FXRates[index].FetchedAt)
+		if err != nil {
+			return domain.ValuationInput{}, err
+		}
+		canonical.FXRates[index].MarketAt = marketAt
+		canonical.FXRates[index].FetchedAt = fetchedAt
+	}
+	return canonical, nil
+}
+
+func canonicalizeHistoricalObservation(value string) (string, error) {
+	parsed, err := domain.ValidateObservationTimestamp(value)
+	if err != nil {
+		return "", err
+	}
+	return parsed.UTC().Format(activityTimestampFormat), nil
 }
 
 func validSnapshotInput(payload snapshotPayload) bool {
