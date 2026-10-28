@@ -29,6 +29,32 @@ func (f *fakeRefreshClient) Quote(_ context.Context, request marketdata.QuoteReq
 	return domain.Quote{ID: "fixture-" + request.InstrumentID, InstrumentID: request.InstrumentID, Symbol: request.Symbol, Price: "2.5", Currency: request.Currency, Source: "finnhub", MarketAt: "2026-01-02T10:00:00Z", FetchedAt: "2026-01-02T12:00:00Z", Basis: "close", Provenance: "local fixture"}, nil
 }
 
+type timestampRefreshClient struct {
+	marketAt  string
+	fetchedAt string
+}
+
+func (f timestampRefreshClient) Name() marketdata.Provider { return marketdata.ProviderFinnhub }
+func (f timestampRefreshClient) FX(context.Context, marketdata.FXRequest) (domain.FXRate, error) {
+	return domain.FXRate{}, marketdata.ErrUnsupportedOperation
+}
+func (f timestampRefreshClient) Quote(_ context.Context, request marketdata.QuoteRequest) (domain.Quote, error) {
+	return domain.Quote{ID: "timestamp-" + request.InstrumentID, InstrumentID: request.InstrumentID, Symbol: request.Symbol, Price: "2.5", Currency: request.Currency, Source: marketdata.ProviderFinnhub.String(), MarketAt: f.marketAt, FetchedAt: f.fetchedAt, Basis: "close", Provenance: "timestamp fixture"}, nil
+}
+
+type timestampFXClient struct {
+	marketAt  string
+	fetchedAt string
+}
+
+func (f timestampFXClient) Name() marketdata.Provider { return marketdata.ProviderOpenExchangeRates }
+func (timestampFXClient) Quote(context.Context, marketdata.QuoteRequest) (domain.Quote, error) {
+	return domain.Quote{}, marketdata.ErrUnsupportedOperation
+}
+func (f timestampFXClient) FX(_ context.Context, request marketdata.FXRequest) (domain.FXRate, error) {
+	return domain.FXRate{ID: "timestamp-fx", BaseCurrency: request.BaseCurrency, QuoteCurrency: request.QuoteCurrency, Rate: "2", Source: marketdata.ProviderOpenExchangeRates.String(), MarketAt: f.marketAt, FetchedAt: f.fetchedAt, Basis: "close", Provenance: "timestamp fixture"}, nil
+}
+
 type collisionFXClient struct{}
 
 func (collisionFXClient) Name() marketdata.Provider { return marketdata.ProviderOpenExchangeRates }
@@ -284,6 +310,124 @@ func TestRefreshFXCollisionDowngradesProviderAndExactReplayRemainsComplete(t *te
 	}
 	if fxCount != 1 || fxActivity != 1 {
 		t.Fatalf("FX replay count=%d activity=%d", fxCount, fxActivity)
+	}
+}
+
+func TestRefreshPersistsReviewCompatibleCanonicalObservationTimestamps(t *testing.T) {
+	ctx := context.Background()
+	s := openRefreshFixture(t)
+	defer s.Close()
+	if _, err := s.AddProviderMapping(ctx, ProviderMappingInput{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Refresh(ctx, RefreshOptions{
+		PortfolioID: "refresh-portfolio",
+		Providers:   []marketdata.Provider{marketdata.ProviderFinnhub},
+		Clients:     map[marketdata.Provider]marketdata.ProviderClient{marketdata.ProviderFinnhub: &fakeRefreshClient{}},
+		AsOf:        time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil || result.Status != "complete" {
+		t.Fatalf("refresh=%+v err=%v", result, err)
+	}
+	var marketAt, fetchedAt string
+	if err := s.DB.QueryRow(`SELECT market_at,fetched_at FROM quotes WHERE id=?`, "fixture-refresh-instrument").Scan(&marketAt, &fetchedAt); err != nil {
+		t.Fatal(err)
+	}
+	if marketAt != "2026-01-02T10:00:00.000000000Z" || fetchedAt != "2026-01-02T12:00:00.000000000Z" {
+		t.Fatalf("persisted timestamps market_at=%q fetched_at=%q", marketAt, fetchedAt)
+	}
+	status, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "refresh-portfolio", ReportingCurrency: "USD", AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC), MaxAge: 3 * time.Hour})
+	if err != nil || !status.Complete {
+		t.Fatalf("snapshot=%+v err=%v", status, err)
+	}
+	for _, latest := range []bool{false, true} {
+		if _, err := s.ReviewSnapshot(ctx, "refresh-portfolio", status.SnapshotID, latest); err != nil {
+			t.Fatalf("review latest=%v: %v", latest, err)
+		}
+	}
+}
+
+func TestRefreshCanonicalizesAcceptedObservationTimestampRepresentations(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name, marketAt, fetchedAt, wantMarketAt, wantFetchedAt string
+	}{
+		{"whole second", "2026-01-02T10:00:00Z", "2026-01-02T12:00:00Z", "2026-01-02T10:00:00.000000000Z", "2026-01-02T12:00:00.000000000Z"},
+		{"fractional second", "2026-01-02T10:00:00.123456Z", "2026-01-02T12:00:00.654321Z", "2026-01-02T10:00:00.123456000Z", "2026-01-02T12:00:00.654321000Z"},
+		{"canonical nine fractional digits", "2026-01-02T10:00:00.123456789Z", "2026-01-02T12:00:00.987654321Z", "2026-01-02T10:00:00.123456789Z", "2026-01-02T12:00:00.987654321Z"},
+		{"offset crosses UTC boundary", "2026-01-02T10:00:00+02:00", "2026-01-02T12:00:00+02:00", "2026-01-02T08:00:00.000000000Z", "2026-01-02T10:00:00.000000000Z"},
+		{"epoch boundary", "1970-01-01T00:00:00Z", "1970-01-01T00:00:00Z", "1970-01-01T00:00:00.000000000Z", "1970-01-01T00:00:00.000000000Z"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openRefreshFixture(t)
+			defer s.Close()
+			if _, err := s.AddProviderMapping(ctx, ProviderMappingInput{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", Providers: []marketdata.Provider{marketdata.ProviderFinnhub}, Clients: map[marketdata.Provider]marketdata.ProviderClient{marketdata.ProviderFinnhub: timestampRefreshClient{marketAt: tc.marketAt, fetchedAt: tc.fetchedAt}}, AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)})
+			if err != nil || result.Status != "complete" {
+				t.Fatalf("refresh=%+v err=%v", result, err)
+			}
+			var marketAt, fetchedAt string
+			if err := s.DB.QueryRow(`SELECT market_at,fetched_at FROM quotes WHERE id=?`, "timestamp-refresh-instrument").Scan(&marketAt, &fetchedAt); err != nil {
+				t.Fatal(err)
+			}
+			if marketAt != tc.wantMarketAt || fetchedAt != tc.wantFetchedAt {
+				t.Fatalf("persisted timestamps market_at=%q fetched_at=%q", marketAt, fetchedAt)
+			}
+		})
+	}
+}
+
+func TestRefreshRejectsMalformedObservationTimestampRepresentations(t *testing.T) {
+	ctx := context.Background()
+	for _, value := range []string{"2026-02-30T10:00:00Z", "2026-01-02T10:00:00", "1969-12-31T23:59:59Z", "not-a-timestamp"} {
+		t.Run(value, func(t *testing.T) {
+			s := openRefreshFixture(t)
+			defer s.Close()
+			if _, err := s.AddProviderMapping(ctx, ProviderMappingInput{InstrumentID: "refresh-instrument", Provider: marketdata.ProviderFinnhub, ProviderSymbol: "LOCAL", QuoteCurrency: "USD", ActiveFrom: "2026-01-01T00:00:00Z", Provenance: "fixture"}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", Providers: []marketdata.Provider{marketdata.ProviderFinnhub}, Clients: map[marketdata.Provider]marketdata.ProviderClient{marketdata.ProviderFinnhub: timestampRefreshClient{marketAt: value, fetchedAt: value}}, AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)})
+			if err != nil || result.Status != "incomplete" || result.Providers[0].FailedCount != 1 {
+				t.Fatalf("refresh=%+v err=%v", result, err)
+			}
+			var quotes int
+			if err := s.DB.QueryRow(`SELECT COUNT(*) FROM quotes`).Scan(&quotes); err != nil {
+				t.Fatal(err)
+			}
+			if quotes != 0 {
+				t.Fatalf("malformed quote persisted: %d", quotes)
+			}
+		})
+	}
+}
+
+func TestRefreshCanonicalizesFXObservationTimestampRepresentations(t *testing.T) {
+	ctx := context.Background()
+	s := openRefreshFixture(t)
+	defer s.Close()
+	now := "2026-01-02T12:00:00.000000000Z"
+	if _, err := s.DB.Exec(`INSERT INTO instruments(id,symbol,currency,created_at) VALUES('refresh-eur','EURREL','EUR',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES('refresh-portfolio','refresh-eur',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES('refresh-eur-lot','refresh-portfolio','refresh-eur','1','EUR',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Refresh(ctx, RefreshOptions{PortfolioID: "refresh-portfolio", ReportingCurrency: "USD", Providers: []marketdata.Provider{marketdata.ProviderOpenExchangeRates}, Clients: map[marketdata.Provider]marketdata.ProviderClient{marketdata.ProviderOpenExchangeRates: timestampFXClient{marketAt: "2026-01-02T10:00:00+02:00", fetchedAt: "2026-01-02T12:00:00+02:00"}}, AsOf: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)})
+	if err != nil || result.Status != "complete" {
+		t.Fatalf("refresh=%+v err=%v", result, err)
+	}
+	var marketAt, fetchedAt string
+	if err := s.DB.QueryRow(`SELECT market_at,fetched_at FROM fx_rates WHERE id=?`, "timestamp-fx").Scan(&marketAt, &fetchedAt); err != nil {
+		t.Fatal(err)
+	}
+	if marketAt != "2026-01-02T08:00:00.000000000Z" || fetchedAt != "2026-01-02T10:00:00.000000000Z" {
+		t.Fatalf("persisted FX timestamps market_at=%q fetched_at=%q", marketAt, fetchedAt)
 	}
 }
 
