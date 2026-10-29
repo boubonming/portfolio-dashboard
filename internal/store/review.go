@@ -121,7 +121,11 @@ func ValidateReviewSubmission(submission domain.ReviewSubmission, snapshot domai
 		return ErrReviewInvalid
 	}
 	if submission.Status == "complete" {
-		if snapshot.State != "complete" || submission.Recommendation == "no_recommendation" || !validCompleteEvidence(submission.Evidence) || len(submission.SourcedFacts) == 0 {
+		completeContext := snapshot.State == "complete"
+		if submission.Scope.Type == "holding" {
+			completeContext = holdingReviewHasCompleteContext(snapshot, submission.Scope)
+		}
+		if !completeContext || submission.Recommendation == "no_recommendation" || !validCompleteEvidence(submission.Evidence) || len(submission.SourcedFacts) == 0 {
 			return ErrReviewIncomplete
 		}
 		if submission.Recommendation != "hold" && submission.Recommendation != "review" && submission.Recommendation != "trim_candidate" && submission.Recommendation != "exit_candidate" {
@@ -138,7 +142,54 @@ func ValidateReviewSubmission(submission domain.ReviewSubmission, snapshot domai
 	return nil
 }
 
+func holdingReviewHasCompleteContext(snapshot domain.ReviewSnapshot, scope domain.ReviewScope) bool {
+	if scope.Type != "holding" || len(scope.HoldingIDs) == 0 || len(scope.HoldingIDs) != len(scope.InstrumentIDs) {
+		return false
+	}
+	for index, holdingID := range scope.HoldingIDs {
+		var target *domain.ReviewHoldingContext
+		for holdingIndex := range snapshot.Holdings {
+			holding := &snapshot.Holdings[holdingIndex]
+			if holding.HoldingID == holdingID && holding.InstrumentID == scope.InstrumentIDs[index] {
+				target = holding
+				break
+			}
+		}
+		if target == nil || target.FreshnessState != "fresh" || target.LatestPrice == nil || target.LatestValue == nil {
+			return false
+		}
+		dependencies := append([]string{}, snapshot.MissingDependencies...)
+		dependencies = append(dependencies, snapshot.StaleDependencies...)
+		dependencies = append(dependencies, snapshot.InvalidDependencies...)
+		for _, dependency := range dependencies {
+			if dependency == "quote:"+target.InstrumentID || strings.HasPrefix(dependency, "lot:"+target.HoldingID+":quantity") {
+				return false
+			}
+		}
+		price, priceErr := domain.ParseDecimal(*target.LatestPrice)
+		value, valueErr := domain.ParseDecimal(*target.LatestValue)
+		if priceErr != nil || valueErr != nil || price.Sign() <= 0 || value.Sign() < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func reviewHasActualIncompleteSupport(snapshot domain.ReviewSnapshot, submission domain.ReviewSubmission) bool {
+	if submission.Scope.Type == "holding" {
+		if !holdingReviewHasCompleteContext(snapshot, submission.Scope) {
+			return true
+		}
+		if len(submission.Evidence) == 0 || len(submission.SourcedFacts) == 0 {
+			return true
+		}
+		for _, evidence := range submission.Evidence {
+			if evidence.Availability != "available" || evidence.Freshness != "current" {
+				return true
+			}
+		}
+		return false
+	}
 	if snapshot.State != "complete" || len(snapshot.MissingDependencies) != 0 || len(snapshot.StaleDependencies) != 0 || len(snapshot.InvalidDependencies) != 0 {
 		return true
 	}

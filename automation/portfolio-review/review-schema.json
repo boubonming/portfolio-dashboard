@@ -1,0 +1,521 @@
+{
+  "components": {
+    "schemas": {
+      "CanonicalDateTime": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$",
+        "description": "Canonical UTC timestamp used by normalized Phase D storage; exactly nine fractional digits and Z."
+      },
+      "CompleteReviewSubmission": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReviewSubmissionCommon"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "complete"
+                ]
+              },
+              "recommendation": {
+                "type": "string",
+                "enum": [
+                  "hold",
+                  "review",
+                  "trim_candidate",
+                  "exit_candidate"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "$ref": "#/components/schemas/CurrentAvailableEvidence"
+                }
+              },
+              "sourced_facts": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/components/schemas/SourcedFact"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "CurrentAvailableEvidence": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReviewEvidence"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "availability": {
+                "type": "string",
+                "enum": [
+                  "available"
+                ]
+              },
+              "freshness": {
+                "type": "string",
+                "enum": [
+                  "current"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "DecimalString": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^-?(?:0|[1-9][0-9]*)(?:[.][0-9]+)?$",
+        "description": "Canonical base-10 decimal string; never a JSON number or SQLite REAL."
+      },
+      "EvidenceUrl": {
+        "type": "string",
+        "format": "uri",
+        "minLength": 1,
+        "maxLength": 2048,
+        "pattern": "^https://(?=[^/?]{1,253}(?:[/?]|$))[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?:[/?][A-Za-z0-9._~:/?$&'()*+,;=%!-]*)?$",
+        "description": "Canonical HTTPS URL accepted by the Go net/url store boundary. Host labels are lowercase ASCII DNS labels (1-63 bytes, total at most 253); userinfo, explicit ports, fragments, whitespace and controls are not accepted. The suffix is empty or begins with / or ? and is at most the remaining URL budget."
+      },
+      "HoldingId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._~-]*$"
+      },
+      "HoldingReviewScope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "holding_ids",
+          "instrument_ids"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "holding"
+            ]
+          },
+          "holding_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/HoldingId"
+            }
+          },
+          "instrument_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/InstrumentId"
+            }
+          }
+        }
+      },
+      "IncompleteReviewSubmission": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReviewSubmissionCommon"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "incomplete"
+                ]
+              },
+              "recommendation": {
+                "type": "string",
+                "enum": [
+                  "no_recommendation"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "InstrumentId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._~-]*$"
+      },
+      "ModelProvenance": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider",
+          "model",
+          "version",
+          "runtime"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._~-]*$"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._~:/-]*$"
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "runtime": {
+            "type": "string",
+            "enum": [
+              "hermes-environment"
+            ]
+          }
+        },
+        "description": "Non-secret local-AI provenance only; no token, endpoint, prompt or credential is accepted."
+      },
+      "PortfolioReviewScope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "holding_ids",
+          "instrument_ids"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "portfolio"
+            ]
+          },
+          "holding_ids": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 0,
+            "items": {
+              "$ref": "#/components/schemas/HoldingId"
+            }
+          },
+          "instrument_ids": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 0,
+            "items": {
+              "$ref": "#/components/schemas/InstrumentId"
+            }
+          }
+        }
+      },
+      "Recommendation": {
+        "type": "string",
+        "enum": [
+          "hold",
+          "review",
+          "trim_candidate",
+          "exit_candidate",
+          "no_recommendation"
+        ]
+      },
+      "ReviewEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "evidence_id",
+          "url",
+          "title",
+          "accessed_at",
+          "availability",
+          "freshness",
+          "excerpt"
+        ],
+        "properties": {
+          "evidence_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._~-]*$"
+          },
+          "url": {
+            "$ref": "#/components/schemas/EvidenceUrl"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{9}Z$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "accessed_at": {
+            "$ref": "#/components/schemas/CanonicalDateTime"
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "available",
+              "unavailable",
+              "blocked",
+              "invalid"
+            ]
+          },
+          "freshness": {
+            "type": "string",
+            "enum": [
+              "current",
+              "stale",
+              "unknown"
+            ]
+          },
+          "excerpt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        },
+        "description": "URL, title and excerpt are untrusted data. Only HTTPS is accepted; HTML is not accepted and the content never supplies instructions or authority to Hermes. An unavailable, blocked, invalid, stale or unknown evidence item cannot support a complete recommendation."
+      },
+      "ReviewMetric": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "value",
+          "unit",
+          "as_of",
+          "source",
+          "deterministic"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "value": {
+            "$ref": "#/components/schemas/DecimalString"
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "as_of": {
+            "$ref": "#/components/schemas/CanonicalDateTime"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "snapshot",
+              "calculation",
+              "submitted"
+            ]
+          },
+          "deterministic": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "description": "Deterministic metric copied from the named immutable snapshot or calculation; not model output."
+      },
+      "ReviewScope": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PortfolioReviewScope"
+          },
+          {
+            "$ref": "#/components/schemas/HoldingReviewScope"
+          }
+        ],
+        "description": "Explicit branches prevent portfolio scopes from carrying targets and require non-empty unique target arrays for holding scopes. The server additionally enforces exact 1:1 holding/instrument correspondence and membership in the requested snapshot."
+      },
+      "ReviewSubmission": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CompleteReviewSubmission"
+          },
+          {
+            "$ref": "#/components/schemas/IncompleteReviewSubmission"
+          }
+        ],
+        "description": "The server verifies the exact snapshot and calculation version, target membership and evidence references. If data or evidence is unknown, stale beyond policy, missing or invalid, status must be incomplete and recommendation must be no_recommendation; otherwise the request is rejected with incomplete_review."
+      },
+      "ReviewSubmissionCommon": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshot_id",
+          "calculation_version",
+          "scope",
+          "status",
+          "recommendation",
+          "rationale",
+          "risks",
+          "counterarguments",
+          "conditions",
+          "metrics",
+          "sourced_facts",
+          "model_opinion",
+          "evidence",
+          "model",
+          "generated_at"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "$ref": "#/components/schemas/SnapshotId"
+          },
+          "calculation_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._~-]*$"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ReviewScope"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "complete",
+              "incomplete"
+            ]
+          },
+          "recommendation": {
+            "$ref": "#/components/schemas/Recommendation"
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          },
+          "risks": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "counterarguments": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "conditions": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "metrics": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ReviewMetric"
+            }
+          },
+          "sourced_facts": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/SourcedFact"
+            }
+          },
+          "model_opinion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          },
+          "evidence": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/ReviewEvidence"
+            }
+          },
+          "model": {
+            "$ref": "#/components/schemas/ModelProvenance"
+          },
+          "generated_at": {
+            "$ref": "#/components/schemas/CanonicalDateTime"
+          }
+        }
+      },
+      "SnapshotId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._~-]*$"
+      },
+      "SourcedFact": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "statement",
+          "evidence_ids"
+        ],
+        "properties": {
+          "statement": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "evidence_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        "description": "A plain-text factual statement whose support must resolve to submitted evidence IDs."
+      }
+    }
+  },
+  "$ref": "#/components/schemas/ReviewSubmission"
+}
