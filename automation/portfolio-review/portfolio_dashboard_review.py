@@ -408,14 +408,22 @@ class API:
 def prepare(client, root, run_id, now=None):
     directory = run_dir(root, run_id)
     if (directory / 'manifest.json').exists():
-        return json.loads((directory / 'manifest.json').read_text())
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        snapshot = json.loads((directory / 'snapshot.json').read_text())
+        manifest['coverage_complete'] = _coverage_complete(manifest, snapshot)
+        manifest['coverage_reconciled'] = _coverage_reconciled(manifest, snapshot)
+        atomic_json(directory / 'manifest.json', manifest)
+        return manifest
     snapshot = check_snapshot(client.request('GET', client.base + '/snapshots/latest'), client.portfolio)
     current = now or utc_now()
     check_current_snapshot(snapshot, client.config, current)
     manifest = {'run_id': run_id, 'phase': 'prepared', 'snapshot_state': snapshot['state'],
+                'snapshot_id': snapshot['snapshot_id'], 'snapshot_sha256': fingerprint(snapshot),
+                'calculation_version': snapshot['calculation_version'],
                 'symbols': sorted({h['symbol'] for h in snapshot['holdings']}),
                 'holding_count': len(snapshot['holdings']), 'target_count': len(snapshot['holdings']),
-                'coverage_complete': False,
+                'coverage_complete': False, 'coverage_reconciled': False,
+                'successful_review_complete': False,
                 'targets': [{'target_key': h['holding_id'], 'instrument_key': h['instrument_id'],
                              'symbol': h['symbol'], 'status': 'pending'}
                             for h in snapshot['holdings']]}
@@ -437,8 +445,80 @@ def _target_by_key(snapshot, target_key):
     return targets[0]
 
 
-def _coverage_complete(manifest):
-    return bool(manifest.get('targets')) and all(item.get('status') == 'verified' for item in manifest['targets'])
+TERMINAL_REVIEW_STATUSES = {'verified', 'unsupported'}
+ACCOUNTED_STATUSES = TERMINAL_REVIEW_STATUSES | {'deferred', 'failed'}
+SUPPORTED_ASSET_TYPES = {'stock', 'equity', 'etf', 'crypto', 'cryptocurrency'}
+
+
+def unsupported_reason(target):
+    """Return a deterministic reason only for an explicitly unsupported type."""
+    asset_type = target.get('asset_type', target.get('instrument_type'))
+    if asset_type in (None, ''):
+        return None
+    if not isinstance(asset_type, str):
+        return 'unsupported_instrument_type'
+    normalized = asset_type.strip().lower()
+    return None if normalized in SUPPORTED_ASSET_TYPES else 'unsupported_instrument_type'
+
+
+def _manifest_matches_snapshot(manifest, snapshot):
+    if not isinstance(manifest, dict) or not isinstance(snapshot, dict):
+        return False
+    if (manifest.get('snapshot_id') != snapshot.get('snapshot_id')
+            or manifest.get('snapshot_sha256') != fingerprint(snapshot)
+            or manifest.get('calculation_version') != snapshot.get('calculation_version')):
+        return False
+    entries = manifest.get('targets')
+    holdings = snapshot.get('holdings')
+    if not isinstance(entries, list) or not isinstance(holdings, list) or not entries:
+        return False
+    expected = {item.get('holding_id'): (item.get('instrument_id'), item.get('symbol')) for item in holdings}
+    if len(expected) != len(holdings) or len(entries) != len(expected):
+        return False
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return False
+        target_key = entry.get('target_key')
+        if target_key in seen or target_key not in expected:
+            return False
+        instrument, symbol = expected[target_key]
+        if (entry.get('instrument_key') != instrument or entry.get('symbol') != symbol
+                or entry.get('status') not in ACCOUNTED_STATUSES | {'pending', 'drafted', 'pending_readback'}):
+            return False
+        if entry.get('status') == 'verified' and entry.get('receipt_validated') is not True:
+            return False
+        seen.add(target_key)
+    return seen == set(expected)
+
+
+def _coverage_complete(manifest, snapshot=None):
+    if snapshot is None or not _manifest_matches_snapshot(manifest, snapshot):
+        return False
+    return all(item.get('status') in TERMINAL_REVIEW_STATUSES for item in manifest['targets'])
+
+
+def _successful_review_complete(manifest, snapshot):
+    return _coverage_complete(manifest, snapshot) and all(item.get('status') == 'verified' for item in manifest['targets'])
+
+
+def _coverage_reconciled(manifest, snapshot):
+    return _manifest_matches_snapshot(manifest, snapshot) and all(
+        item.get('status') in ACCOUNTED_STATUSES for item in manifest['targets'])
+
+
+def _result(manifest, snapshot):
+    complete = _coverage_complete(manifest, snapshot)
+    successful = _successful_review_complete(manifest, snapshot)
+    result = {'run_id': manifest.get('run_id'), 'phase': 'verified' if successful else ('reconciled' if complete else manifest.get('phase', 'partial')),
+              'coverage_complete': complete, 'successful_review_complete': successful,
+              'coverage_reconciled': _coverage_reconciled(manifest, snapshot),
+              'target_count': len(manifest.get('targets', [])),
+              'outcomes': [{'target_key': item.get('target_key'), 'status': item.get('status')}
+                           for item in manifest.get('targets', [])]}
+    if manifest.get('coverage_error'):
+        result['coverage_error'] = manifest['coverage_error']
+    return result
 
 
 def _save_target_progress(directory, target_key, status, **extra):
@@ -456,6 +536,66 @@ def _update_manifest_target(manifest, target_key, status, **extra):
     raise ValueError('Manifest target is not present in immutable coverage')
 
 
+def _receipt_identity(receipt, run_id, target_key, pending, snapshot, payload):
+    if not isinstance(receipt, dict) or not isinstance(pending, dict):
+        return False
+    expected = {
+        'run_id': run_id,
+        'target_key': target_key,
+        'phase': 'verified',
+        'review_status': payload.get('status'),
+        'idempotency_key': pending.get('idempotency_key'),
+        'payload_sha256': pending.get('payload_sha256'),
+        'snapshot_sha256': pending.get('snapshot_sha256'),
+        'snapshot_id': snapshot.get('snapshot_id'),
+        'calculation_version': snapshot.get('calculation_version'),
+        'scope': payload.get('scope'),
+    }
+    if any(receipt.get(name) != value for name, value in expected.items()):
+        return False
+    if not isinstance(receipt.get('review_id'), str) or not ID.fullmatch(receipt['review_id']):
+        return False
+    try:
+        timestamp(receipt.get('verified_at'))
+    except (TypeError, ValueError):
+        return False
+    return receipt.get('outdated') is None or type(receipt.get('outdated')) is bool
+
+
+def _portfolio_receipt_identity(receipt, run_id, pending, snapshot, payload):
+    if not isinstance(receipt, dict) or not isinstance(pending, dict):
+        return False
+    expected = {
+        'run_id': run_id, 'phase': 'verified', 'review_status': payload.get('status'),
+        'idempotency_key': pending.get('idempotency_key'),
+        'payload_sha256': pending.get('payload_sha256'),
+        'snapshot_sha256': pending.get('snapshot_sha256'),
+        'snapshot_id': snapshot.get('snapshot_id'),
+        'calculation_version': snapshot.get('calculation_version'),
+        'scope': payload.get('scope'),
+    }
+    if any(receipt.get(name) != value for name, value in expected.items()):
+        return False
+    if not isinstance(receipt.get('review_id'), str) or not ID.fullmatch(receipt['review_id']):
+        return False
+    try:
+        timestamp(receipt.get('verified_at'))
+    except (TypeError, ValueError):
+        return False
+    return receipt.get('outdated') is None or type(receipt.get('outdated')) is bool
+
+
+def _readback_matches(client, review_id, payload, scope=None):
+    readback = client.request('GET', client.base + '/reviews/' + review_id)
+    if (readback.get('review_id') != review_id or readback.get('portfolio_id') != client.portfolio
+            or scope is not None and readback.get('scope') != scope):
+        raise ValueError('Review read-back returned a foreign resource')
+    for name, value in payload.items():
+        if normalize_nulls(readback.get(name)) != normalize_nulls(value):
+            raise ValueError('Review read-back differs from submitted target content; retain pending request')
+    return readback
+
+
 def draft_targets(root, run_id, evidence_by_target, config, model_fn=None, generated_at=None, now=None):
     directory = run_dir(root, run_id)
     manifest = json.loads((directory / 'manifest.json').read_text())
@@ -465,12 +605,33 @@ def draft_targets(root, run_id, evidence_by_target, config, model_fn=None, gener
         raise ValueError('Evidence must be an object keyed by opaque target key')
     current = now or utc_now()
     check_current_snapshot(snapshot, config, current)
+    if not _manifest_matches_snapshot(manifest, snapshot):
+        manifest.update(coverage_complete=False, coverage_reconciled=False,
+                        successful_review_complete=False, phase='blocked',
+                        coverage_error='manifest_snapshot_membership_mismatch')
+        atomic_json(directory / 'manifest.json', manifest)
+        return _result(manifest, snapshot)
     evidence_fingerprints = {}
     for entry in manifest.get('targets', []):
         target_key = entry['target_key']
         target_directory = _target_dir(root, run_id, target_key)
+        target = _target_by_key(snapshot, target_key)
+        unsupported = unsupported_reason(target)
+        if unsupported is not None:
+            _save_target_progress(target_directory, target_key, 'unsupported', reason=unsupported)
+            _update_manifest_target(manifest, target_key, 'unsupported', reason=unsupported)
+            continue
         if (target_directory / 'receipt.json').exists():
-            _update_manifest_target(manifest, target_key, 'verified')
+            try:
+                pending = json.loads((target_directory / 'pending.json').read_text())
+                payload = pending['payload']
+                if not _receipt_identity(json.loads((target_directory / 'receipt.json').read_text()),
+                                         run_id, target_key, pending, snapshot, payload):
+                    raise ValueError('receipt_identity_mismatch')
+                _update_manifest_target(manifest, target_key, 'pending_readback', reason='receipt_requires_exact_readback')
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                _save_target_progress(target_directory, target_key, 'failed', reason='receipt_invalid')
+                _update_manifest_target(manifest, target_key, 'failed', reason='receipt_invalid')
             continue
         if (target_directory / 'pending.json').exists():
             _update_manifest_target(manifest, target_key, 'drafted')
@@ -491,7 +652,6 @@ def draft_targets(root, run_id, evidence_by_target, config, model_fn=None, gener
                 raise ValueError('Evidence bundle is reused across different instruments')
             evidence_fingerprints[bundle_fingerprint] = entry['instrument_key']
             atomic_json(evidence_path, evidence)
-            target = _target_by_key(snapshot, target_key)
             metrics = target_metrics(snapshot, target)
             generated = generated_at or (current.strftime('%Y-%m-%dT%H:%M:%S.%f') + '000Z')
             check_review_freshness(snapshot, {'generated_at': generated, 'evidence': evidence}, config, current)
@@ -510,13 +670,13 @@ def draft_targets(root, run_id, evidence_by_target, config, model_fn=None, gener
             _save_target_progress(target_directory, target_key, 'failed', reason=type(error).__name__)
             _update_manifest_target(manifest, target_key, 'failed', reason=type(error).__name__)
         atomic_json(directory / 'manifest.json', manifest)
-    complete = _coverage_complete(manifest)
-    manifest.update(phase='verified' if complete else 'drafted', coverage_complete=complete,
+    result = _result(manifest, snapshot)
+    manifest.update(phase=result['phase'], coverage_complete=result['coverage_complete'],
+                    coverage_reconciled=result['coverage_reconciled'],
+                    successful_review_complete=result['successful_review_complete'],
                     target_count=len(manifest.get('targets', [])))
     atomic_json(directory / 'manifest.json', manifest)
-    return {'run_id': run_id, 'phase': manifest['phase'], 'coverage_complete': complete,
-            'target_count': len(manifest.get('targets', [])),
-            'outcomes': [{'target_key': item['target_key'], 'status': item['status']} for item in manifest.get('targets', [])]}
+    return result
 
 
 def submit_targets(client, root, run_id, approved=False):
@@ -526,12 +686,50 @@ def submit_targets(client, root, run_id, approved=False):
     manifest = json.loads((directory / 'manifest.json').read_text())
     snapshot = json.loads((directory / 'snapshot.json').read_text())
     check_snapshot(snapshot, client.portfolio)
+    if not _manifest_matches_snapshot(manifest, snapshot):
+        manifest.update(phase='blocked', coverage_complete=False, coverage_reconciled=False,
+                        successful_review_complete=False,
+                        coverage_error='manifest_snapshot_membership_mismatch')
+        atomic_json(directory / 'manifest.json', manifest)
+        return _result(manifest, snapshot)
     for entry in manifest.get('targets', []):
         target_key = entry['target_key']
         target_directory = _target_dir(root, run_id, target_key)
+        target = _target_by_key(snapshot, target_key)
+        unsupported = unsupported_reason(target)
+        if unsupported is not None:
+            _save_target_progress(target_directory, target_key, 'unsupported', reason=unsupported)
+            _update_manifest_target(manifest, target_key, 'unsupported', reason=unsupported)
+            atomic_json(directory / 'manifest.json', manifest)
+            continue
         receipt_path = target_directory / 'receipt.json'
         if receipt_path.exists():
-            _update_manifest_target(manifest, target_key, 'verified')
+            try:
+                pending = json.loads((target_directory / 'pending.json').read_text())
+                payload = pending['payload']
+                if (pending.get('target_key') != target_key
+                        or pending.get('payload_sha256') != fingerprint(payload)
+                        or pending.get('snapshot_sha256') != fingerprint(snapshot)):
+                    raise ValueError('Pending target review changed; submission stopped')
+                validate_payload(payload)
+                if (payload['snapshot_id'] != snapshot['snapshot_id']
+                        or payload['calculation_version'] != snapshot['calculation_version']
+                        or payload['scope'] != holding_scope(target)
+                        or payload['metrics'] != target_metrics(snapshot, target)):
+                    raise ValueError('Review no longer matches its immutable target context')
+                expected_key = 'dashboard-review-' + fingerprint({'run_id': run_id, 'snapshot_id': snapshot['snapshot_id'], 'target_key': target_key})[:40]
+                if pending.get('idempotency_key') != expected_key:
+                    raise ValueError('Pending target idempotency identity changed; submission stopped')
+                receipt = json.loads(receipt_path.read_text())
+                if not _receipt_identity(receipt, run_id, target_key, pending, snapshot, payload):
+                    raise ValueError('Receipt identity mismatch; exact read-back required')
+                readback = _readback_matches(client, receipt['review_id'], payload, payload['scope'])
+                _save_target_progress(target_directory, target_key, 'verified', review_id=receipt['review_id'])
+                _update_manifest_target(manifest, target_key, 'verified', review_id=receipt['review_id'], receipt_validated=True)
+            except Exception as error:
+                _save_target_progress(target_directory, target_key, 'failed', reason=type(error).__name__)
+                _update_manifest_target(manifest, target_key, 'failed', reason=type(error).__name__)
+            atomic_json(directory / 'manifest.json', manifest)
             continue
         pending_path = target_directory / 'pending.json'
         if not pending_path.exists():
@@ -539,7 +737,6 @@ def submit_targets(client, root, run_id, approved=False):
         try:
             pending = json.loads(pending_path.read_text())
             payload = pending['payload']
-            target = _target_by_key(snapshot, target_key)
             if pending.get('target_key') != target_key or pending['payload_sha256'] != fingerprint(payload) or pending['snapshot_sha256'] != fingerprint(snapshot):
                 raise ValueError('Pending target review changed; submission stopped')
             validate_payload(payload)
@@ -566,29 +763,29 @@ def submit_targets(client, root, run_id, approved=False):
             review_id = result.get('review_id', '')
             if not isinstance(review_id, str) or not ID.fullmatch(review_id):
                 raise ValueError('Submission response has no canonical review identity; retain pending request')
-            readback = client.request('GET', client.base + '/reviews/' + review_id)
-            if (readback.get('review_id') != review_id or readback.get('portfolio_id') != client.portfolio
-                    or readback.get('scope') != payload['scope']):
-                raise ValueError('Review read-back returned a foreign resource')
-            for name, value in payload.items():
-                if normalize_nulls(readback.get(name)) != normalize_nulls(value):
-                    raise ValueError('Review read-back differs from submitted target content; retain pending request')
+            readback = _readback_matches(client, review_id, payload, payload['scope'])
             receipt = {'target_key': target_key, 'phase': 'verified', 'review_id': review_id,
-                       'review_status': payload['status'], 'verified_at': now_text(),
+                       'run_id': run_id, 'review_status': payload['status'], 'verified_at': now_text(),
+                       'idempotency_key': pending['idempotency_key'],
+                       'payload_sha256': pending['payload_sha256'],
+                       'snapshot_sha256': pending['snapshot_sha256'],
+                       'snapshot_id': snapshot['snapshot_id'],
+                       'calculation_version': snapshot['calculation_version'],
+                       'scope': payload['scope'],
                        'outdated': readback.get('lifecycle', {}).get('outdated')}
             atomic_json(receipt_path, receipt)
             _save_target_progress(target_directory, target_key, 'verified', review_id=review_id)
-            _update_manifest_target(manifest, target_key, 'verified', review_id=review_id)
+            _update_manifest_target(manifest, target_key, 'verified', review_id=review_id, receipt_validated=True)
         except Exception as error:
             _save_target_progress(target_directory, target_key, 'failed', reason=type(error).__name__)
             _update_manifest_target(manifest, target_key, 'failed', reason=type(error).__name__)
         atomic_json(directory / 'manifest.json', manifest)
-    complete = _coverage_complete(manifest)
-    manifest.update(phase='verified' if complete else 'partial', coverage_complete=complete)
+    result = _result(manifest, snapshot)
+    manifest.update(phase=result['phase'], coverage_complete=result['coverage_complete'],
+                    coverage_reconciled=result['coverage_reconciled'],
+                    successful_review_complete=result['successful_review_complete'])
     atomic_json(directory / 'manifest.json', manifest)
-    return {'run_id': run_id, 'phase': manifest['phase'], 'coverage_complete': complete,
-            'target_count': len(manifest.get('targets', [])),
-            'outcomes': [{'target_key': item['target_key'], 'status': item['status']} for item in manifest.get('targets', [])]}
+    return result
 
 
 def fingerprint(value):
@@ -631,8 +828,6 @@ def submit(client, root, run_id, approved=False):
     if not approved and not client.config.get('submission_enabled', False):
         raise ValueError('Automatic submission is gated until an approved live trial is verified')
     directory = run_dir(root, run_id)
-    if (directory / 'receipt.json').exists():
-        return json.loads((directory / 'receipt.json').read_text())
     pending = json.loads((directory / 'pending.json').read_text())
     payload = pending['payload']
     snapshot = json.loads((directory / 'snapshot.json').read_text())
@@ -645,6 +840,13 @@ def submit(client, root, run_id, approved=False):
     expected_key = 'dashboard-review-' + fingerprint({'run_id': run_id, 'snapshot_id': snapshot['snapshot_id']})[:40]
     if pending.get('idempotency_key') != expected_key:
         raise ValueError('Pending review idempotency identity changed; submission stopped')
+    receipt_path = directory / 'receipt.json'
+    if receipt_path.exists():
+        receipt = json.loads(receipt_path.read_text())
+        if not _portfolio_receipt_identity(receipt, run_id, pending, snapshot, payload):
+            raise ValueError('Receipt identity mismatch; exact read-back required')
+        _readback_matches(client, receipt['review_id'], payload, payload['scope'])
+        return receipt
     if (directory / 'attempted.json').exists():
         attempted = json.loads((directory / 'attempted.json').read_text())
         if attempted.get('idempotency_key') != pending['idempotency_key'] or attempted.get('payload_sha256') != pending['payload_sha256']:
@@ -662,14 +864,15 @@ def submit(client, root, run_id, approved=False):
     review_id = result.get('review_id', '')
     if not isinstance(review_id, str) or not ID.fullmatch(review_id):
         raise ValueError('Submission response has no canonical review identity; retain pending request')
-    readback = client.request('GET', client.base + '/reviews/' + review_id)
-    if readback.get('review_id') != review_id or readback.get('portfolio_id') != client.portfolio:
-        raise ValueError('Review read-back returned a foreign resource')
-    for name, value in payload.items():
-        if normalize_nulls(readback.get(name)) != normalize_nulls(value):
-            raise ValueError('Review read-back differs from submitted content; retain pending request')
+    readback = _readback_matches(client, review_id, payload, payload['scope'])
     receipt = {'run_id': run_id, 'phase': 'verified', 'review_id': review_id,
                'review_status': payload['status'], 'verified_at': now_text(),
+               'idempotency_key': pending['idempotency_key'],
+               'payload_sha256': pending['payload_sha256'],
+               'snapshot_sha256': pending['snapshot_sha256'],
+               'snapshot_id': snapshot['snapshot_id'],
+               'calculation_version': snapshot['calculation_version'],
+               'scope': payload['scope'],
                'outdated': readback.get('lifecycle', {}).get('outdated')}
     atomic_json(directory / 'receipt.json', receipt)
     manifest = json.loads((directory / 'manifest.json').read_text())

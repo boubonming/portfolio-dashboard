@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import pytest
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,8 +14,8 @@ spec.loader.exec_module(runner)
 NOW = "2026-01-02T12:00:00.000000000Z"
 
 
-def holding(key, instrument, symbol, fresh=True):
-    return {
+def holding(key, instrument, symbol, fresh=True, asset_type=None):
+    result = {
         "portfolio_id": "portfolio-test",
         "snapshot_id": "snapshot-test",
         "holding_id": key,
@@ -33,6 +34,9 @@ def holding(key, instrument, symbol, fresh=True):
         "freshness_state": "fresh" if fresh else "missing",
         "freshness_age_seconds": "0" if fresh else None,
     }
+    if asset_type is not None:
+        result["asset_type"] = asset_type
+    return result
 
 
 def snapshot(*holdings):
@@ -97,6 +101,9 @@ def test_each_lot_gets_an_independent_payload_and_missing_price_keeps_qualitativ
     manifest = {
         "run_id": run,
         "phase": "prepared",
+        "snapshot_id": snap["snapshot_id"],
+        "snapshot_sha256": runner.fingerprint(snap),
+        "calculation_version": snap["calculation_version"],
         "snapshot_state": snap["state"],
         "holding_count": 2,
         "target_count": 2,
@@ -151,7 +158,7 @@ def test_same_symbol_lots_remain_distinct_targets(tmp_path):
 
 
 class FakeClient:
-    def __init__(self, snap, fail_target=None):
+    def __init__(self, snap, fail_target=None, server=None):
         self.portfolio = snap["portfolio_id"]
         self.config = config()
         self.base = "/api/v1/portfolios/" + self.portfolio
@@ -159,6 +166,8 @@ class FakeClient:
         self.fail_target = fail_target
         self.posts = []
         self.reads = []
+        self.corrupt_readback = False
+        self.server = server if server is not None else {}
 
     def request(self, method, path, payload=None, key=None):
         if method == "GET" and path.endswith("/snapshots/latest"):
@@ -168,14 +177,17 @@ class FakeClient:
             if target == self.fail_target:
                 raise ValueError("synthetic submission failure")
             self.posts.append((target, key, payload))
+            self.server[target] = (key, payload)
             return {"review_id": "review-" + target, "portfolio_id": self.portfolio}
         if method == "GET" and "/reviews/" in path:
             target = path.rsplit("/", 1)[1].replace("review-", "")
-            payload = next(item[2] for item in self.posts if item[0] == target)
+            payload = self.server[target][1]
             self.reads.append(target)
             result = dict(payload)
             result.update({"review_id": "review-" + target, "portfolio_id": self.portfolio,
                            "lifecycle": {"outdated": False}})
+            if self.corrupt_readback:
+                result["rationale"] = "corrupted read-back"
             return result
         raise AssertionError((method, path))
 
@@ -202,9 +214,144 @@ def test_one_target_failure_preserves_success_and_retry_state(tmp_path, monkeypa
     assert json.loads((root / "runs" / run / "targets" / "lot-b" / "progress.json").read_text())["status"] == "failed"
     attempted = json.loads((root / "runs" / run / "targets" / "lot-b" / "attempted.json").read_text())
 
-    retry = FakeClient(snap)
+    retry = FakeClient(snap, server=failing.server)
     second = runner.submit_targets(retry, root, run, approved=True)
     assert second["coverage_complete"]
     assert {target for target, _, _ in retry.posts} == {"lot-b"}
     assert json.loads((root / "runs" / run / "targets" / "lot-b" / "attempted.json").read_text()) == attempted
-    assert len(retry.reads) == 1
+    assert len(retry.reads) == 2
+
+
+def _draft_one(root, run, client, model_fn=model_for_target):
+    runner.prepare(client, root, run, now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc))
+    runner.draft_targets(
+        root, run, {"lot-a": evidence("a")}, config(), model_fn=model_fn,
+        generated_at=NOW, now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc),
+    )
+
+
+def test_forged_receipt_cannot_verify_wrong_target_or_complete_coverage(tmp_path, monkeypatch):
+    snap = snapshot(holding("lot-a", "instrument-a", "ALFA"))
+    root = tmp_path / "root"
+    client = FakeClient(snap)
+    _draft_one(root, "forged-receipt", client)
+    receipt_path = root / "runs" / "forged-receipt" / "targets" / "lot-a" / "receipt.json"
+    runner.atomic_json(receipt_path, {"target_key": "lot-other", "phase": "verified", "review_id": "review-forged"})
+    result = runner.submit_targets(client, root, "forged-receipt", approved=True)
+    assert not result["coverage_complete"]
+    assert result["outcomes"] == [{"target_key": "lot-a", "status": "failed"}]
+
+
+def test_exact_receipt_readback_avoids_duplicate_post(tmp_path, monkeypatch):
+    snap = snapshot(holding("lot-a", "instrument-a", "ALFA"))
+    root = tmp_path / "root"
+    client = FakeClient(snap)
+    _draft_one(root, "exact-receipt", client)
+    monkeypatch.setattr(runner, "utc_now", lambda: datetime(2026, 1, 2, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(runner, "now_text", lambda: NOW)
+    first = runner.submit_targets(client, root, "exact-receipt", approved=True)
+    assert first["coverage_complete"]
+    post_count = len(client.posts)
+    read_count = len(client.reads)
+    second = runner.submit_targets(client, root, "exact-receipt", approved=True)
+    assert second["coverage_complete"]
+    assert len(client.posts) == post_count
+    assert len(client.reads) == read_count + 1
+
+
+def test_receipt_readback_mismatch_is_rejected(tmp_path, monkeypatch):
+    snap = snapshot(holding("lot-a", "instrument-a", "ALFA"))
+    root = tmp_path / "root"
+    client = FakeClient(snap)
+    _draft_one(root, "corrupt-readback", client)
+    monkeypatch.setattr(runner, "utc_now", lambda: datetime(2026, 1, 2, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(runner, "now_text", lambda: NOW)
+    assert runner.submit_targets(client, root, "corrupt-readback", approved=True)["coverage_complete"]
+    client.corrupt_readback = True
+    result = runner.submit_targets(client, root, "corrupt-readback", approved=True)
+    assert not result["coverage_complete"]
+    assert result["outcomes"] == [{"target_key": "lot-a", "status": "failed"}]
+
+
+def test_manifest_membership_must_match_current_snapshot_exactly():
+    holdings = [holding("lot-a", "instrument-a", "ALFA"), holding("lot-b", "instrument-b", "BETA")]
+    snap = snapshot(*holdings)
+    manifest = {
+        "snapshot_id": snap["snapshot_id"],
+        "snapshot_sha256": runner.fingerprint(snap),
+        "calculation_version": snap["calculation_version"],
+        "targets": [
+            {"target_key": h["holding_id"], "instrument_key": h["instrument_id"],
+             "symbol": h["symbol"], "status": "verified", "review_id": "review-" + h["holding_id"],
+             "receipt_validated": True}
+            for h in holdings
+        ],
+    }
+    assert runner._coverage_complete(manifest, snap)
+    for targets in (
+        manifest["targets"][:1],
+        manifest["targets"] + [{"target_key": "extra", "instrument_key": "i-extra", "symbol": "EXTRA", "status": "verified"}],
+        [manifest["targets"][0], manifest["targets"][0]],
+    ):
+        broken = dict(manifest, targets=targets)
+        assert not runner._coverage_complete(broken, snap)
+    changed = dict(snap, snapshot_id="snapshot-new")
+    assert not runner._coverage_complete(manifest, changed)
+
+
+def test_truncated_manifest_is_blocked_by_production_draft_path(tmp_path):
+    holdings = [holding("lot-a", "instrument-a", "ALFA"), holding("lot-b", "instrument-b", "BETA")]
+    snap = snapshot(*holdings)
+    root = tmp_path / "root"
+    client = FakeClient(snap)
+    runner.prepare(client, root, "truncated", now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc))
+    manifest_path = root / "runs" / "truncated" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["targets"] = manifest["targets"][:1]
+    runner.atomic_json(manifest_path, manifest)
+    result = runner.draft_targets(
+        root, "truncated", {"lot-a": evidence("a")}, config(), model_fn=model_for_target,
+        generated_at=NOW, now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc),
+    )
+    assert not result["coverage_complete"]
+    assert result["phase"] == "blocked"
+    assert result["coverage_error"] == "manifest_snapshot_membership_mismatch"
+
+
+def test_local_model_transport_refuses_remote_endpoint_without_fallback():
+    with pytest.raises(ValueError, match="unapproved endpoint"):
+        runner.local_http("GET", "https://remote.example/v1/models")
+
+
+def test_unsupported_target_is_accounted_without_model_call(tmp_path):
+    snap = snapshot(holding("lot-a", "instrument-a", "OPTION", asset_type="option"))
+    root = tmp_path / "root"
+    client = FakeClient(snap)
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("unsupported target must not invoke model")
+
+    result = runner.prepare(client, root, "unsupported-target", now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc))
+    assert result["targets"][0]["status"] == "pending"
+    result = runner.draft_targets(
+        root, "unsupported-target", {"lot-a": evidence("a")}, config(),
+        model_fn=should_not_run, generated_at=NOW,
+        now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc),
+    )
+    assert result["coverage_complete"]
+    assert not result["successful_review_complete"]
+    assert result["outcomes"] == [{"target_key": "lot-a", "status": "unsupported"}]
+
+
+def test_progress_and_outcomes_are_public_status_only(tmp_path, monkeypatch):
+    snap = snapshot(holding("lot-a", "instrument-a", "ALFA"))
+    root = tmp_path / "root"
+    client = FakeClient(snap)
+    _draft_one(root, "public-progress", client)
+    monkeypatch.setattr(runner, "utc_now", lambda: datetime(2026, 1, 2, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(runner, "now_text", lambda: NOW)
+    result = runner.submit_targets(client, root, "public-progress", approved=True)
+    assert result["coverage_complete"]
+    encoded = json.dumps(result) + (root / "runs" / "public-progress" / "manifest.json").read_text()
+    for private_name in ("quantity", "unit_cost", "cost_basis", "latest_price", "latest_value", "reporting_value", "account", "weight"):
+        assert private_name not in encoded
