@@ -668,3 +668,78 @@ func TestReviewRetryRejectsAbortLockMessageAndCanceledContext(t *testing.T) {
 		t.Fatalf("canceled submission replay=%v err=%v", replay, err)
 	}
 }
+
+func TestHoldingReviewCompletenessIgnoresUnrelatedIncompleteLot(t *testing.T) {
+	f := newReviewRegressionFixture(t)
+	defer f.close()
+
+	// Keep the fixture's original lot healthy and add a second lot whose quote
+	// is missing. The persisted snapshot is globally incomplete, but the first
+	// holding remains independently reviewable.
+	second := f.snapshot.Holdings[0]
+	second.HoldingID = "review-lot-missing"
+	second.InstrumentID = "review-instrument-missing"
+	second.Symbol = "MISS"
+	second.LatestPrice = nil
+	second.LatestValue = nil
+	second.ReportingValue = nil
+	second.QuoteSource = ""
+	second.MarketAt = ""
+	second.FreshnessState = "missing"
+	f.snapshot.Holdings = append(f.snapshot.Holdings, second)
+	f.snapshot.State = "incomplete"
+	f.snapshot.Complete = false
+	f.snapshot.MissingDependencies = []string{"quote:review-instrument-missing"}
+	f.snapshot.StaleDependencies = []string{}
+	f.snapshot.InvalidDependencies = []string{}
+	f.submission.Scope = domain.ReviewScope{
+		Type:          "holding",
+		HoldingIDs:    []string{f.snapshot.Holdings[0].HoldingID},
+		InstrumentIDs: []string{f.snapshot.Holdings[0].InstrumentID},
+	}
+
+	if err := ValidateReviewSubmission(f.submission, f.snapshot); err != nil {
+		t.Fatalf("healthy holding rejected by unrelated missing quote: %v", err)
+	}
+
+	portfolio := f.submission
+	portfolio.Scope = domain.ReviewScope{Type: "portfolio", HoldingIDs: []string{}, InstrumentIDs: []string{}}
+	if err := ValidateReviewSubmission(portfolio, f.snapshot); !errors.Is(err, ErrReviewIncomplete) {
+		t.Fatalf("portfolio review err=%v, want incomplete", err)
+	}
+
+	missingTarget := f.submission
+	missingTarget.Scope = domain.ReviewScope{
+		Type:          "holding",
+		HoldingIDs:    []string{f.snapshot.Holdings[1].HoldingID},
+		InstrumentIDs: []string{f.snapshot.Holdings[1].InstrumentID},
+	}
+	if err := ValidateReviewSubmission(missingTarget, f.snapshot); !errors.Is(err, ErrReviewIncomplete) {
+		t.Fatalf("missing target complete review err=%v, want incomplete", err)
+	}
+}
+
+func TestHoldingReviewCompletenessDoesNotRequireReportingCurrencyConversion(t *testing.T) {
+	f := newReviewRegressionFixture(t)
+	defer f.close()
+
+	// Source-currency quote/price data is usable even though this target has no
+	// reporting-currency conversion. The holding review can be complete while
+	// the portfolio review remains incomplete.
+	f.snapshot.Holdings[0].ReportingValue = nil
+	f.snapshot.State = "incomplete"
+	f.snapshot.Complete = false
+	f.snapshot.MissingDependencies = []string{"missing fx:USD/MYR"}
+	f.snapshot.StaleDependencies = []string{}
+	f.snapshot.InvalidDependencies = []string{}
+	f.snapshot.Holdings[0].Currency = "USD"
+	f.submission.Scope = domain.ReviewScope{
+		Type:          "holding",
+		HoldingIDs:    []string{f.snapshot.Holdings[0].HoldingID},
+		InstrumentIDs: []string{f.snapshot.Holdings[0].InstrumentID},
+	}
+
+	if err := ValidateReviewSubmission(f.submission, f.snapshot); err != nil {
+		t.Fatalf("source-currency holding rejected by missing reporting FX: %v", err)
+	}
+}
