@@ -3,6 +3,7 @@ import json
 import pytest
 from datetime import datetime, timezone
 from pathlib import Path
+from shutil import copy2
 
 
 MODULE_PATH = Path(__file__).parents[1] / "portfolio_dashboard_review.py"
@@ -90,6 +91,49 @@ def model_for_target(snapshot_value, metrics, evidence_value, config_value, targ
         "evidence_ids": [evidence_value[0]["evidence_id"]],
     }]
     return result
+
+
+def legacy_model(snapshot_value, metrics, evidence_value, config_value):
+    result = opinion()
+    result["sourced_facts"] = [{
+        "statement": "The portfolio disclosed operating results.",
+        "evidence_ids": [evidence_value[0]["evidence_id"]],
+    }]
+    return result
+
+
+def test_legacy_portfolio_draft_uses_schema_beside_installed_runner(tmp_path):
+    installed = tmp_path / "installed-runner"
+    installed.mkdir()
+    copy2(MODULE_PATH, installed / MODULE_PATH.name)
+    copy2(MODULE_PATH.with_name("review-schema.json"), installed / "review-schema.json")
+    spec = importlib.util.spec_from_file_location("installed_runner", installed / MODULE_PATH.name)
+    installed_runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installed_runner)
+
+    assert installed_runner.DEFAULT_SCHEMA == installed / "review-schema.json"
+
+    snap = snapshot(holding("lot-a", "instrument-a", "ALFA"))
+    root = tmp_path / "review-root"
+    run = "legacy-portfolio"
+    directory = root / "runs" / run
+    installed_runner.atomic_json(directory / "snapshot.json", snap)
+    installed_runner.atomic_json(directory / "manifest.json", {"run_id": run, "phase": "prepared"})
+
+    result = installed_runner.draft(
+        root, run, evidence("a"), config(), model_fn=legacy_model,
+        generated_at=NOW, now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc),
+    )
+
+    assert result == {
+        "run_id": run, "phase": "drafted", "review_status": "complete", "submitted": False,
+    }
+    pending = json.loads((directory / "pending.json").read_text())
+    assert isinstance(pending["payload"]["metrics"], list)
+    assert pending["payload"]["metrics"] == installed_runner.snapshot_metrics(snap)
+    assert pending["payload"]["scope"] == {
+        "type": "portfolio", "holding_ids": [], "instrument_ids": [],
+    }
 
 
 def test_each_lot_gets_an_independent_payload_and_missing_price_keeps_qualitative_assessment(tmp_path):

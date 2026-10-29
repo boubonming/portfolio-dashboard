@@ -95,6 +95,7 @@ def snapshot_metrics(snapshot):
                     add(name, weight, 'percent')
         if len(result) > 100:
             raise ValueError('Review metric bound exceeded')
+    return result
 
 
 def holding_complete(holding):
