@@ -409,9 +409,30 @@ def prepare(client, root, run_id, now=None):
     directory = run_dir(root, run_id)
     if (directory / 'manifest.json').exists():
         manifest = json.loads((directory / 'manifest.json').read_text())
-        snapshot = json.loads((directory / 'snapshot.json').read_text())
-        manifest['coverage_complete'] = _coverage_complete(manifest, snapshot)
-        manifest['coverage_reconciled'] = _coverage_reconciled(manifest, snapshot)
+        snapshot = check_snapshot(json.loads((directory / 'snapshot.json').read_text()), client.portfolio)
+        current = now or utc_now()
+        check_current_snapshot(snapshot, client.config, current)
+        latest = check_snapshot(client.request('GET', client.base + '/snapshots/latest'), client.portfolio)
+        if fingerprint(latest) != fingerprint(snapshot):
+            manifest.update(phase='blocked', coverage_complete=False,
+                            coverage_reconciled=False, successful_review_complete=False,
+                            coverage_error='snapshot_changed_since_prepare')
+            atomic_json(directory / 'manifest.json', manifest)
+            return manifest
+        if (manifest.get('run_id') != run_id
+                or not _manifest_matches_snapshot(manifest, snapshot)):
+            manifest.update(phase='blocked', coverage_complete=False,
+                            coverage_reconciled=False, successful_review_complete=False,
+                            coverage_error='manifest_snapshot_membership_mismatch')
+            atomic_json(directory / 'manifest.json', manifest)
+            return manifest
+        for entry in manifest['targets']:
+            _reconcile_existing_target(client, root, run_id, manifest, snapshot, entry)
+        result = _result(manifest, snapshot)
+        manifest.update(phase=result['phase'], coverage_complete=result['coverage_complete'],
+                        coverage_reconciled=result['coverage_reconciled'],
+                        successful_review_complete=result['successful_review_complete'],
+                        target_count=len(manifest.get('targets', [])))
         atomic_json(directory / 'manifest.json', manifest)
         return manifest
     snapshot = check_snapshot(client.request('GET', client.base + '/snapshots/latest'), client.portfolio)
@@ -510,7 +531,8 @@ def _coverage_reconciled(manifest, snapshot):
 def _result(manifest, snapshot):
     complete = _coverage_complete(manifest, snapshot)
     successful = _successful_review_complete(manifest, snapshot)
-    result = {'run_id': manifest.get('run_id'), 'phase': 'verified' if successful else ('reconciled' if complete else manifest.get('phase', 'partial')),
+    phase = 'verified' if successful else ('reconciled' if complete else ('blocked' if manifest.get('coverage_error') else 'partial'))
+    result = {'run_id': manifest.get('run_id'), 'phase': phase,
               'coverage_complete': complete, 'successful_review_complete': successful,
               'coverage_reconciled': _coverage_reconciled(manifest, snapshot),
               'target_count': len(manifest.get('targets', [])),
@@ -594,6 +616,90 @@ def _readback_matches(client, review_id, payload, scope=None):
         if normalize_nulls(readback.get(name)) != normalize_nulls(value):
             raise ValueError('Review read-back differs from submitted target content; retain pending request')
     return readback
+
+
+def _pending_identity(pending, run_id, target_key, snapshot, target):
+    if not isinstance(pending, dict):
+        raise ValueError('Pending target review is malformed')
+    payload = pending['payload']
+    if (pending.get('target_key') != target_key
+            or pending.get('payload_sha256') != fingerprint(payload)
+            or pending.get('snapshot_sha256') != fingerprint(snapshot)):
+        raise ValueError('Pending target review identity mismatch')
+    expected_key = 'dashboard-review-' + fingerprint({
+        'run_id': run_id, 'snapshot_id': snapshot['snapshot_id'], 'target_key': target_key,
+    })[:40]
+    if pending.get('idempotency_key') != expected_key:
+        raise ValueError('Pending target idempotency identity mismatch')
+    validate_payload(payload)
+    if (payload['snapshot_id'] != snapshot['snapshot_id']
+            or payload['calculation_version'] != snapshot['calculation_version']
+            or payload['scope'] != holding_scope(target)
+            or payload['metrics'] != target_metrics(snapshot, target)):
+        raise ValueError('Pending target review context mismatch')
+    return payload
+
+
+def _reconcile_existing_target(client, root, run_id, manifest, snapshot, entry):
+    target_key = entry['target_key']
+    target_directory = _target_dir(root, run_id, target_key)
+    target = _target_by_key(snapshot, target_key)
+    unsupported = unsupported_reason(target)
+    if unsupported is not None:
+        _save_target_progress(target_directory, target_key, 'unsupported', reason=unsupported)
+        _update_manifest_target(manifest, target_key, 'unsupported', reason=unsupported)
+        return
+
+    pending_path = target_directory / 'pending.json'
+    receipt_path = target_directory / 'receipt.json'
+    if not pending_path.exists():
+        if receipt_path.exists() or entry.get('status') == 'verified':
+            _save_target_progress(target_directory, target_key, 'failed', reason='pending_missing')
+            _update_manifest_target(manifest, target_key, 'failed', reason='pending_missing')
+            _clear_verified_fields(entry)
+        return
+
+    try:
+        pending = json.loads(pending_path.read_text())
+        payload = _pending_identity(pending, run_id, target_key, snapshot, target)
+    except Exception:
+        _save_target_progress(target_directory, target_key, 'failed', reason='pending_invalid')
+        _update_manifest_target(manifest, target_key, 'failed', reason='pending_invalid')
+        _clear_verified_fields(entry)
+        return
+
+    if not receipt_path.exists():
+        if entry.get('status') == 'verified':
+            _save_target_progress(target_directory, target_key, 'drafted', reason='receipt_missing')
+            _update_manifest_target(manifest, target_key, 'drafted', reason='receipt_missing')
+            _clear_verified_fields(entry)
+        return
+
+    try:
+        receipt = json.loads(receipt_path.read_text())
+        if not _receipt_identity(receipt, run_id, target_key, pending, snapshot, payload):
+            raise ValueError('receipt_invalid')
+    except Exception:
+        _save_target_progress(target_directory, target_key, 'failed', reason='receipt_invalid')
+        _update_manifest_target(manifest, target_key, 'failed', reason='receipt_invalid')
+        _clear_verified_fields(entry)
+        return
+
+    try:
+        _readback_matches(client, receipt['review_id'], payload, payload['scope'])
+    except Exception:
+        _save_target_progress(target_directory, target_key, 'pending_readback', reason='readback_invalid')
+        _update_manifest_target(manifest, target_key, 'pending_readback', reason='readback_invalid')
+        _clear_verified_fields(entry)
+        return
+    _save_target_progress(target_directory, target_key, 'verified', review_id=receipt['review_id'])
+    _update_manifest_target(manifest, target_key, 'verified',
+                            review_id=receipt['review_id'], receipt_validated=True)
+
+
+def _clear_verified_fields(entry):
+    entry.pop('review_id', None)
+    entry.pop('receipt_validated', None)
 
 
 def draft_targets(root, run_id, evidence_by_target, config, model_fn=None, generated_at=None, now=None):
