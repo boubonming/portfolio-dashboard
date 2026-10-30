@@ -24,7 +24,7 @@ func marketMachineSecretValue() string {
 
 func marketMachineFixture(t *testing.T, clients map[marketdata.Provider]marketdata.ProviderClient) (http.Handler, *store.Store) {
 	return marketMachineFixtureWithMachine(t, clients, auth.MachineConfig{
-		PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, HoldingsWrite: true, MarketRefresh: true,
+		PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, HoldingsWrite: true,
 	}, true)
 }
 
@@ -73,12 +73,6 @@ func marketMachineFixtureWithMachine(t *testing.T, clients map[marketdata.Provid
 			database.Close()
 			t.Fatal(err)
 		}
-		if machine.MarketRefresh {
-			if _, err := database.GrantMachineMarketRefresh(context.Background(), machine.PrincipalID, machine.PortfolioID); err != nil {
-				database.Close()
-				t.Fatal(err)
-			}
-		}
 	}
 	return handler, database
 }
@@ -123,12 +117,20 @@ func marketMachineRequestWithAuthorization(handler http.Handler, method, path, b
 	return response
 }
 
-func marketMachineWorkflowRequests(handler http.Handler, setupETag string, authorization []string) []*httptest.ResponseRecorder {
-	return []*httptest.ResponseRecorder{
-		marketMachineRequestWithAuthorization(handler, http.MethodGet, "/api/v1/portfolios/market-machine-portfolio/market-data", "", authorization, nil),
-		marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/discover", `{}`, authorization, map[string]string{"If-Match": setupETag}),
-		marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/mappings", `{"mappings":[{"instrument_id":"market-machine-instrument","provider":"coingecko","provider_symbol":"machine-coin","quote_currency":"USD","provenance":"fixture listing","confirm_unverified":true}]}`, authorization, map[string]string{"If-Match": setupETag}),
-		marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, authorization, map[string]string{"Idempotency-Key": "machine-auth-matrix-key"}),
+func marketMachineWorkflowRequests(handler http.Handler, setupETag string, authorization []string) []func() *httptest.ResponseRecorder {
+	return []func() *httptest.ResponseRecorder{
+		func() *httptest.ResponseRecorder {
+			return marketMachineRequestWithAuthorization(handler, http.MethodGet, "/api/v1/portfolios/market-machine-portfolio/market-data", "", authorization, nil)
+		},
+		func() *httptest.ResponseRecorder {
+			return marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/discover", `{}`, authorization, map[string]string{"If-Match": setupETag})
+		},
+		func() *httptest.ResponseRecorder {
+			return marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/mappings", `{"mappings":[{"instrument_id":"market-machine-instrument","provider":"coingecko","provider_symbol":"machine-coin","quote_currency":"USD","provenance":"fixture listing","confirm_unverified":true}]}`, authorization, map[string]string{"If-Match": setupETag})
+		},
+		func() *httptest.ResponseRecorder {
+			return marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, authorization, map[string]string{"Idempotency-Key": "machine-auth-matrix-key"})
+		},
 	}
 }
 
@@ -146,44 +148,32 @@ func machineMarketRequest(handler http.Handler, method, path, body string, heade
 	return response
 }
 
-func TestMachineMarketRefreshGrantIsIndependentFromHoldingGrant(t *testing.T) {
+func TestMachineMarketRefreshUsesPortfolioReadWithoutDedicatedGrant(t *testing.T) {
 	clients := map[marketdata.Provider]marketdata.ProviderClient{
 		marketdata.ProviderCoinGecko:         &fakeMarketProvider{provider: marketdata.ProviderCoinGecko},
 		marketdata.ProviderOpenExchangeRates: &fakeMarketProvider{provider: marketdata.ProviderOpenExchangeRates},
 	}
 	refreshOnly, refreshDB := marketMachineFixtureWithMachine(t, clients, auth.MachineConfig{
-		PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, MarketRefresh: true,
-	}, true)
+		PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true,
+	}, false)
 	defer refreshDB.Close()
-	if response := machineMarketRequest(refreshOnly, http.MethodGet, "/api/v1/portfolios/market-machine-portfolio/market-data", "", nil); response.Code != http.StatusForbidden {
-		t.Fatalf("refresh-only setup status=%d body=%s", response.Code, response.Body.String())
-	}
 	response := machineMarketRequest(refreshOnly, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, map[string]string{"Idempotency-Key": "refresh-only-key"})
 	if response.Code != http.StatusOK {
-		t.Fatalf("refresh-only refresh status=%d body=%s", response.Code, response.Body.String())
+		t.Fatalf("portfolio-read refresh status=%d body=%s", response.Code, response.Body.String())
 	}
 	var permission int
 	if err := refreshDB.DB.QueryRow(`SELECT permission_market_data_refresh FROM market_refresh_idempotency WHERE idempotency_key=?`, "refresh-only-key").Scan(&permission); err != nil {
 		t.Fatal(err)
 	}
-	if permission != 1 {
-		t.Fatalf("refresh receipt permission=%d, want 1", permission)
+	if permission != 0 {
+		t.Fatalf("refresh receipt legacy permission=%d, want inert 0", permission)
 	}
 	var payload string
 	if err := refreshDB.DB.QueryRow(`SELECT payload FROM audit_events WHERE action='market.refresh.completed'`).Scan(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(payload, `"market_data:refresh"`) {
-		t.Fatalf("refresh audit omitted capability: %s", payload)
-	}
-
-	holdingsOnly, holdingsDB := marketMachineFixtureWithMachine(t, nil, auth.MachineConfig{
-		PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, HoldingsWrite: true,
-	}, true)
-	defer holdingsDB.Close()
-	response = machineMarketRequest(holdingsOnly, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, map[string]string{"Idempotency-Key": "holdings-only-key"})
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("holdings-only refresh status=%d body=%s", response.Code, response.Body.String())
+	if !strings.Contains(payload, `"portfolio:read"`) || strings.Contains(payload, `"market_data:refresh"`) {
+		t.Fatalf("refresh audit permissions=%s", payload)
 	}
 }
 
@@ -256,16 +246,44 @@ func TestMachineMarketRuntimeFlagsIndependentlyFailClosedOnEveryRoute(t *testing
 			handler, database := marketMachineFixtureWithMachine(t, clients, auth.MachineConfig{PrincipalID: "market-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: tc.portfolioRead, HoldingsWrite: tc.holdingsWrite}, false)
 			defer database.Close()
 			before := marketMachineEffects(t, database)
-			for _, response := range marketMachineWorkflowRequests(handler, `"not-used"`, []string{"Bearer " + marketMachineSecretValue()}) {
-				if response.Code != http.StatusForbidden {
-					t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			requests := marketMachineWorkflowRequests(handler, `"not-used"`, []string{"Bearer " + marketMachineSecretValue()})
+			requestNames := []string{"setup", "discovery", "mapping", "refresh"}
+			for index, request := range requests {
+				wantStatus := http.StatusForbidden
+				if tc.portfolioRead && !tc.holdingsWrite && index == len(requests)-1 {
+					wantStatus = http.StatusOK
+				}
+				var beforeDeniedEffects [7]int
+				var beforeDeniedProviderCalls int
+				deniedWorkflowRequest := tc.portfolioRead && !tc.holdingsWrite && index < 3
+				if deniedWorkflowRequest {
+					beforeDeniedEffects = marketMachineEffects(t, database)
+					beforeDeniedProviderCalls = marketMachineProviderCalls(clients)
+				}
+				response := request()
+				if response.Code != wantStatus {
+					t.Fatalf("%s request status=%d body=%s", requestNames[index], response.Code, response.Body.String())
+				}
+				if deniedWorkflowRequest {
+					if got := marketMachineEffects(t, database); got != beforeDeniedEffects {
+						t.Fatalf("%s request in %q caused effects: before=%v after=%v", requestNames[index], tc.name, beforeDeniedEffects, got)
+					}
+					if got := marketMachineProviderCalls(clients); got != beforeDeniedProviderCalls {
+						t.Fatalf("%s request in %q reached providers: before=%d after=%d", requestNames[index], tc.name, beforeDeniedProviderCalls, got)
+					}
 				}
 			}
-			if got := marketMachineEffects(t, database); got != before {
-				t.Fatalf("runtime-disabled request caused effects: before=%v after=%v", before, got)
+			if !tc.portfolioRead {
+				got := marketMachineEffects(t, database)
+				if got != before {
+					t.Fatalf("runtime-disabled request caused effects: before=%v after=%v", before, got)
+				}
 			}
-			if got := marketMachineProviderCalls(clients); got != 0 {
-				t.Fatalf("runtime-disabled request reached providers: %d calls", got)
+			if !tc.portfolioRead {
+				got := marketMachineProviderCalls(clients)
+				if got != 0 {
+					t.Fatalf("runtime-disabled request reached providers: %d calls", got)
+				}
 			}
 		})
 	}
@@ -277,38 +295,45 @@ func TestMachineMarketAuthorizationMatrixRejectsBindingsAndDuplicateCredentials(
 	}
 	handler, database := marketMachineFixture(t, clients)
 	defer database.Close()
-	before := marketMachineEffects(t, database)
 	valid := []string{"Bearer " + marketMachineSecretValue()}
 	tests := []struct {
 		name          string
 		authorization []string
+		headers       map[string]string
 		path          string
 		status        int
 	}{
 		{name: "empty bearer", authorization: []string{"Bearer "}, status: http.StatusUnauthorized},
 		{name: "malformed bearer", authorization: []string{"Basic " + marketMachineSecretValue()}, status: http.StatusUnauthorized},
 		{name: "oversized bearer", authorization: []string{"Bearer " + strings.Repeat("x", auth.MachineSecretMax+1)}, status: http.StatusUnauthorized},
-		{name: "valid then invalid duplicate", authorization: []string{valid[0], "Bearer wrong"}, status: http.StatusUnauthorized},
-		{name: "invalid then valid duplicate", authorization: []string{"Bearer wrong", valid[0]}, status: http.StatusUnauthorized},
-		{name: "cross portfolio", authorization: valid, path: "/api/v1/portfolios/another-portfolio/market-data", status: http.StatusForbidden},
+		{name: "valid then invalid duplicate", authorization: []string{"Bearer " + marketMachineSecretValue(), "Bearer wrong"}, status: http.StatusUnauthorized},
+		{name: "invalid then valid duplicate", authorization: []string{"Bearer wrong", "Bearer " + marketMachineSecretValue()}, status: http.StatusUnauthorized},
+		{name: "mixed session and bearer", authorization: []string{"Bearer " + marketMachineSecretValue()}, headers: map[string]string{"Cookie": auth.SessionCookieName + "=malformed-session"}, status: http.StatusUnauthorized},
+		{name: "cross portfolio", authorization: []string{"Bearer " + marketMachineSecretValue()}, path: "/api/v1/portfolios/another-portfolio/market-data/refresh", status: http.StatusForbidden},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := tc.path
 			if path == "" {
-				path = "/api/v1/portfolios/market-machine-portfolio/market-data"
+				path = "/api/v1/portfolios/market-machine-portfolio/market-data/refresh"
 			}
-			response := marketMachineRequestWithAuthorization(handler, http.MethodGet, path, "", tc.authorization, nil)
+			before := marketMachineEffects(t, database)
+			beforeCalls := marketMachineProviderCalls(clients)
+			headers := map[string]string{"Idempotency-Key": "rejected-auth-matrix-key"}
+			for key, value := range tc.headers {
+				headers[key] = value
+			}
+			response := marketMachineRequestWithAuthorization(handler, http.MethodPost, path, `{"reporting_currency":"MYR"}`, tc.authorization, headers)
 			if response.Code != tc.status {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
+			if got := marketMachineEffects(t, database); got != before {
+				t.Fatalf("rejected credentials caused effects: before=%v after=%v", before, got)
+			}
+			if got := marketMachineProviderCalls(clients); got != beforeCalls {
+				t.Fatalf("rejected credentials reached providers: before=%d after=%d", beforeCalls, got)
+			}
 		})
-	}
-	if got := marketMachineEffects(t, database); got != before {
-		t.Fatalf("rejected credentials caused effects: before=%v after=%v", before, got)
-	}
-	if got := marketMachineProviderCalls(clients); got != 0 {
-		t.Fatalf("rejected credentials reached providers: %d calls", got)
 	}
 
 	wrongPrincipalHandler, wrongPrincipalDB := marketMachineFixtureWithMachine(t, clients, auth.MachineConfig{PrincipalID: "wrong-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, HoldingsWrite: true}, false)
@@ -316,16 +341,32 @@ func TestMachineMarketAuthorizationMatrixRejectsBindingsAndDuplicateCredentials(
 	if _, err := wrongPrincipalDB.DB.Exec(`UPDATE machine_principals SET active=0 WHERE id=?`, "wrong-machine"); err != nil {
 		t.Fatal(err)
 	}
-	response := marketMachineRequestWithAuthorization(wrongPrincipalHandler, http.MethodGet, "/api/v1/portfolios/market-machine-portfolio/market-data", "", valid, nil)
+	wrongPrincipalBefore := marketMachineEffects(t, wrongPrincipalDB)
+	wrongPrincipalCalls := marketMachineProviderCalls(clients)
+	response := marketMachineRequestWithAuthorization(wrongPrincipalHandler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, valid, map[string]string{"Idempotency-Key": "wrong-principal-key"})
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("wrong configured principal status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := marketMachineEffects(t, wrongPrincipalDB); got != wrongPrincipalBefore {
+		t.Fatalf("wrong configured principal caused effects: before=%v after=%v", wrongPrincipalBefore, got)
+	}
+	if got := marketMachineProviderCalls(clients); got != wrongPrincipalCalls {
+		t.Fatalf("wrong configured principal reached providers: before=%d after=%d", wrongPrincipalCalls, got)
 	}
 
 	wrongPortfolioHandler, wrongPortfolioDB := marketMachineFixtureWithMachine(t, clients, auth.MachineConfig{PrincipalID: "market-machine", PortfolioID: "wrong-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, HoldingsWrite: true}, false)
 	defer wrongPortfolioDB.Close()
-	response = marketMachineRequestWithAuthorization(wrongPortfolioHandler, http.MethodGet, "/api/v1/portfolios/market-machine-portfolio/market-data", "", valid, nil)
+	wrongPortfolioBefore := marketMachineEffects(t, wrongPortfolioDB)
+	wrongPortfolioCalls := marketMachineProviderCalls(clients)
+	response = marketMachineRequestWithAuthorization(wrongPortfolioHandler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, valid, map[string]string{"Idempotency-Key": "wrong-portfolio-key"})
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("wrong configured portfolio status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := marketMachineEffects(t, wrongPortfolioDB); got != wrongPortfolioBefore {
+		t.Fatalf("wrong configured portfolio caused effects: before=%v after=%v", wrongPortfolioBefore, got)
+	}
+	if got := marketMachineProviderCalls(clients); got != wrongPortfolioCalls {
+		t.Fatalf("wrong configured portfolio reached providers: before=%d after=%d", wrongPortfolioCalls, got)
 	}
 }
 

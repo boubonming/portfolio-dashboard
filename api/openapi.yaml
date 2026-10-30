@@ -177,7 +177,7 @@ paths:
                 portfolio_revision: 8
                 snapshot_state: stale
                 current_snapshot_id: snap-2026-01-15
-                actor: { category: machine, id: hermes-holdings-writer, permissions: [portfolio:read, holdings:write] }
+                actor: { category: machine, id: hermes-holdings-writer, permissions: ['portfolio:read', 'holdings:write'] }
                 audit_event_id: audit-holding-002
                 activity_event_id: activity-holding-002
                 idempotency_key: create-demo-idem-001
@@ -231,7 +231,7 @@ paths:
                 portfolio_revision: 9
                 snapshot_state: stale
                 current_snapshot_id: snap-2026-01-15
-                actor: { category: browser_user, id: local-owner, permissions: [portfolio:read] }
+                actor: { category: browser_user, id: local-owner, permissions: ['portfolio:read'] }
                 audit_event_id: audit-holding-003
                 activity_event_id: activity-holding-003
                 idempotency_key: remove-demo-idem-001
@@ -667,11 +667,12 @@ paths:
         complete total. Provider errors and quote/FX missing, stale, invalid or
         future dependencies are returned as human-diagnosable classifications.
         The machine alternative requires the exact configured principal and
-        portfolio, runtime portfolio-read and the independent
-        `PORTFOLIO_MACHINE_MARKET_REFRESH=true` flag, and the persisted
-        same-principal `market_data:refresh` grant. Holdings-write is not
-        required and is not granted by this operation; its idempotency and
-        audit/activity records retain the machine actor and permission set.
+        portfolio, successful bounded bearer authentication, and the existing
+        runtime plus persisted portfolio-read authority. No dedicated refresh
+        runtime setting or persisted market-refresh grant is consulted.
+        Holdings-write is not required and is not granted by this operation;
+        its idempotency and audit/activity records retain the machine actor and
+        effective permission set.
       operationId: refreshMarketData
       security:
         - sessionCookie: []
@@ -711,11 +712,11 @@ components:
         never stored in SQLite, returned, logged, placed in a URL, or exposed
         to browser code. Holding mutations and market-data setup,
         discovery, and mapping require the separately configured
-        portfolio:read plus holdings:write runtime scope and persisted grants.
-        The canonical market-data refresh operation instead requires
-        portfolio:read plus the independent market_data:refresh runtime scope
-        and persisted grant; refresh does not grant holding mutation authority.
-        It is disabled by default and is not implied by reviews:write.
+        portfolio-read plus holdings-write runtime scope and persisted grants.
+        The canonical market-data refresh operation requires only the exact
+        configured portfolio binding and the existing portfolio-read runtime
+        plus persisted authority; it does not grant holding mutation authority
+        and is not implied by reviews:write.
   headers:
     NoStore:
       description: Private responses are never stored by shared or browser caches.
@@ -1458,7 +1459,7 @@ components:
       properties:
         category: { type: string, enum: [browser_user, machine] }
         id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
-        permissions: { type: array, minItems: 1, maxItems: 2, uniqueItems: true, items: { type: string, enum: [portfolio:read, holdings:write] } }
+        permissions: { type: array, minItems: 1, maxItems: 2, uniqueItems: true, items: { type: string, enum: ['portfolio:read', 'holdings:write'] } }
       description: Immutable safe attribution captured by the mutation; no credential material is included.
     HoldingMutationReceipt:
       type: object
@@ -1829,7 +1830,7 @@ components:
       properties:
         principal_id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._~-]*$' }
         principal_type: { type: string, enum: [browser_user, machine] }
-        permissions: { type: array, minItems: 1, maxItems: 3, uniqueItems: true, items: { type: string, enum: [portfolio:read, reviews:write, holdings:write] } }
+        permissions: { type: array, minItems: 1, maxItems: 3, uniqueItems: true, items: { type: string, enum: ['portfolio:read', 'reviews:write', 'holdings:write'] } }
       description: >-
         Immutable effective permissions captured at authentication time. A
         machine review attribution always has reviews:write as its primary

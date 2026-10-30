@@ -203,7 +203,7 @@ func validateMarketRefreshIdempotency(options MarketRefreshIdempotencyOptions) e
 	if options.ActorID == "" || len(options.ActorID) > 128 || !actorIDPattern.MatchString(options.ActorID) {
 		return errors.New("invalid market refresh actor")
 	}
-	if options.ActorCategory == "machine" && (len(options.Permissions) != 2 || options.Permissions[0] != "portfolio:read" || options.Permissions[1] != "market_data:refresh") {
+	if options.ActorCategory == "machine" && (len(options.Permissions) != 1 || options.Permissions[0] != "portfolio:read") {
 		return errors.New("invalid market refresh machine permissions")
 	}
 	if options.ActorCategory == "scheduler" && (options.ActorID != "market-refresh-scheduler" || len(options.Permissions) != 1 || options.Permissions[0] != "market_data:refresh") {
@@ -352,7 +352,7 @@ func (s *Store) readOrReserveMarketRefreshOnce(ctx context.Context, options Mark
 	leaseUntilText := formatMarketRefreshTimestamp(s.now().Add(marketRefreshLeaseDuration))
 	if _, err := tx.ExecContext(ctx, `INSERT INTO market_refresh_idempotency
 		(actor_category,actor_id,portfolio_id,operation,idempotency_key,request_fingerprint,state,phase,response_payload,refresh_id,permission_market_data_refresh,created_at,owner_token,lease_until)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), boolInt(options.ActorCategory == "machine" || options.ActorCategory == "scheduler" || options.ActorCategory == "cli"), created, ownerToken, leaseUntilText); err != nil {
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, options.ActorCategory, options.ActorID, options.PortfolioID, "refresh", options.IdempotencyKey, options.RequestFingerprint, "pending", "reserved", `{}`, deterministicID("refresh", options.ActorCategory, options.ActorID, options.PortfolioID, options.IdempotencyKey), boolInt(options.ActorCategory == "scheduler" || options.ActorCategory == "cli"), created, ownerToken, leaseUntilText); err != nil {
 		if !isUniqueError(err) {
 			return marketRefreshReceipt{}, false, err
 		}
