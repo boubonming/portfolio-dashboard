@@ -32,7 +32,6 @@ type MachineConfig struct {
 	PortfolioRead bool   `json:"portfolio_read"`
 	ReviewsWrite  bool   `json:"reviews_write"`
 	HoldingsWrite bool   `json:"holdings_write"`
-	MarketRefresh bool   `json:"market_refresh"`
 }
 
 // MachinePrincipal is the non-secret database identity and effective scope.
@@ -44,14 +43,13 @@ type MachinePrincipal struct {
 	PortfolioRead bool
 	ReviewsWrite  bool
 	HoldingsWrite bool
-	MarketRefresh bool
 }
 
 // Validate permits the machine credential to be disabled by leaving every
 // field empty, but rejects every partial or weak configuration.
 func (c MachineConfig) Validate() error {
 	empty := c.PrincipalID == "" && c.PortfolioID == "" && c.BearerSecret == ""
-	if empty && !c.PortfolioRead && !c.ReviewsWrite && !c.HoldingsWrite && !c.MarketRefresh {
+	if empty && !c.PortfolioRead && !c.ReviewsWrite && !c.HoldingsWrite {
 		return nil
 	}
 	if c.PrincipalID == "" || c.PortfolioID == "" || c.BearerSecret == "" {
@@ -82,7 +80,7 @@ func (c MachineConfig) Validate() error {
 func (c MachineConfig) Enabled() bool { return c.BearerSecret != "" }
 
 func (c MachineConfig) Principal() MachinePrincipal {
-	return MachinePrincipal{PrincipalID: c.PrincipalID, PortfolioID: c.PortfolioID, PortfolioRead: c.PortfolioRead, ReviewsWrite: c.ReviewsWrite, HoldingsWrite: c.HoldingsWrite, MarketRefresh: c.MarketRefresh}
+	return MachinePrincipal{PrincipalID: c.PrincipalID, PortfolioID: c.PortfolioID, PortfolioRead: c.PortfolioRead, ReviewsWrite: c.ReviewsWrite, HoldingsWrite: c.HoldingsWrite}
 }
 
 const (
@@ -141,8 +139,7 @@ func (c MachineConfig) redactedString() string {
 		" portfolio_id:" + strconv.Quote(truncateRunes(c.PortfolioID, machineDiagnosticFieldMax)) +
 		" bearer_secret:<redacted> portfolio_read:" + strconv.FormatBool(c.PortfolioRead) +
 		" reviews_write:" + strconv.FormatBool(c.ReviewsWrite) +
-		" holdings_write:" + strconv.FormatBool(c.HoldingsWrite) +
-		" market_refresh:" + strconv.FormatBool(c.MarketRefresh) + "}"
+		" holdings_write:" + strconv.FormatBool(c.HoldingsWrite) + "}"
 	return truncateBytes(value, machineDiagnosticOutputMax)
 }
 

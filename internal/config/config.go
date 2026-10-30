@@ -167,7 +167,6 @@ func FromEnv() Config {
 				PortfolioRead: machinePortfolioRead(),
 				ReviewsWrite:  machineReviewsWrite(),
 				HoldingsWrite: machineHoldingsWrite(),
-				MarketRefresh: machineMarketRefresh(),
 			},
 		},
 	}
@@ -193,15 +192,6 @@ func machineReviewsWrite() bool {
 
 func machineHoldingsWrite() bool {
 	value := os.Getenv("PORTFOLIO_MACHINE_HOLDINGS_WRITE")
-	if value == "" {
-		return false
-	}
-	parsed, err := strconv.ParseBool(value)
-	return err == nil && parsed
-}
-
-func machineMarketRefresh() bool {
-	value := os.Getenv("PORTFOLIO_MACHINE_MARKET_REFRESH")
 	if value == "" {
 		return false
 	}
@@ -241,11 +231,7 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("machine authentication configuration: invalid PORTFOLIO_MACHINE_HOLDINGS_WRITE")
 		}
 	}
-	if value := os.Getenv("PORTFOLIO_MACHINE_MARKET_REFRESH"); value != "" {
-		if _, err := strconv.ParseBool(value); err != nil {
-			return Config{}, fmt.Errorf("machine authentication configuration: invalid PORTFOLIO_MACHINE_MARKET_REFRESH")
-		}
-	}
+
 	if !cfg.Auth.CookieSecure && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "development") && !strings.EqualFold(os.Getenv("PORTFOLIO_ENV"), "test") {
 		return Config{}, fmt.Errorf("authentication configuration: insecure cookies require PORTFOLIO_ENV=development or test")
 	}

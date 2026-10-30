@@ -198,7 +198,7 @@ func TestScheduleHTTPAuthenticationHeadersMethodsAndPathMatrix(t *testing.T) {
 	}
 
 	machineHandler, machineDatabase := marketMachineFixtureWithMachine(t, nil, auth.MachineConfig{
-		PrincipalID: "schedule-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true, MarketRefresh: true,
+		PrincipalID: "schedule-machine", PortfolioID: "market-machine-portfolio", BearerSecret: marketMachineSecretValue(), PortfolioRead: true,
 	}, false)
 	defer machineDatabase.Close()
 	machineRequest := machineMarketRequest(machineHandler, http.MethodGet, "/api/v1/portfolios/market-machine-portfolio/market-data/schedule", "", nil)

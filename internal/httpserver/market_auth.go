@@ -65,7 +65,7 @@ func authenticateMarketWorkflow(w http.ResponseWriter, r *http.Request, database
 		refreshRoute := len(parts) == 6 && parts[5] == "refresh" && r.Method == http.MethodPost
 		allowed, err := false, error(nil)
 		if refreshRoute {
-			allowed, err = database.MachineMarketRefreshPrincipalAllowedForRuntime(r.Context(), principal, parts[3])
+			allowed, err = database.MachinePrincipalAllowedForRuntime(r.Context(), principal.PrincipalID, parts[3], principal.PortfolioID, principal.PortfolioRead)
 		} else {
 			allowed, err = database.MachineHoldingPrincipalAllowedForRuntime(r.Context(), principal, parts[3])
 		}
@@ -79,7 +79,7 @@ func authenticateMarketWorkflow(w http.ResponseWriter, r *http.Request, database
 		}
 		permissions := []string{"portfolio:read", "holdings:write"}
 		if refreshRoute {
-			permissions = []string{"portfolio:read", "market_data:refresh"}
+			permissions = []string{"portfolio:read"}
 		}
 		return marketWorkflowAuth{actor: store.MutationActor{Category: "machine", ID: principal.PrincipalID, Permissions: permissions}}, true
 	}

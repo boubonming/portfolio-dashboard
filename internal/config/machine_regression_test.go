@@ -12,7 +12,6 @@ func TestLoadMachinePermissionPresenceMatrixFailsClosed(t *testing.T) {
 		readGrant    string
 		writeGrant   string
 		holdingGrant string
-		marketGrant  string
 		wantError    bool
 	}{
 		{name: "disabled", wantError: false},
@@ -20,8 +19,7 @@ func TestLoadMachinePermissionPresenceMatrixFailsClosed(t *testing.T) {
 		{name: "full review grants", principal: "machine", portfolio: "portfolio", secret: secret, readGrant: "true", writeGrant: "true", wantError: false},
 		{name: "holding grant without read", principal: "machine", portfolio: "portfolio", secret: secret, holdingGrant: "true", wantError: true},
 		{name: "holding grant with read", principal: "machine", portfolio: "portfolio", secret: secret, readGrant: "true", holdingGrant: "true", wantError: false},
-		{name: "market refresh with read", principal: "machine", portfolio: "portfolio", secret: secret, readGrant: "true", marketGrant: "true", wantError: false},
-		{name: "market refresh without read", principal: "machine", portfolio: "portfolio", secret: secret, marketGrant: "true", wantError: true},
+
 		{name: "write only", principal: "machine", portfolio: "portfolio", secret: secret, writeGrant: "true", wantError: true},
 		{name: "read grant without identity", readGrant: "true", wantError: true},
 		{name: "write grant without identity", writeGrant: "true", wantError: true},
@@ -37,7 +35,7 @@ func TestLoadMachinePermissionPresenceMatrixFailsClosed(t *testing.T) {
 			t.Setenv("PORTFOLIO_MACHINE_PORTFOLIO_READ", tc.readGrant)
 			t.Setenv("PORTFOLIO_MACHINE_REVIEWS_WRITE", tc.writeGrant)
 			t.Setenv("PORTFOLIO_MACHINE_HOLDINGS_WRITE", tc.holdingGrant)
-			t.Setenv("PORTFOLIO_MACHINE_MARKET_REFRESH", tc.marketGrant)
+
 			_, err := Load()
 			if (err != nil) != tc.wantError {
 				t.Fatalf("Load error=%v wantError=%v", err, tc.wantError)
