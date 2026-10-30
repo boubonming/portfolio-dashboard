@@ -117,12 +117,20 @@ func marketMachineRequestWithAuthorization(handler http.Handler, method, path, b
 	return response
 }
 
-func marketMachineWorkflowRequests(handler http.Handler, setupETag string, authorization []string) []*httptest.ResponseRecorder {
-	return []*httptest.ResponseRecorder{
-		marketMachineRequestWithAuthorization(handler, http.MethodGet, "/api/v1/portfolios/market-machine-portfolio/market-data", "", authorization, nil),
-		marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/discover", `{}`, authorization, map[string]string{"If-Match": setupETag}),
-		marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/mappings", `{"mappings":[{"instrument_id":"market-machine-instrument","provider":"coingecko","provider_symbol":"machine-coin","quote_currency":"USD","provenance":"fixture listing","confirm_unverified":true}]}`, authorization, map[string]string{"If-Match": setupETag}),
-		marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, authorization, map[string]string{"Idempotency-Key": "machine-auth-matrix-key"}),
+func marketMachineWorkflowRequests(handler http.Handler, setupETag string, authorization []string) []func() *httptest.ResponseRecorder {
+	return []func() *httptest.ResponseRecorder{
+		func() *httptest.ResponseRecorder {
+			return marketMachineRequestWithAuthorization(handler, http.MethodGet, "/api/v1/portfolios/market-machine-portfolio/market-data", "", authorization, nil)
+		},
+		func() *httptest.ResponseRecorder {
+			return marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/discover", `{}`, authorization, map[string]string{"If-Match": setupETag})
+		},
+		func() *httptest.ResponseRecorder {
+			return marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/mappings", `{"mappings":[{"instrument_id":"market-machine-instrument","provider":"coingecko","provider_symbol":"machine-coin","quote_currency":"USD","provenance":"fixture listing","confirm_unverified":true}]}`, authorization, map[string]string{"If-Match": setupETag})
+		},
+		func() *httptest.ResponseRecorder {
+			return marketMachineRequestWithAuthorization(handler, http.MethodPost, "/api/v1/portfolios/market-machine-portfolio/market-data/refresh", `{"reporting_currency":"MYR"}`, authorization, map[string]string{"Idempotency-Key": "machine-auth-matrix-key"})
+		},
 	}
 }
 
@@ -239,13 +247,30 @@ func TestMachineMarketRuntimeFlagsIndependentlyFailClosedOnEveryRoute(t *testing
 			defer database.Close()
 			before := marketMachineEffects(t, database)
 			requests := marketMachineWorkflowRequests(handler, `"not-used"`, []string{"Bearer " + marketMachineSecretValue()})
-			for index, response := range requests {
+			requestNames := []string{"setup", "discovery", "mapping", "refresh"}
+			for index, request := range requests {
 				wantStatus := http.StatusForbidden
 				if tc.portfolioRead && !tc.holdingsWrite && index == len(requests)-1 {
 					wantStatus = http.StatusOK
 				}
+				var beforeDeniedEffects [7]int
+				var beforeDeniedProviderCalls int
+				deniedWorkflowRequest := tc.portfolioRead && !tc.holdingsWrite && index < 3
+				if deniedWorkflowRequest {
+					beforeDeniedEffects = marketMachineEffects(t, database)
+					beforeDeniedProviderCalls = marketMachineProviderCalls(clients)
+				}
+				response := request()
 				if response.Code != wantStatus {
-					t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+					t.Fatalf("%s request status=%d body=%s", requestNames[index], response.Code, response.Body.String())
+				}
+				if deniedWorkflowRequest {
+					if got := marketMachineEffects(t, database); got != beforeDeniedEffects {
+						t.Fatalf("%s request in %q caused effects: before=%v after=%v", requestNames[index], tc.name, beforeDeniedEffects, got)
+					}
+					if got := marketMachineProviderCalls(clients); got != beforeDeniedProviderCalls {
+						t.Fatalf("%s request in %q reached providers: before=%d after=%d", requestNames[index], tc.name, beforeDeniedProviderCalls, got)
+					}
 				}
 			}
 			if !tc.portfolioRead {
