@@ -84,7 +84,7 @@ paths:
                 portfolio: { id: portfolio-default, name: Portfolio, default_reporting_currency: MYR }
                 reporting_currency: MYR
                 snapshot: { state: no_snapshot, complete: false, missing_dependencies: [], stale_dependencies: [], future_dependencies: [], invalid_dependencies: [], subtotals: [] }
-                allocation: { state: unavailable, coverage: { total_lots: 0, valued_lots: 0, missing_dependencies: 0, stale_dependencies: 0, invalid_dependencies: 0 }, by_instrument: [], by_source_currency: [] }
+                allocation: { state: unavailable, coverage: { total_lots: 0, valued_lots: 0, missing_dependencies: 0, stale_dependencies: 0, future_dependencies: 0, invalid_dependencies: 0 }, by_instrument: [], by_source_currency: [] }
                 holdings: []
         '400':
           description: Invalid reporting currency.
@@ -1321,6 +1321,7 @@ components:
         reporting_total: { type: string, description: Decimal string; present only when complete. }
         missing_dependencies: { type: array, items: { type: string } }
         stale_dependencies: { type: array, items: { type: string } }
+        future_dependencies: { type: array, items: { type: string } }
         invalid_dependencies: { type: array, items: { type: string } }
         source_timestamps: { type: array, items: { $ref: '#/components/schemas/CanonicalDateTime' } }
         subtotals:
@@ -1349,12 +1350,13 @@ components:
           items: { $ref: '#/components/schemas/CurrencyAllocation' }
     AllocationCoverage:
       type: object
-      required: [total_lots, valued_lots, missing_dependencies, stale_dependencies, invalid_dependencies]
+      required: [total_lots, valued_lots, missing_dependencies, stale_dependencies, future_dependencies, invalid_dependencies]
       properties:
         total_lots: { type: integer, minimum: 0 }
         valued_lots: { type: integer, minimum: 0 }
         missing_dependencies: { type: integer, minimum: 0 }
         stale_dependencies: { type: integer, minimum: 0 }
+        future_dependencies: { type: integer, minimum: 0 }
         invalid_dependencies: { type: integer, minimum: 0 }
     InstrumentAllocation:
       type: object
