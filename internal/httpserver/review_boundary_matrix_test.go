@@ -93,6 +93,61 @@ func assertPhaseDError(t *testing.T, response *httptest.ResponseRecorder, status
 	}
 }
 
+func TestReviewHTTPHoldingModelAbstentionRoundTripAndReplay(t *testing.T) {
+	handler, database, submission, _ := reviewBoundaryFixture(t)
+	defer database.Close()
+	snapshot, err := database.ReviewSnapshot(context.Background(), "portfolio-api", submission.SnapshotID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Holdings) == 0 {
+		t.Fatal("fixture has no holdings")
+	}
+	target := snapshot.Holdings[0]
+	submission.Scope = domain.ReviewScope{Type: "holding", HoldingIDs: []string{target.HoldingID}, InstrumentIDs: []string{target.InstrumentID}}
+	submission.Status = "incomplete"
+	submission.Recommendation = "no_recommendation"
+	submission.Rationale = "The model abstained after reviewing the target context."
+	body := reviewBoundaryBody(t, submission)
+	beforeAudit := 0
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&beforeAudit); err != nil {
+		t.Fatal(err)
+	}
+	created := reviewBoundaryRequest(handler, http.MethodPost, "/api/v1/portfolios/portfolio-api/reviews", reviewBoundarySecret, "holding-abstention-http-key", "application/json", body)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var review domain.AdvisoryReview
+	if err := json.Unmarshal(created.Body.Bytes(), &review); err != nil {
+		t.Fatal(err)
+	}
+	if review.Status != "incomplete" || review.Recommendation != "no_recommendation" {
+		t.Fatalf("created review=%+v", review)
+	}
+	read := reviewBoundaryRequest(handler, http.MethodGet, "/api/v1/portfolios/portfolio-api/reviews/"+review.ReviewID, reviewBoundarySecret, "", "", nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("read status=%d body=%s", read.Code, read.Body.String())
+	}
+	var got domain.AdvisoryReview
+	if err := json.Unmarshal(read.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "incomplete" || got.Recommendation != "no_recommendation" || got.Scope.Type != "holding" {
+		t.Fatalf("read review=%+v", got)
+	}
+	replay := reviewBoundaryRequest(handler, http.MethodPost, "/api/v1/portfolios/portfolio-api/reviews", reviewBoundarySecret, "holding-abstention-http-key", "application/json", body)
+	if replay.Code != http.StatusCreated || !bytes.Equal(replay.Body.Bytes(), created.Body.Bytes()) {
+		t.Fatalf("replay status=%d body=%s want=%s", replay.Code, replay.Body.String(), created.Body.String())
+	}
+	var afterAudit int
+	if err := database.DB.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&afterAudit); err != nil {
+		t.Fatal(err)
+	}
+	if afterAudit != beforeAudit+1 {
+		t.Fatalf("audit count changed from %d to %d", beforeAudit, afterAudit)
+	}
+}
+
 func TestReviewHTTPBearerBoundaryMatrix(t *testing.T) {
 	handler, database, submission, _ := reviewBoundaryFixture(t)
 	defer database.Close()

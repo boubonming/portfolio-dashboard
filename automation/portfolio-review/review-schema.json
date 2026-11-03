@@ -371,7 +371,7 @@
             "$ref": "#/components/schemas/IncompleteReviewSubmission"
           }
         ],
-        "description": "The server verifies the exact snapshot and calculation version, target membership and evidence references. If data or evidence is unknown, stale beyond policy, missing or invalid, status must be incomplete and recommendation must be no_recommendation; otherwise the request is rejected with incomplete_review."
+        "description": "The server verifies the exact snapshot and calculation version, target membership and evidence references. If data or evidence is unknown, stale beyond policy, missing or invalid, status must be incomplete and recommendation must be no_recommendation; a holding-scoped model may also truthfully abstain with incomplete/no_recommendation when the target context and evidence are healthy. Complete/no_recommendation remains invalid, and otherwise the request is rejected with incomplete_review."
       },
       "ReviewSubmissionCommon": {
         "type": "object",

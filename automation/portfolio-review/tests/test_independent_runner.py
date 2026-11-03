@@ -179,6 +179,37 @@ def test_each_lot_gets_an_independent_payload_and_missing_price_keeps_qualitativ
     assert payload_b["metrics"] == runner.target_metrics(snap, holdings[1])
 
 
+def abstaining_model(snapshot_value, metrics, evidence_value, config_value, target=None):
+    result = model_for_target(snapshot_value, metrics, evidence_value, config_value, target=target)
+    result["recommendation"] = "no_recommendation"
+    result["rationale"] = "The supplied context supports a qualitative assessment, but the model abstains from a recommendation."
+    return result
+
+
+def test_healthy_holding_model_abstention_has_truthful_rationale(tmp_path):
+    snap = snapshot(holding("lot-a", "instrument-a", "ALFA"))
+    root = tmp_path / "root"
+    run = "healthy-abstention"
+    runner.atomic_json(root / "runs" / run / "snapshot.json", snap)
+    runner.atomic_json(root / "runs" / run / "manifest.json", {
+        "run_id": run, "phase": "prepared", "snapshot_id": snap["snapshot_id"],
+        "snapshot_sha256": runner.fingerprint(snap), "calculation_version": snap["calculation_version"],
+        "snapshot_state": snap["state"], "holding_count": 1, "target_count": 1,
+        "coverage_complete": False,
+        "targets": [{"target_key": "lot-a", "instrument_key": "instrument-a", "symbol": "ALFA", "status": "pending"}],
+    })
+    result = runner.draft_targets(
+        root, run, {"lot-a": evidence("a")}, config(), model_fn=abstaining_model,
+        generated_at=NOW, now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc),
+    )
+    assert result["target_count"] == 1
+    payload = json.loads((root / "runs" / run / "targets" / "lot-a" / "pending.json").read_text())["payload"]
+    assert payload["status"] == "incomplete"
+    assert payload["recommendation"] == "no_recommendation"
+    assert "model abstain" in payload["rationale"]
+    assert "target price or valuation inputs are unavailable" not in payload["rationale"].lower()
+
+
 def test_same_symbol_lots_remain_distinct_targets(tmp_path):
     holdings = [holding("lot-one", "instrument-one", "SAME"), holding("lot-two", "instrument-two", "SAME")]
     snap = snapshot(*holdings)
@@ -234,6 +265,25 @@ class FakeClient:
                 result["rationale"] = "corrupted read-back"
             return result
         raise AssertionError((method, path))
+
+
+def test_submission_failure_progress_uses_safe_category(tmp_path, monkeypatch):
+    class CategorizedFailureClient(FakeClient):
+        def request(self, method, path, payload=None, key=None):
+            if method == "POST":
+                raise runner.CategorizedSubmissionError("incomplete_review")
+            return super().request(method, path, payload, key)
+
+    snap = snapshot(holding("lot-a", "instrument-a", "ALFA"))
+    root = tmp_path / "root"
+    run = "categorized-failure"
+    client = FakeClient(snap)
+    _draft_one(root, run, client)
+    monkeypatch.setattr(runner, "utc_now", lambda: datetime(2026, 1, 2, 12, tzinfo=timezone.utc))
+    result = runner.submit_targets(CategorizedFailureClient(snap), root, run, approved=True)
+    assert result["outcomes"] == [{"target_key": "lot-a", "status": "failed"}]
+    progress = json.loads((root / "runs" / run / "targets" / "lot-a" / "progress.json").read_text())
+    assert progress["reason"] == "incomplete_review"
 
 
 def test_one_target_failure_preserves_success_and_retry_state(tmp_path, monkeypatch):
