@@ -68,7 +68,7 @@ func (s *Store) ReviewSnapshot(ctx context.Context, portfolioID, snapshotID stri
 }
 
 func noReviewSnapshot(portfolioID string) domain.ReviewSnapshot {
-	return domain.ReviewSnapshot{PortfolioID: portfolioID, State: "no_snapshot", Complete: false, MissingDependencies: []string{}, StaleDependencies: []string{}, InvalidDependencies: []string{}, Holdings: []domain.ReviewHoldingContext{}}
+	return domain.ReviewSnapshot{PortfolioID: portfolioID, State: "no_snapshot", Complete: false, MissingDependencies: []string{}, StaleDependencies: []string{}, FutureDependencies: []string{}, InvalidDependencies: []string{}, Holdings: []domain.ReviewHoldingContext{}}
 }
 
 func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, storedID, storedVersion string, encoded []byte, storedInputHash, storedCreatedAt any) (domain.ReviewSnapshot, error) {
@@ -118,18 +118,15 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 		}
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
-	if len(payload.Valuation.Lots) != len(payload.Input.Lots) || len(payload.Valuation.MissingDependencies) > 100 || len(payload.Valuation.StaleDependencies) > 100 || len(payload.Valuation.InvalidDependencies) > 100 {
+	if len(payload.Valuation.Lots) != len(payload.Input.Lots) || len(payload.Valuation.MissingDependencies) > 100 || len(payload.Valuation.StaleDependencies) > 100 || len(payload.Valuation.FutureDependencies) > 100 || len(payload.Valuation.InvalidDependencies) > 100 {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
 	if !validSnapshotInput(canonicalPayload) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
 	seenDependencies := make(map[string]struct{})
-	for _, dependency := range append(append(append([]string{}, payload.Valuation.MissingDependencies...), payload.Valuation.StaleDependencies...), payload.Valuation.InvalidDependencies...) {
+	for _, dependency := range append(append(append(append([]string{}, payload.Valuation.MissingDependencies...), payload.Valuation.StaleDependencies...), payload.Valuation.FutureDependencies...), payload.Valuation.InvalidDependencies...) {
 		if !validIdentifier(dependency, 128) {
-			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
-		}
-		if _, duplicate := seenDependencies[dependency]; duplicate {
 			return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 		}
 		seenDependencies[dependency] = struct{}{}
@@ -148,7 +145,7 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 	if !payload.Valuation.Complete && len(seenDependencies) == 0 && !hasIncompleteHolding(payload.Valuation.Lots) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
-	if !payload.Valuation.Complete && !incompleteDependenciesMatch(canonicalPayload.Input, canonicalPayload.Valuation.Lots, canonicalPayload.Valuation.MissingDependencies, canonicalPayload.Valuation.StaleDependencies, canonicalPayload.Valuation.InvalidDependencies, canonicalPayload.Valuation.ReportingCurrency) {
+	if !payload.Valuation.Complete && !incompleteDependenciesMatch(canonicalPayload.Input, canonicalPayload.Valuation.Lots, canonicalPayload.Valuation.MissingDependencies, canonicalPayload.Valuation.StaleDependencies, canonicalPayload.Valuation.InvalidDependencies, canonicalPayload.Valuation.ReportingCurrency, canonicalPayload.Valuation.FutureDependencies) {
 		return domain.ReviewSnapshot{}, ErrSnapshotCorrupt
 	}
 
@@ -174,7 +171,7 @@ func reconstructReviewSnapshot(ctx context.Context, db *sql.DB, portfolioID, sto
 		}
 	}
 
-	result := domain.ReviewSnapshot{PortfolioID: portfolioID, SnapshotID: storedID, CalculationVersion: storedVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: payload.Valuation.Complete, MissingDependencies: append([]string{}, payload.Valuation.MissingDependencies...), StaleDependencies: append([]string{}, payload.Valuation.StaleDependencies...), InvalidDependencies: append([]string{}, payload.Valuation.InvalidDependencies...), Holdings: []domain.ReviewHoldingContext{}}
+	result := domain.ReviewSnapshot{PortfolioID: portfolioID, SnapshotID: storedID, CalculationVersion: storedVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: payload.Valuation.Complete, MissingDependencies: append([]string{}, payload.Valuation.MissingDependencies...), StaleDependencies: append([]string{}, payload.Valuation.StaleDependencies...), FutureDependencies: append([]string{}, payload.Valuation.FutureDependencies...), InvalidDependencies: append([]string{}, payload.Valuation.InvalidDependencies...), Holdings: []domain.ReviewHoldingContext{}}
 	if result.Complete {
 		result.State = "complete"
 	} else {
@@ -329,8 +326,11 @@ func hasIncompleteHolding(lots []domain.LotValuation) bool {
 	return false
 }
 
-func incompleteDependenciesMatch(input domain.ValuationInput, valuation []domain.LotValuation, missing, stale, invalid []string, reportingCurrency string) bool {
+func incompleteDependenciesMatch(input domain.ValuationInput, valuation []domain.LotValuation, missing, stale, invalid []string, reportingCurrency string, future ...[]string) bool {
 	dependencies := append(append(append([]string{}, missing...), stale...), invalid...)
+	if len(future) > 0 {
+		dependencies = append(dependencies, future[0]...)
+	}
 	if len(dependencies) == 0 {
 		return false
 	}
@@ -371,7 +371,7 @@ func incompleteDependenciesMatch(input domain.ValuationInput, valuation []domain
 					break
 				}
 			}
-		case strings.HasPrefix(dependency, "missing fx:"), strings.HasPrefix(dependency, "stale fx:"), strings.HasPrefix(dependency, "invalid fx:"), strings.HasPrefix(dependency, "ambiguous fx:"):
+		case strings.HasPrefix(dependency, "missing fx:"), strings.HasPrefix(dependency, "stale fx:"), strings.HasPrefix(dependency, "future fx:"), strings.HasPrefix(dependency, "invalid fx:"), strings.HasPrefix(dependency, "ambiguous fx:"):
 			identity := dependency[strings.IndexByte(dependency, ':')+1:]
 			if strings.Contains(identity, "/") {
 				pair := strings.Split(identity, "/")

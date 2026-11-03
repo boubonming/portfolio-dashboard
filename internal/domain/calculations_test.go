@@ -243,6 +243,22 @@ func TestCalculateFutureQuoteBeyondToleranceIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestCalculateFutureFXIsIncomplete(t *testing.T) {
+	asOf := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	result, err := Calculate(ValuationInput{
+		Lots:    []ValuationLot{{ID: "future-fx", InstrumentID: "future-fx", Currency: "USD", Quantity: "1"}},
+		Quotes:  []Quote{{ID: "fresh-quote", InstrumentID: "future-fx", Price: "2", Currency: "USD", MarketAt: asOf.Format(time.RFC3339Nano)}},
+		FXRates: []FXRate{{ID: "future-fx-rate", BaseCurrency: "USD", QuoteCurrency: "MYR", Rate: "4", MarketAt: asOf.Add(DefaultFutureTolerance + time.Second).Format(time.RFC3339Nano)}},
+		AsOf:    asOf, MaxAge: time.Hour, ReportingCurrency: "MYR",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Complete || result.ReportingTotal != "" || len(result.FutureDependencies) != 1 || result.FutureDependencies[0] != "future fx:future-fx-rate" || len(result.InvalidDependencies) != 0 {
+		t.Fatalf("future FX result = %+v", result)
+	}
+}
+
 func TestCalculateStaleFXIsIncomplete(t *testing.T) {
 	asOf := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 	result, err := Calculate(ValuationInput{

@@ -329,6 +329,33 @@ func TestReviewWitnessUsesActualFactEvidenceOrder(t *testing.T) {
 	}
 }
 
+func TestHoldingReviewSupportsTruthfulModelAbstention(t *testing.T) {
+	f := newReviewRegressionFixture(t)
+	defer f.close()
+	submission := f.submission
+	submission.Scope = domain.ReviewScope{Type: "holding", HoldingIDs: []string{f.snapshot.Holdings[0].HoldingID}, InstrumentIDs: []string{f.snapshot.Holdings[0].InstrumentID}}
+	submission.Status = "incomplete"
+	submission.Recommendation = "no_recommendation"
+	if err := ValidateReviewSubmission(submission, f.snapshot); err != nil {
+		t.Fatalf("supported abstention rejected: %v", err)
+	}
+	fingerprint, err := ReviewFingerprint(submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, replay, err := f.store.SubmitAdvisoryReview(context.Background(), f.principal, f.portfolio, "holding-abstention-key", fingerprint, submission)
+	if err != nil || replay {
+		t.Fatalf("abstention create replay=%v err=%v", replay, err)
+	}
+	if created.Status != "incomplete" || created.Recommendation != "no_recommendation" || created.Scope.Type != "holding" {
+		t.Fatalf("abstention result=%+v", created)
+	}
+	replayed, replay, err := f.store.SubmitAdvisoryReview(context.Background(), f.principal, f.portfolio, "holding-abstention-key", fingerprint, submission)
+	if err != nil || !replay || replayed.ReviewID != created.ReviewID {
+		t.Fatalf("abstention replay=%v result=%+v err=%v", replay, replayed, err)
+	}
+}
+
 func TestReviewTextControlsAndAllowedWhitespaceMatrix(t *testing.T) {
 	f := newReviewRegressionFixture(t)
 	defer f.close()

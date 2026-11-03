@@ -154,6 +154,8 @@ func Calculate(input ValuationInput) (Valuation, error) {
 				out.MissingDependencies = append(out.MissingDependencies, convErr.Error())
 			} else if strings.Contains(convErr.Error(), "stale") {
 				out.StaleDependencies = append(out.StaleDependencies, convErr.Error())
+			} else if strings.Contains(convErr.Error(), "future") {
+				out.FutureDependencies = append(out.FutureDependencies, convErr.Error())
 			} else {
 				out.InvalidDependencies = append(out.InvalidDependencies, convErr.Error())
 			}
@@ -316,7 +318,9 @@ func Convert(value Decimal, from, to string, rates []FXRate, asOf time.Time, max
 				switch fresh.Status {
 				case Stale:
 					return ZeroDecimal(), nil, fmt.Errorf("stale fx:%s", fx.ID)
-				case Future, Invalid:
+				case Future:
+					return ZeroDecimal(), nil, fmt.Errorf("future fx:%s", fx.ID)
+				case Invalid:
 					return ZeroDecimal(), nil, fmt.Errorf("invalid fx:%s", fx.ID)
 				}
 			}

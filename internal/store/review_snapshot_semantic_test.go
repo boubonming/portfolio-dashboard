@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,7 +72,8 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 		}
 		return hex.EncodeToString(digest[:])
 	}
-	insertCorrupt := func(payload snapshotPayload, storedHash, rowCreatedAt any) {
+	insertSnapshot := func(t *testing.T, payload snapshotPayload, storedHash, rowCreatedAt any) {
+		t.Helper()
 		encoded, marshalErr := json.Marshal(payload)
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
@@ -98,7 +100,7 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 	inputMutation.CalculationVersion = "semantic.v2"
 	storedHash := inputHash(inputMutation.CalculationVersion, inputMutation.Input)
 	inputMutation.Input.Quotes[0].Source = "mutated-source"
-	insertCorrupt(inputMutation, storedHash, canonical.CreatedAt)
+	insertSnapshot(t, inputMutation, storedHash, canonical.CreatedAt)
 	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, inputMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
 		t.Fatalf("input-only mutation was accepted: %v", err)
 	}
@@ -109,7 +111,7 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 	storedHash = inputHash(correlatedMutation.CalculationVersion, correlatedMutation.Input)
 	correlatedMutation.Input.Lots[0].Quantity = "3"
 	correlatedMutation.Valuation.Lots[0].Quantity = "3"
-	insertCorrupt(correlatedMutation, storedHash, canonical.CreatedAt)
+	insertSnapshot(t, correlatedMutation, storedHash, canonical.CreatedAt)
 	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, correlatedMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
 		t.Fatalf("correlated input/valuation mutation was accepted: %v", err)
 	}
@@ -123,7 +125,7 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 		t.Fatal(parseErr)
 	}
 	timestampMutation.CreatedAt = canonicalSnapshotTime(createdAt.Add(time.Second))
-	insertCorrupt(timestampMutation, storedHash, canonical.CreatedAt)
+	insertSnapshot(t, timestampMutation, storedHash, canonical.CreatedAt)
 	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, timestampMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
 		t.Fatalf("payload/row timestamp mismatch was accepted: %v", err)
 	}
@@ -132,7 +134,7 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 	rowTimestampMutation.SnapshotID = "corrupt-row-timestamp"
 	rowTimestampMutation.CalculationVersion = "semantic.v5"
 	storedHash = inputHash(rowTimestampMutation.CalculationVersion, rowTimestampMutation.Input)
-	insertCorrupt(rowTimestampMutation, storedHash, "not-a-timestamp")
+	insertSnapshot(t, rowTimestampMutation, storedHash, "not-a-timestamp")
 	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, rowTimestampMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
 		t.Fatalf("malformed row timestamp was accepted: %v", err)
 	}
@@ -141,7 +143,7 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 	storedHashTypeMutation.SnapshotID = "corrupt-input-hash-type"
 	storedHashTypeMutation.CalculationVersion = "semantic.v6"
 	storedHash = inputHash(storedHashTypeMutation.CalculationVersion, storedHashTypeMutation.Input)
-	insertCorrupt(storedHashTypeMutation, []byte(storedHash), canonical.CreatedAt)
+	insertSnapshot(t, storedHashTypeMutation, []byte(storedHash), canonical.CreatedAt)
 	if _, err = s.ReviewSnapshot(ctx, canonical.PortfolioID, storedHashTypeMutation.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
 		t.Fatalf("non-text input hash was accepted: %v", err)
 	}
@@ -175,32 +177,29 @@ func TestReviewSnapshotRejectsDatabaseSemanticCorruption(t *testing.T) {
 	}
 	for name, corrupt := range corruptions {
 		t.Run(name, func(t *testing.T) {
-			canonicalJSON, marshalErr := json.Marshal(canonical)
-			if marshalErr != nil {
-				t.Fatal(marshalErr)
-			}
-			var payload snapshotPayload
-			if unmarshalErr := json.Unmarshal(canonicalJSON, &payload); unmarshalErr != nil {
-				t.Fatal(unmarshalErr)
-			}
+			payload := clonePayload(canonical)
 			payload.SnapshotID = "corrupt-" + name
+			payload.CalculationVersion = "semantic.corruption." + name
+			storedHash := inputHash(payload.CalculationVersion, payload.Input)
+
+			// Prove the shared fixture setup reaches the semantic validation seam:
+			// the unmutated payload uses the same input shape and valid ownership
+			// associations, and ReviewSnapshot accepts its digest before the
+			// intended valuation-only mutation is applied below.
+			control := clonePayload(payload)
+			control.SnapshotID = "control-" + name
+			control.CalculationVersion = "semantic.control." + name
+			controlHash := inputHash(control.CalculationVersion, control.Input)
+			insertSnapshot(t, control, controlHash, control.CreatedAt)
+			if _, setupErr := s.ReviewSnapshot(ctx, control.PortfolioID, control.SnapshotID, false); setupErr != nil {
+				t.Fatalf("unmutated setup rejected before semantic mutation: %v", setupErr)
+			}
+
 			corrupt(&payload)
-			encoded, marshalErr := json.Marshal(payload)
-			if marshalErr != nil {
-				t.Fatal(marshalErr)
-			}
-			if _, err = s.DB.Exec(`INSERT INTO snapshots(id,portfolio_id,calculation_version,payload,created_at,input_hash) VALUES(?,?,?,?,?,?)`, payload.SnapshotID, payload.PortfolioID, payload.CalculationVersion, encoded, payload.CreatedAt, "corrupt-"+name); err != nil {
-				t.Fatal(err)
-			}
-			if _, err = s.DB.Exec(`INSERT INTO review_snapshots(portfolio_id,snapshot_id,calculation_version) VALUES(?,?,?)`, payload.PortfolioID, payload.SnapshotID, payload.CalculationVersion); err != nil {
-				t.Fatal(err)
-			}
-			if _, err = s.DB.Exec(`INSERT INTO snapshot_holdings(portfolio_id,snapshot_id,holding_id,instrument_id) VALUES(?,?,?,?)`, payload.PortfolioID, payload.SnapshotID, "lot-semantic", "instrument-semantic"); err != nil {
-				t.Fatal(err)
-			}
-			_, err = s.ReviewSnapshot(ctx, payload.PortfolioID, payload.SnapshotID, false)
-			if !errors.Is(err, ErrSnapshotCorrupt) {
-				t.Fatalf("corrupt %s was accepted: %v", name, err)
+			insertSnapshot(t, payload, storedHash, payload.CreatedAt)
+			_, reviewErr := s.ReviewSnapshot(ctx, payload.PortfolioID, payload.SnapshotID, false)
+			if !errors.Is(reviewErr, ErrSnapshotCorrupt) {
+				t.Fatalf("corrupt %s was accepted: %v", name, reviewErr)
 			}
 		})
 	}
@@ -326,6 +325,147 @@ func TestReviewSnapshotAcceptsHistoricalObservationRepresentationAfterHashVerifi
 	}
 	if _, err = fixture.store.ReviewSnapshot(ctx, payload.PortfolioID, payload.SnapshotID, false); !errors.Is(err, ErrSnapshotCorrupt) {
 		t.Fatalf("canonicalized hash accepted for historical payload: %v", err)
+	}
+}
+
+func TestReviewSnapshotRoundTripAcceptsWriterDuplicateDependencies(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "duplicate-dependencies.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)
+	nowText := canonicalSnapshotTime(now)
+	secondText := canonicalSnapshotTime(now.Add(time.Nanosecond))
+	for _, statement := range []string{
+		`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`,
+	} {
+		var args []any
+		switch {
+		case strings.HasPrefix(statement, "INSERT INTO portfolios"):
+			args = []any{"portfolio-duplicate", "Duplicate", "USD", nowText, nowText}
+		case strings.HasPrefix(statement, "INSERT INTO instruments"):
+			args = []any{"instrument-duplicate", "DUP", "Duplicate", "USD", nowText}
+		default:
+			args = []any{"portfolio-duplicate", "instrument-duplicate", nowText}
+		}
+		if _, err := s.DB.Exec(statement, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, lot := range []struct{ id, createdAt, quantity string }{
+		{"lot-duplicate-a", nowText, "1"},
+		{"lot-duplicate-b", secondText, "2"},
+	} {
+		if _, err := s.DB.Exec(`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`, lot.id, "portfolio-duplicate", "instrument-duplicate", lot.quantity, "USD", lot.createdAt, lot.createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "portfolio-duplicate", ReportingCurrency: "USD", CalculationVersion: "duplicate.v1", AsOf: now, MaxAge: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Complete || len(status.MissingDependencies) != 2 || status.MissingDependencies[0] != "quote:instrument-duplicate" || status.MissingDependencies[1] != "quote:instrument-duplicate" {
+		t.Fatalf("writer duplicate dependencies=%+v", status)
+	}
+	if _, err := s.ReviewSnapshot(ctx, "portfolio-duplicate", status.SnapshotID, false); err != nil {
+		t.Fatalf("writer-valid duplicate dependency snapshot rejected: %v", err)
+	}
+}
+
+func TestReviewSnapshotRoundTripAcceptsWriterFutureQuoteDependency(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "future-dependency.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)
+	nowText := canonicalSnapshotTime(now)
+	for _, statement := range []string{
+		`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`,
+		`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`,
+	} {
+		var args []any
+		switch {
+		case strings.HasPrefix(statement, "INSERT INTO portfolios"):
+			args = []any{"portfolio-future", "Future", "USD", nowText, nowText}
+		case strings.HasPrefix(statement, "INSERT INTO instruments"):
+			args = []any{"instrument-future", "FUT", "Future", "USD", nowText}
+		case strings.HasPrefix(statement, "INSERT INTO portfolio_instruments"):
+			args = []any{"portfolio-future", "instrument-future", nowText}
+		default:
+			args = []any{"lot-future", "portfolio-future", "instrument-future", "1", "USD", nowText, nowText}
+		}
+		if _, err := s.DB.Exec(statement, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.AddQuote(ctx, QuoteInput{InstrumentID: "instrument-future", Price: "2", Currency: "USD", Source: "fixture", MarketAt: now.Add(time.Hour).Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "portfolio-future", ReportingCurrency: "USD", CalculationVersion: "future.v1", AsOf: now, MaxAge: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Complete || len(status.FutureDependencies) != 1 || !strings.HasPrefix(status.FutureDependencies[0], "quote:") {
+		t.Fatalf("writer future dependency=%+v", status)
+	}
+	if _, err := s.ReviewSnapshot(ctx, "portfolio-future", status.SnapshotID, false); err != nil {
+		t.Fatalf("writer-valid future dependency snapshot rejected: %v", err)
+	}
+}
+
+func TestReviewSnapshotRoundTripAcceptsWriterFutureFXDependency(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "future-fx-dependency.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)
+	nowText := canonicalSnapshotTime(now)
+	for _, statement := range []string{
+		`INSERT INTO portfolios(id,name,reporting_currency,created_at,updated_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO instruments(id,symbol,description,currency,created_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO portfolio_instruments(portfolio_id,instrument_id,created_at) VALUES(?,?,?)`,
+		`INSERT INTO lots(id,portfolio_id,instrument_id,quantity,currency,created_at,created_at_order_key) VALUES(?,?,?,?,?,?,?)`,
+	} {
+		var args []any
+		switch {
+		case strings.HasPrefix(statement, "INSERT INTO portfolios"):
+			args = []any{"portfolio-future-fx", "Future FX", "MYR", nowText, nowText}
+		case strings.HasPrefix(statement, "INSERT INTO instruments"):
+			args = []any{"instrument-future-fx", "FFX", "Future FX", "USD", nowText}
+		case strings.HasPrefix(statement, "INSERT INTO portfolio_instruments"):
+			args = []any{"portfolio-future-fx", "instrument-future-fx", nowText}
+		default:
+			args = []any{"lot-future-fx", "portfolio-future-fx", "instrument-future-fx", "1", "USD", nowText, nowText}
+		}
+		if _, err := s.DB.Exec(statement, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.AddQuote(ctx, QuoteInput{InstrumentID: "instrument-future-fx", Price: "2", Currency: "USD", Source: "fixture", MarketAt: now.Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddFXRate(ctx, FXInput{ID: "future-fx-rate", BaseCurrency: "USD", QuoteCurrency: "MYR", Rate: "4", Source: "fixture", MarketAt: now.Add(domain.DefaultFutureTolerance + time.Second).Format(time.RFC3339Nano), Basis: "close", Provenance: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.CreateSnapshot(ctx, SnapshotRequest{PortfolioID: "portfolio-future-fx", ReportingCurrency: "MYR", CalculationVersion: "future-fx.v1", AsOf: now, MaxAge: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Complete || len(status.FutureDependencies) != 1 || status.FutureDependencies[0] != "future fx:future-fx-rate" || len(status.InvalidDependencies) != 0 {
+		t.Fatalf("writer future FX dependency=%+v", status)
+	}
+	if _, err := s.ReviewSnapshot(ctx, "portfolio-future-fx", status.SnapshotID, false); err != nil {
+		t.Fatalf("writer-valid future FX dependency snapshot rejected: %v", err)
 	}
 }
 

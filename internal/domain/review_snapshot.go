@@ -12,6 +12,7 @@ type ReviewSnapshot struct {
 	Complete            bool                   `json:"complete"`
 	MissingDependencies []string               `json:"missing_dependencies"`
 	StaleDependencies   []string               `json:"stale_dependencies"`
+	FutureDependencies  []string               `json:"future_dependencies"`
 	InvalidDependencies []string               `json:"invalid_dependencies"`
 	Holdings            []ReviewHoldingContext `json:"holdings"`
 }

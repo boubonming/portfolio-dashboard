@@ -188,7 +188,11 @@ func reviewHasActualIncompleteSupport(snapshot domain.ReviewSnapshot, submission
 				return true
 			}
 		}
-		return false
+		// A holding-scoped model abstention is a supported incomplete review,
+		// even when the target's market context and evidence are healthy. The
+		// incomplete branch records that no recommendation was completed; it
+		// never claims that the immutable valuation inputs are missing.
+		return true
 	}
 	if snapshot.State != "complete" || len(snapshot.MissingDependencies) != 0 || len(snapshot.StaleDependencies) != 0 || len(snapshot.InvalidDependencies) != 0 {
 		return true

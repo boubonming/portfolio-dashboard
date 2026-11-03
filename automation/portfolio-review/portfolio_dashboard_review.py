@@ -134,6 +134,16 @@ def holding_scope(holding):
             'instrument_ids': [holding['instrument_id']]}
 
 
+def holding_incomplete_reason(holding, evidence, opinion):
+    if not holding_complete(holding):
+        return "this target's own price or valuation inputs are unavailable"
+    if (not evidence or not opinion['sourced_facts']
+            or any(e.get('availability') != 'available' or e.get('freshness') != 'current'
+                   for e in evidence)):
+        return 'supporting evidence is insufficient or not current'
+    return 'the model abstained from issuing a recommendation after reviewing the available target context and supporting evidence'
+
+
 def make_holding_payload(snapshot, holding, evidence, opinion, provenance, generated_at):
     if set(opinion) != OPINION_FIELDS:
         raise ValueError('Model output fields differ from the permitted opinion contract')
@@ -190,8 +200,8 @@ def make_holding_payload(snapshot, holding, evidence, opinion, provenance, gener
                    metrics=target_metrics(snapshot, holding), evidence=evidence, model=provenance,
                    generated_at=generated_at)
     if not complete:
-        limitations = ' Target price or valuation inputs are unavailable; qualitative business, thesis, disclosure, and risk analysis remains separate.'
-        payload['rationale'] = 'Incomplete advisory review: no recommendation is issued because this target data or supporting evidence is incomplete.' + limitations + ' ' + payload['rationale']
+        reason = holding_incomplete_reason(holding, evidence, opinion)
+        payload['rationale'] = 'Incomplete advisory review: no recommendation is issued because ' + reason + '. qualitative business, thesis, disclosure, and risk analysis remains separate. ' + payload['rationale']
     validate_payload(payload)
     return payload
 
@@ -401,8 +411,7 @@ class API:
                           '422': 'incomplete_review', '429': 'rate_limited', '500': 'internal_error',
                           '502': 'upstream_error', '503': 'unavailable', '504': 'upstream_timeout'}
             # Never reflect error-body fields or arbitrary transport output.
-            safe_status = status if re.fullmatch(r'[1-5][0-9]{2}', status) else 'unknown'
-            raise ValueError('Dashboard HTTP %s (%s)' % (safe_status, categories.get(status, 'unexpected_response')))
+            raise CategorizedSubmissionError(categories.get(status, 'unexpected_response'))
         return json.loads(body)
 
 
@@ -470,6 +479,23 @@ def _target_by_key(snapshot, target_key):
 TERMINAL_REVIEW_STATUSES = {'verified', 'unsupported'}
 ACCOUNTED_STATUSES = TERMINAL_REVIEW_STATUSES | {'deferred', 'failed'}
 SUPPORTED_ASSET_TYPES = {'stock', 'equity', 'etf', 'crypto', 'cryptocurrency'}
+SAFE_SUBMISSION_CATEGORIES = {
+    'invalid_request', 'unauthorized', 'forbidden', 'not_found', 'method_not_allowed',
+    'conflict', 'payload_too_large', 'unsupported_media_type', 'incomplete_review',
+    'rate_limited', 'internal_error', 'upstream_error', 'unavailable', 'upstream_timeout',
+    'unexpected_response',
+}
+
+
+class CategorizedSubmissionError(ValueError):
+    def __init__(self, category):
+        self.category = category if category in SAFE_SUBMISSION_CATEGORIES else 'unexpected_response'
+        super().__init__('Dashboard submission failed')
+
+
+def safe_submission_reason(error):
+    category = getattr(error, 'category', None)
+    return category if category in SAFE_SUBMISSION_CATEGORIES else type(error).__name__
 
 
 def unsupported_reason(target):
@@ -884,8 +910,9 @@ def submit_targets(client, root, run_id, approved=False):
             _save_target_progress(target_directory, target_key, 'verified', review_id=review_id)
             _update_manifest_target(manifest, target_key, 'verified', review_id=review_id, receipt_validated=True)
         except Exception as error:
-            _save_target_progress(target_directory, target_key, 'failed', reason=type(error).__name__)
-            _update_manifest_target(manifest, target_key, 'failed', reason=type(error).__name__)
+            reason = safe_submission_reason(error)
+            _save_target_progress(target_directory, target_key, 'failed', reason=reason)
+            _update_manifest_target(manifest, target_key, 'failed', reason=reason)
         atomic_json(directory / 'manifest.json', manifest)
     result = _result(manifest, snapshot)
     manifest.update(phase=result['phase'], coverage_complete=result['coverage_complete'],
