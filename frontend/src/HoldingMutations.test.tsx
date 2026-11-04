@@ -1140,6 +1140,80 @@ describe('HoldingMutations', () => {
     root.remove()
   })
 
+  it('retains a confirmed receipt and retries only the overview read after refresh failure', async () => {
+    let refreshCalls = 0
+    const props = { ...baseProps(), onRefresh: vi.fn(async () => {
+      refreshCalls += 1
+      if (refreshCalls === 1) throw new Error('overview unavailable')
+      return '\"portfolio-default-12\"'
+    }) }
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => ({
+      ok: true, status: 201, headers: new Headers({ ETag: '\"portfolio-default-8\"' }),
+      json: async () => ({ ...receipt, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }),
+    } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/Holding added/i))
+    expect(screen.getByRole('button', { name: 'Retry loading holdings' })).toBeTruthy()
+    expect(fetchMock).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading holdings' }))
+    await waitFor(() => expect(refreshCalls).toBe(2))
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(screen.getByRole('status').textContent).toMatch(/Holding added/i)
+    expect(screen.queryByRole('button', { name: 'Retry loading holdings' })).toBeNull()
+  })
+
+  it('retries a server-uncertain create with the identical immutable attempt', async () => {
+    const props = baseProps()
+    let calls = 0
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>((_input, init) => {
+      calls += 1
+      if (calls === 1) return Promise.resolve({ ok: false, status: 500, headers: new Headers(), clone: () => ({ json: async () => ({}) }) } as unknown as Response)
+      return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '\"portfolio-default-8\"' }), json: async () => ({ ...receipt, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same save' })).toBeTruthy())
+    const firstInit = fetchMock.mock.calls[0][1]
+    const firstKey = new Headers(firstInit?.headers as HeadersInit).get('Idempotency-Key')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same save' }))
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
+    const retryInit = fetchMock.mock.calls[1][1]
+    expect(new Headers(retryInit?.headers as HeadersInit).get('Idempotency-Key')).toBe(firstKey)
+    expect(new Headers(retryInit?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
+    expect(retryInit?.body).toBe(firstInit?.body)
+  })
+
+  it('focuses the scoped Holding currency field instead of the reporting currency control', () => {
+    render(<HoldingMutations {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'EUR']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    expect(document.activeElement).toBe(screen.getByLabelText('Holding currency'))
+    expect((document.activeElement as HTMLElement).id).toBe('holding-currency')
+  })
+
+  it('accepts a newer overview revision without invalidating the confirmed receipt', async () => {
+    const props = { ...baseProps(), onRefresh: vi.fn(async () => '"portfolio-default-9"') }
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => ({
+      ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }),
+      json: async () => ({ ...receipt, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }),
+    } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/Holding added/i))
+    expect(screen.queryByText(/refreshed overview revision did not match/i)).toBeNull()
+  })
+
   it('places a portaled row menu inside a narrow viewport and recomputes on descendant scroll, window scroll, and resize', () => {
     expect(calculateRowMenuPosition({ top: 190, bottom: 214, left: 290, right: 314 }, { width: 100, height: 70 }, 320, 240)).toEqual({ top: 116, left: 212 })
     const props = baseProps()

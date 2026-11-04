@@ -67,7 +67,7 @@ export function holdingDisplayLabel(holding: Holding) {
     ? holding.description
     : holding.name && holding.name !== holding.symbol ? holding.name : undefined
   const context = [
-    `${holding.quantity} ${holding.currency}`,
+    `${holding.quantity} ${holding.currency} · ${holding.quantity} units`,
     holding.unit_cost ? `unit cost ${holding.unit_cost} ${holding.currency}` : '',
     holding.cost_basis ? `cost basis ${holding.cost_basis} ${holding.currency}` : '',
   ].filter(Boolean)
@@ -200,16 +200,28 @@ type Props = {
   sessionKey?: string
   onRefresh: () => Promise<string | void>
   onUnauthorized: () => void
+  /** Keep the authenticated mutation owner mounted while another view is shown. */
+  visible?: boolean
   children?: (renderHoldingActions: (holding: Holding) => ReactNode) => ReactNode
 }
 
 type Attempt = { operation: HoldingMutationOperation; sessionKey: string; portfolioId: string; scopeKey: string; targetSignature: string; key: string; body: string; etag: string; lotId?: string }
+type ConfirmedReceipt = {
+  operation: HoldingMutationOperation
+  result: 'applied' | 'replayed'
+  holding: Record<string, unknown>
+  portfolioRevision: number
+  snapshotState: 'stale' | 'no_snapshot'
+  auditEventId: string
+  activityEventId: string
+  idempotencyKey: string
+}
 type Authority = { active: boolean; valid: boolean; sessionKey: string; portfolioId: string; scopeKey: string }
 type ModalBackground = { element: HTMLElement; inert: boolean; ariaHidden: string | null }
 type ArchiveContext = { sessionKey: string; portfolioId: string; scopeKey: string; lotId: string }
 type AddContext = { sessionKey: string; portfolioId: string; scopeKey: string; origin: HTMLButtonElement | null }
 
-export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, sessionKey = scopeKey, onRefresh, onUnauthorized, children }: Props) {
+export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, sessionKey = scopeKey, onRefresh, onUnauthorized, visible = true, children }: Props) {
   const [formOpen, setFormOpen] = useState(false)
   const [openMenuLotId, setOpenMenuLotId] = useState<string | null>(null)
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 })
@@ -221,6 +233,10 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
+  const [confirmedReceipt, setConfirmedReceipt] = useState<ConfirmedReceipt | null>(null)
+  const [readRecovery, setReadRecovery] = useState(false)
+  const [readRecoveryBusy, setReadRecoveryBusy] = useState(false)
+  const [unresolved, setUnresolved] = useState(false)
   const busyRef = useRef(false)
   const createAttempt = useRef<Attempt | null>(null)
   const removeAttempt = useRef<Attempt | null>(null)
@@ -253,6 +269,8 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const scopeRef = useRef(scopeKey)
   const holdingsRef = useRef(holdings)
   const blockedRef = useRef(false)
+  const unresolvedRef = useRef(false)
+  const archiveAttemptLotRef = useRef<Holding | null>(null)
   const focusFormHeading = useCallback((node: HTMLElement | null) => { formHeadingRef.current = node; if (node) node.focus() }, [])
   const focusArchiveHeading = useCallback((node: HTMLElement | null) => { dialogHeadingRef.current = node; if (node) node.focus() }, [])
 
@@ -271,6 +289,8 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     busyRef.current = false
     createAttempt.current = null
     removeAttempt.current = null
+    archiveAttemptLotRef.current = null
+    unresolvedRef.current = false
     archiveLotRef.current = null
     archiveContextRef.current = null
     addContextRef.current = null
@@ -282,6 +302,10 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   }
   const clearArchiveState = (resetForm = false, block = resetForm) => {
     invalidateAuthority()
+    setConfirmedReceipt(null)
+    setReadRecovery(false)
+    setReadRecoveryBusy(false)
+    setUnresolved(false)
     if (block) {
       authorityRef.current = { ...authorityRef.current, valid: false }
       blockedRef.current = true
@@ -309,11 +333,11 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const authorityMatches = authorityRef.current.valid && !blockedRef.current && authorityRef.current.active === active && authorityRef.current.sessionKey === sessionKey && authorityRef.current.portfolioId === portfolioId && authorityRef.current.scopeKey === scopeKey
   const isAuthorityCurrent = () => authorityRef.current.valid && !blockedRef.current && authorityRef.current.active === active && authorityRef.current.sessionKey === sessionKey && authorityRef.current.portfolioId === portfolioId && authorityRef.current.scopeKey === scopeKey
   const menuContextMatches = Boolean(menuContextRef.current && menuContextRef.current.sessionKey === sessionKey && menuContextRef.current.portfolioId === portfolioId && menuContextRef.current.scopeKey === scopeKey && holdings.some((holding) => holding.lot_id === menuContextRef.current?.lotId))
-  const effectiveFormOpen = active && !authorityChanged && formOpen && addContextMatches
+  const effectiveFormOpen = visible && active && !authorityChanged && formOpen && addContextMatches
   const effectiveMenuLotId = active && !authorityChanged && authorityMatches && menuContextMatches ? openMenuLotId : null
 
   const archiveContextMatches = Boolean(archiveLot && archiveContextRef.current && archiveContextRef.current.sessionKey === sessionKey && archiveContextRef.current.portfolioId === portfolioId && archiveContextRef.current.scopeKey === scopeKey && archiveContextRef.current.lotId === archiveLot.lot_id)
-  const archiveVisible = active && authorityMatches && archiveContextMatches
+  const archiveVisible = visible && active && authorityMatches && archiveContextMatches
 
   const abortWork = () => {
     clearArchiveState()
@@ -322,7 +346,21 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     if (!active || authorityChanged) clearArchiveState(true, false)
     return () => abortWork()
   }, [active, sessionKey, portfolioId, scopeKey])
-  useEffect(() => { etagRef.current = overviewETag; scopeRef.current = scopeKey }, [overviewETag, scopeKey])
+  useEffect(() => {
+    if (visible) return
+    setFormOpen(false)
+    setArchiveLot(null)
+    setOpenMenuLotId(null)
+    menuContextRef.current = null
+  }, [visible])
+  useEffect(() => {
+    etagRef.current = overviewETag
+    scopeRef.current = scopeKey
+    if (typeof overviewETag === 'string' && validatePortfolioETag(overviewETag, portfolioId) !== null && readRecovery) {
+      setReadRecovery(false)
+      if (!unresolvedRef.current) setError('')
+    }
+  }, [overviewETag, scopeKey, portfolioId])
   useLayoutEffect(() => { if (effectiveFormOpen) formHeadingRef.current?.focus() }, [effectiveFormOpen])
   useEffect(() => { if (effectiveFormOpen) formHeadingRef.current?.focus() }, [effectiveFormOpen])
   useEffect(() => {
@@ -455,10 +493,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     document.addEventListener('focusin', onFocusIn)
     return () => { document.removeEventListener('keydown', onKeyDown); document.removeEventListener('focusin', onFocusIn) }
   }, [archiveVisible])
-  useLayoutEffect(() => {
-    if (!archiveLot || archiveVisible) return
-    abortWork()
-  }, [archiveLot, archiveVisible])
+
   useLayoutEffect(() => {
     if (archiveLot || !archiveRestoreRef.current) return
     const restore = archiveRestoreRef.current
@@ -484,8 +519,26 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   useLayoutEffect(() => {
     if (effectiveFormOpen && error && !busy) addErrorRef.current?.focus()
   }, [effectiveFormOpen, error, busy])
+  useLayoutEffect(() => {
+    if (readRecovery && !busy) statusRef.current?.focus()
+  }, [readRecovery, busy, status])
+  const validationFieldByKey: Record<string, string> = {
+    instrumentId: 'instrument-id', symbol: 'symbol', instrumentCurrency: 'instrument-currency',
+    description: 'description', assetType: 'asset-type', exchange: 'exchange', quantity: 'quantity',
+    unitCost: 'unit-cost', costBasis: 'cost-basis', currency: 'holding-currency', accountId: 'account-id',
+    acquisitionDate: 'acquisition-date',
+  }
+  const hasUnresolvedAttempt = unresolved || unresolvedRef.current
+  const setAttemptUnresolved = () => {
+    unresolvedRef.current = true
+    setUnresolved(true)
+  }
+  const clearAttemptUnresolved = () => {
+    unresolvedRef.current = false
+    setUnresolved(false)
+  }
   const update = (field: keyof Draft, value: string) => {
-    if (!isAuthorityCurrent()) return
+    if (!isAuthorityCurrent() || hasUnresolvedAttempt) return
     setDraft((current) => ({ ...current, [field]: value }))
     setErrors((current) => { const next = { ...current }; delete next[field]; delete next.form; return next })
   }
@@ -521,7 +574,8 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     const nextErrors = validateDraft()
     if (Object.keys(nextErrors).length) {
       nextErrors.form = 'Fix the highlighted fields before creating the holding.'
-      document.getElementById(Object.keys(nextErrors).find((key) => key !== 'form') || 'holding-form-title')?.focus()
+      const firstInvalidKey = Object.keys(nextErrors).find((key) => key !== 'form')
+      document.getElementById((firstInvalidKey && validationFieldByKey[firstInvalidKey]) || 'holding-form-title')?.focus()
     }
     setErrors(nextErrors)
     setError('')
@@ -553,11 +607,20 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       if (!response.ok) {
         const code = await responseErrorCode(response)
         if (!current()) return
-        if (operation === 'create') createAttempt.current = null
-        else removeAttempt.current = null
         if (response.status === 409 && code === 'stale_revision') {
-          await onRefresh()
+          if (operation === 'create') createAttempt.current = null
+          else removeAttempt.current = null
+          clearAttemptUnresolved()
+          const refreshedETag = await onRefresh()
+          if (typeof refreshedETag === 'string' && validatePortfolioETag(refreshedETag, portfolioId) !== null) etagRef.current = refreshedETag
           if (!current()) return
+        }
+        if (response.status === 401) throw new APIError(response.status, errorMessage(response.status, code))
+        if (response.status >= 500 || (response.status === 409 && code !== 'stale_revision')) setAttemptUnresolved()
+        else {
+          if (operation === 'create') createAttempt.current = null
+          else removeAttempt.current = null
+          clearAttemptUnresolved()
         }
         throw new APIError(response.status, errorMessage(response.status, code))
       }
@@ -565,12 +628,27 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       if (!current()) return
       validateHoldingMutationReceipt(receipt, { operation, portfolioId, idempotencyKey: attempt.key, body: attempt.body, lotId, responseETag: response.headers.get('ETag') || '' })
       const result = (receipt as { result: 'applied' | 'replayed' }).result
-      const refreshedETag = await onRefresh()
-      if (!current()) return
-      if (validatePortfolioETag(refreshedETag, portfolioId) !== (receipt as { portfolio_revision: number }).portfolio_revision) throw new Error('The refreshed overview revision did not match the archive receipt. Reload the overview and try again.')
-      etagRef.current = refreshedETag as string
-      if (operation === 'create') { createAttempt.current = null; setDraft(emptyDraft()); addRestoreRef.current = addContextRef.current?.origin || addButtonRef.current; addContextRef.current = null; setFormOpen(false) } else { removeAttempt.current = null; archiveRestoreRef.current = { lotId: lotId || '', success: true }; setArchiveLot(null) }
-      setStatus(`${operation === 'create' ? 'Holding creation' : 'Holding archive'} ${result === 'replayed' ? 'replayed' : 'applied'} successfully. Overview refreshed; snapshot state is ${receipt.snapshot_state === 'no_snapshot' ? 'no snapshot' : 'stale'}.`)
+      setConfirmedReceipt({ operation, result, holding: receipt.holding as Record<string, unknown>, portfolioRevision: receipt.portfolio_revision as number, snapshotState: receipt.snapshot_state as 'stale' | 'no_snapshot', auditEventId: receipt.audit_event_id as string, activityEventId: receipt.activity_event_id as string, idempotencyKey: receipt.idempotency_key as string })
+      if (operation === 'create') createAttempt.current = null
+      else removeAttempt.current = null
+      archiveAttemptLotRef.current = null
+      clearAttemptUnresolved()
+      let refreshedETag: string | void
+      let refreshFailed = false
+      try {
+        refreshedETag = await onRefresh()
+        if (!current()) return
+        if (typeof refreshedETag === 'string' && validatePortfolioETag(refreshedETag, portfolioId) !== null) etagRef.current = refreshedETag
+        setReadRecovery(false)
+      } catch (refreshReason) {
+        if (!current()) return
+        refreshFailed = true
+        setReadRecovery(true)
+        setError(refreshReason instanceof Error ? refreshReason.message : 'Unable to reload Holdings.')
+      }
+      if (operation === 'create') { setDraft(emptyDraft()); addRestoreRef.current = addContextRef.current?.origin || addButtonRef.current; addContextRef.current = null; setFormOpen(false) } else { archiveRestoreRef.current = { lotId: lotId || '', success: true }; setArchiveLot(null) }
+      setStatus(`${operation === 'create' ? 'Holding added' : 'Holding archived'}${result === 'replayed' ? ' (replayed)' : ''}. Change recorded; snapshot state is ${receipt.snapshot_state === 'no_snapshot' ? 'no snapshot' : 'stale'}.${refreshFailed ? ' Holdings could not be reloaded.' : ''}`)
+
     } catch (reason) {
       if (!current()) return
       if (reason instanceof APIError && reason.status === 401) {
@@ -578,10 +656,30 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
         onUnauthorized()
         return
       }
-      if (reason instanceof TypeError) { setStatus(''); setError('Network uncertainty. Retry with the same safe attempt; the draft is preserved.'); return }
+      if (reason instanceof TypeError) { setAttemptUnresolved(); setStatus(''); setError(`Network uncertainty. Retry same ${operation === 'create' ? 'save' : 'archive'}; the original attempt is preserved.`); return }
+      const attemptRetained = operation === 'create' ? createAttempt.current === attempt : removeAttempt.current === attempt
+      if (attemptRetained && (!(reason instanceof APIError) || reason.status >= 500 || reason.status === 409)) setAttemptUnresolved()
       setStatus(''); setError(reason instanceof Error ? reason.message : 'The holding change could not be applied. Try again.')
     } finally {
       if (controllerRef.current === controller) { controllerRef.current = null; busyRef.current = false; setBusy(false) }
+    }
+  }
+
+  const retryLoadingHoldings = async () => {
+    if (readRecoveryBusy || busyRef.current || !isAuthorityCurrent() || !confirmedReceipt) return
+    setReadRecoveryBusy(true)
+    setError('')
+    try {
+      const refreshedETag = await onRefresh()
+      if (!isAuthorityCurrent()) return
+      if (typeof refreshedETag === 'string' && validatePortfolioETag(refreshedETag, portfolioId) !== null) etagRef.current = refreshedETag
+      setReadRecovery(false)
+    } catch (reason) {
+      if (!isAuthorityCurrent()) return
+      setReadRecovery(true)
+      setError(reason instanceof Error ? reason.message : 'Unable to reload Holdings.')
+    } finally {
+      setReadRecoveryBusy(false)
     }
   }
 
@@ -601,10 +699,11 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
 
   const openArchive = (lot: Holding, origin: HTMLButtonElement) => {
     const currentLot = holdingsRef.current.find((holding) => holding.lot_id === lot.lot_id)
-    if (!currentLot || busy || !active || !isAuthorityCurrent() || (!mutationETagValid && !removeAttempt.current)) return
+    if (!currentLot || busy || !active || !isAuthorityCurrent() || (hasUnresolvedAttempt && removeAttempt.current?.lotId !== currentLot.lot_id) || (!mutationETagValid && !removeAttempt.current)) return
     archiveOriginRef.current = origin
     archiveContextRef.current = { sessionKey, portfolioId, scopeKey, lotId: currentLot.lot_id }
     archiveLotRef.current = currentLot
+    archiveAttemptLotRef.current = currentLot
     setOpenMenuLotId(null)
     menuContextRef.current = null
     setError('')
@@ -637,7 +736,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       openMenu()
     }
     return <Box className="holding-row-actions">
-      <IconButton ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} className="row-action-trigger" type="button" aria-label={`Actions for ${holding.symbol} lot ${holding.lot_id}`} aria-expanded={menuOpen} aria-haspopup="menu" data-archive-trigger-lot-id={holding.lot_id} onClick={openMenu} onKeyDown={activateFromKeyboard} onKeyUp={finishKeyboardActivation} disabled={busy} size="small"><MoreVert aria-hidden="true" /></IconButton>
+      <IconButton ref={(node) => { if (node) archiveTriggerRefs.current.set(holding.lot_id, node); else archiveTriggerRefs.current.delete(holding.lot_id) }} className="row-action-trigger" type="button" aria-label={`Actions for ${holding.symbol} lot ${holding.lot_id}`} aria-expanded={menuOpen} aria-haspopup="menu" data-archive-trigger-lot-id={holding.lot_id} onClick={openMenu} onKeyDown={activateFromKeyboard} onKeyUp={finishKeyboardActivation} disabled={busy || hasUnresolvedAttempt} size="small"><MoreVert aria-hidden="true" /></IconButton>
       <Menu
         open={menuOpen}
         onClose={() => {
@@ -680,7 +779,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
           } as any,
         }}
       >
-        <MenuItem type="button" onClick={(event) => openArchive(holding, archiveTriggerRefs.current.get(holding.lot_id) || event.currentTarget as unknown as HTMLButtonElement)} disabled={busy || (!mutationETagValid && !removeAttempt.current)}>
+        <MenuItem type="button" onClick={(event) => openArchive(holding, archiveTriggerRefs.current.get(holding.lot_id) || event.currentTarget as unknown as HTMLButtonElement)} disabled={busy || hasUnresolvedAttempt || (!mutationETagValid && !removeAttempt.current)}>
           <Archive fontSize="small" aria-hidden="true" sx={{ mr: 1 }} /> Archive holding
         </MenuItem>
       </Menu>
@@ -690,14 +789,14 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const closeForm = () => {
     if (busy || !isAuthorityCurrent()) return
     addRestoreRef.current = addContextRef.current?.origin || addButtonRef.current
-    addContextRef.current = null
+    if (!hasUnresolvedAttempt) addContextRef.current = null
     setFormOpen(false)
     setErrors({})
-    setError('')
+    setError(hasUnresolvedAttempt ? 'The previous save is unresolved; retry the same save to confirm it.' : '')
   }
 
   const openForm = (origin: HTMLButtonElement) => {
-    if (busy || !isAuthorityCurrent()) return
+    if (busy || !isAuthorityCurrent() || (hasUnresolvedAttempt && !createAttempt.current)) return
     addContextRef.current = { sessionKey, portfolioId, scopeKey, origin }
     setFormOpen(true)
     setError('')
@@ -709,6 +808,23 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     if (busy || !isAuthorityCurrent() || !context || context.sessionKey !== sessionKey || context.portfolioId !== portfolioId || context.scopeKey !== scopeKey || context.lotId !== lotId) return
     archiveRestoreRef.current = { lotId, success: false }
     setArchiveLot(null)
+  }
+
+  const reopenUnresolvedArchive = () => {
+    const attempt = removeAttempt.current
+    const lot = holdingsRef.current.find((holding) => holding.lot_id === attempt?.lotId) || archiveAttemptLotRef.current
+    if (!attempt || !lot || attempt.sessionKey !== sessionKey || attempt.portfolioId !== portfolioId || attempt.scopeKey !== scopeKey || !isAuthorityCurrent() || !visible) return
+    archiveContextRef.current = { sessionKey, portfolioId, scopeKey, lotId: lot.lot_id }
+    archiveLotRef.current = lot
+    setArchiveLot(lot)
+    setError('')
+  }
+
+  const reopenUnresolvedCreate = () => {
+    if (!createAttempt.current || !isAuthorityCurrent() || !visible) return
+    addContextRef.current = { sessionKey, portfolioId, scopeKey, origin: addButtonRef.current }
+    setFormOpen(true)
+    setError('')
   }
 
   const toggleArchivePicker = () => {
@@ -730,6 +846,10 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     setArchiveLot(lot)
   }
 
+  const retryCreate = () => {
+    void create({ preventDefault: () => undefined } as FormEvent<HTMLFormElement>)
+  }
+
   const repositionMenu = () => {
     if (!effectiveMenuLotId) return
     const trigger = archiveTriggerRefs.current.get(effectiveMenuLotId)
@@ -741,21 +861,22 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     setMenuPosition((previous) => previous.top === nextPosition.top && previous.left === nextPosition.left ? previous : nextPosition)
   }
 
-  if (!active) return null
+  if (!active || !visible) return null
   const mutationETagValid = validatePortfolioETag(overviewETag, portfolioId) !== null
   return <>
     <Paper component="section" ref={contentRef} onScrollCapture={repositionMenu} className="holding-mutation-card" aria-labelledby="manage-holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', p: { xs: 1.5, sm: 2.5 } }}>
-      <Stack className="holding-actions-bar" direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between' }}><Box><Typography component="span" className="eyebrow">Holdings</Typography><Typography component="h2" className="visually-hidden" id="manage-holdings-title">Manage holdings</Typography></Box><Box className="holding-actions"><Button ref={addButtonRef} type="button" onClick={(event) => openForm(event.currentTarget)} disabled={busy} variant="contained" startIcon={<Add aria-hidden="true" />}>Add holding</Button></Box></Stack>
-      {status && <p ref={statusRef} className="notice success" role="status" aria-live="polite" tabIndex={-1}>{status}</p>}
-      {error && !archiveLot && !effectiveFormOpen && <p className="notice error" role="alert">{error}</p>}
+      <Stack className="holding-actions-bar" direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between' }}><Box><Typography component="span" className="eyebrow">Holdings</Typography><Typography component="h2" className="visually-hidden" id="manage-holdings-title">Manage holdings</Typography></Box><Box className="holding-actions"><Button ref={addButtonRef} type="button" onClick={(event) => openForm(event.currentTarget)} disabled={busy || hasUnresolvedAttempt} variant="contained" startIcon={<Add aria-hidden="true" />}>Add holding</Button></Box></Stack>
+      {status && <p ref={statusRef} className="notice success" role="status" aria-live="polite" tabIndex={-1}>{status}{confirmedReceipt && <span className="receipt-detail"> Receipt: lot {String(confirmedReceipt.holding.holding_id)} · revision {confirmedReceipt.portfolioRevision} · audit {confirmedReceipt.auditEventId} · Activity {confirmedReceipt.activityEventId}</span>}</p>}
+      {readRecovery && confirmedReceipt && <p className="notice error" role="alert">Holdings could not be reloaded. The recorded change is preserved. <Button type="button" size="small" onClick={retryLoadingHoldings} disabled={readRecoveryBusy}>{readRecoveryBusy ? 'Retrying Holdings…' : 'Retry loading holdings'}</Button></p>}
+      {error && !archiveLot && !effectiveFormOpen && <p className="notice error" role="alert">{error}{unresolvedRef.current && createAttempt.current && <Button type="button" size="small" onClick={reopenUnresolvedCreate}>Retry same save</Button>}{unresolvedRef.current && removeAttempt.current && <Button type="button" size="small" onClick={reopenUnresolvedArchive}>Retry same archive</Button>}</p>}
       {children?.(renderHoldingActions)}
       {!children && <Box sx={{ borderTop: 1, borderColor: 'divider', display: 'grid', gap: 1.25, mt: 3, pt: 2.5 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between' }}>
           <Box><Typography component="h3" variant="h6">Archive a holding</Typography><Typography color="text.secondary">Archive is a logical removal only; history and audit records are preserved.</Typography></Box>
-          <Button type="button" onClick={toggleArchivePicker} disabled={busy}>{archivePickerOpen ? 'Close archive controls' : 'Archive a holding'}</Button>
+          <Button type="button" onClick={toggleArchivePicker} disabled={busy || hasUnresolvedAttempt}>{archivePickerOpen ? 'Close archive controls' : 'Archive a holding'}</Button>
         </Stack>
         {archivePickerOpen && <Box sx={{ display: 'grid', gap: 1, maxWidth: '52rem', pt: .5 }}>
-          <FormControl fullWidth size="small" disabled={busy || !holdings.length}>
+          <FormControl fullWidth size="small" disabled={busy || hasUnresolvedAttempt || !holdings.length}>
             <InputLabel id="archive-holding-label">Holding to archive</InputLabel>
             <Select native labelId="archive-holding-label" id="archive-holding" value={selectedArchiveLotId} label="Holding to archive" inputProps={{ 'aria-label': 'Holding to archive' }} onChange={(event) => { if (isAuthorityCurrent()) setSelectedArchiveLotId(event.target.value) }}>
               <option value="">Choose an active holding…</option>
@@ -763,7 +884,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
             </Select>
             <FormHelperText>Choose the exact lot. The archive confirmation will preserve its full audit identity.</FormHelperText>
           </FormControl>
-          <Button id="archive-continue" type="button" onClick={continueToArchive} disabled={busy || !selectedArchiveLotId || !mutationETagValid} aria-busy={busy} sx={{ justifySelf: 'start' }}>Continue to archive</Button>
+          <Button id="archive-continue" type="button" onClick={continueToArchive} disabled={busy || hasUnresolvedAttempt || !selectedArchiveLotId || !mutationETagValid} aria-busy={busy} sx={{ justifySelf: 'start' }}>Continue to archive</Button>
         </Box>}
       </Box>}
     </Paper>
@@ -788,16 +909,16 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
             <Typography component="legend" sx={{ fontWeight: 700 }}>Instrument mode</Typography>
             <FormHelperText id="instrument-mode-help">Existing mode uses an immutable instrument ID. Inline mode creates one new instrument identity; Symbol is display and market-data text, never the identity.</FormHelperText>
             <RadioGroup name="instrument-mode" value={draft.mode} onChange={(event) => update('mode', event.target.value as InstrumentMode)} aria-describedby="instrument-mode-help" row>
-              <FormControlLabel value="existing" control={<Radio />} label="Existing instrument ID" />
-              <FormControlLabel value="inline" control={<Radio />} label="New inline instrument" />
+              <FormControlLabel value="existing" control={<Radio />} label="Existing instrument ID" disabled={hasUnresolvedAttempt} />
+              <FormControlLabel value="inline" control={<Radio />} label="New inline instrument" disabled={hasUnresolvedAttempt} />
             </RadioGroup>
           </FormControl>
-          {draft.mode === 'existing' ? <Field id="instrument-id" label="Instrument ID" help="This immutable ID selects the existing instrument; it is not replaced by its symbol." value={draft.instrumentId} error={errors.instrumentId} onChange={(value) => update('instrumentId', value)} /> : <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' } }}><Field id="symbol" label="Symbol" help="Display and market-data symbol only; it does not identify the instrument." value={draft.symbol} error={errors.symbol} onChange={(value) => update('symbol', value)} /><Field id="instrument-currency" label="Instrument currency" value={draft.instrumentCurrency} error={errors.instrumentCurrency} onChange={(value) => update('instrumentCurrency', value)} /><Field id="description" label="Description (optional)" value={draft.description} error={errors.description} onChange={(value) => update('description', value)} /><Field id="asset-type" label="Asset type (optional)" value={draft.assetType} error={errors.assetType} onChange={(value) => update('assetType', value)} /><Field id="exchange" label="Exchange (optional)" value={draft.exchange} error={errors.exchange} onChange={(value) => update('exchange', value)} /></Box>}
-          <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' } }}><Field id="quantity" label="Quantity" value={draft.quantity} error={errors.quantity} onChange={(value) => update('quantity', value)} inputMode="decimal" maxLength={40} /><Field id="unit-cost" label="Unit cost" value={draft.unitCost} error={errors.unitCost} onChange={(value) => update('unitCost', value)} inputMode="decimal" maxLength={40} /><Field id="cost-basis" label="Cost basis" value={draft.costBasis} error={errors.costBasis} onChange={(value) => update('costBasis', value)} inputMode="decimal" maxLength={80} /><Field id="currency" label="Holding currency" value={draft.currency} error={errors.currency} onChange={(value) => update('currency', value)} /><Field id="account-id" label="Account ID (optional)" value={draft.accountId} error={errors.accountId} onChange={(value) => update('accountId', value)} /><Field id="acquisition-date" label="Acquisition date (optional)" value={draft.acquisitionDate} error={errors.acquisitionDate} onChange={(value) => update('acquisitionDate', value)} inputMode="numeric" /></Box>
+          {draft.mode === 'existing' ? <Field id="instrument-id" label="Instrument ID" help="This immutable ID selects the existing instrument; it is not replaced by its symbol." value={draft.instrumentId} error={errors.instrumentId} disabled={hasUnresolvedAttempt} onChange={(value) => update('instrumentId', value)} /> : <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' } }}><Field id="symbol" label="Symbol" help="Display and market-data symbol only; it does not identify the instrument." value={draft.symbol} error={errors.symbol} disabled={hasUnresolvedAttempt} onChange={(value) => update('symbol', value)} /><Field id="instrument-currency" label="Instrument currency" value={draft.instrumentCurrency} error={errors.instrumentCurrency} disabled={hasUnresolvedAttempt} onChange={(value) => update('instrumentCurrency', value)} /><Field id="description" label="Description (optional)" value={draft.description} error={errors.description} disabled={hasUnresolvedAttempt} onChange={(value) => update('description', value)} /><Field id="asset-type" label="Asset type (optional)" value={draft.assetType} error={errors.assetType} disabled={hasUnresolvedAttempt} onChange={(value) => update('assetType', value)} /><Field id="exchange" label="Exchange (optional)" value={draft.exchange} error={errors.exchange} disabled={hasUnresolvedAttempt} onChange={(value) => update('exchange', value)} /></Box>}
+          <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' } }}><Field id="quantity" label="Quantity" value={draft.quantity} error={errors.quantity} disabled={hasUnresolvedAttempt} onChange={(value) => update('quantity', value)} inputMode="decimal" maxLength={40} /><Field id="unit-cost" label="Unit cost" value={draft.unitCost} error={errors.unitCost} disabled={hasUnresolvedAttempt} onChange={(value) => update('unitCost', value)} inputMode="decimal" maxLength={40} /><Field id="cost-basis" label="Cost basis" value={draft.costBasis} error={errors.costBasis} disabled={hasUnresolvedAttempt} onChange={(value) => update('costBasis', value)} inputMode="decimal" maxLength={80} /><Field id="holding-currency" label="Holding currency" value={draft.currency} error={errors.currency} disabled={hasUnresolvedAttempt} onChange={(value) => update('currency', value)} /><Field id="account-id" label="Account ID (optional)" value={draft.accountId} error={errors.accountId} disabled={hasUnresolvedAttempt} onChange={(value) => update('accountId', value)} /><Field id="acquisition-date" label="Acquisition date (optional)" value={draft.acquisitionDate} error={errors.acquisitionDate} disabled={hasUnresolvedAttempt} onChange={(value) => update('acquisitionDate', value)} inputMode="numeric" /></Box>
           {errors.form && <Alert severity="error" role="alert" aria-live="assertive" tabIndex={-1}>{errors.form}</Alert>}
           {error && <Alert ref={addErrorRef} id="holding-form-error" severity="error" role="alert" aria-live="assertive" tabIndex={-1}>{error}</Alert>}
         </DialogContent>
-        <DialogActions><Button type="submit" variant="contained" disabled={busy || (!mutationETagValid && !createAttempt.current)} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</Button><Button type="button" onClick={closeForm} disabled={busy}>Cancel</Button></DialogActions>
+        <DialogActions><Button type="submit" variant="contained" disabled={busy || (!mutationETagValid && !createAttempt.current)} aria-busy={busy}>{busy ? 'Creating holding…' : 'Create holding'}</Button>{hasUnresolvedAttempt && createAttempt.current && <Button type="button" onClick={retryCreate} disabled={busy} aria-busy={busy}>Retry same save</Button>}<Button type="button" onClick={closeForm} disabled={busy}>Cancel</Button></DialogActions>
       </form>
     </Dialog>}
     {archiveVisible && archiveLot && <Dialog
@@ -814,11 +935,11 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     >
       <DialogTitle id="archive-dialog-title" ref={focusArchiveHeading} tabIndex={-1}>Archive {archiveLot.symbol} holding?</DialogTitle>
       <DialogContent dividers><Typography id="archive-dialog-description">You are archiving <strong>{holdingDisplayLabel(archiveLot)}</strong>. This is a logical removal only; it does not sell, trade, or permanently delete the holding. Its financial history, reviews, thesis and audit records remain preserved.</Typography><Typography color="text.secondary" sx={{ mt: 1 }} title={archiveLot.lot_id}>Lot ID: {shortenedLotID(archiveLot.lot_id)} <span className="visually-hidden">Full lot ID: {archiveLot.lot_id}</span></Typography>{error && <Alert ref={archiveErrorRef} id="archive-dialog-error" severity="error" role="alert" aria-live="assertive" tabIndex={-1} sx={{ mt: 1 }}>{error}</Alert>}</DialogContent>
-      <DialogActions><Button type="button" variant="contained" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving holding…' : 'Confirm archive holding'}</Button><Button type="button" onClick={() => cancelArchive(archiveLot.lot_id)} disabled={busy}>Cancel archive</Button></DialogActions>
+      <DialogActions><Button type="button" variant="contained" onClick={confirmArchive} disabled={busy || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving holding…' : 'Confirm archive holding'}</Button>{hasUnresolvedAttempt && removeAttempt.current && <Button type="button" variant="outlined" onClick={confirmArchive} disabled={busy} aria-busy={busy}>Retry same archive</Button>}<Button type="button" onClick={() => cancelArchive(archiveLot.lot_id)} disabled={busy}>Cancel archive</Button></DialogActions>
     </Dialog>}
   </>
 }
 
-function Field({ id, label, value, error, help, onChange, inputMode, maxLength }: { id: string; label: string; value: string; error?: string; help?: string; onChange: (value: string) => void; inputMode?: 'decimal' | 'numeric'; maxLength?: number }) {
-  return <TextField id={id} label={label} value={value} onChange={(event) => onChange(event.target.value)} slotProps={{ htmlInput: { inputMode, maxLength } }} error={Boolean(error)} helperText={error || help || ' '} fullWidth size="small" />
+function Field({ id, label, value, error, help, onChange, inputMode, maxLength, disabled }: { id: string; label: string; value: string; error?: string; help?: string; onChange: (value: string) => void; inputMode?: 'decimal' | 'numeric'; maxLength?: number; disabled?: boolean }) {
+  return <TextField id={id} label={label} value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} slotProps={{ htmlInput: { inputMode, maxLength } }} error={Boolean(error)} helperText={error || help || ' '} fullWidth size="small" />
 }

@@ -994,7 +994,7 @@ export default function App() {
       {authError && <Paper className="notice error" role="alert" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Session error</Typography><Typography>{authError}</Typography></Paper>}
       {state === 'error' && <Paper className="notice error" role="alert" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Unable to load portfolio</Typography><Typography>{error}</Typography><Button type="button" onClick={() => load()}>Try again</Button></Paper>}
 
-      {state === 'ready' && data && (
+      {(state === 'ready' || state === 'loading' || state === 'error') && data && (
         <>
           <Box id="portfolio-content" tabIndex={-1} />
           {view !== 'overview' && <Typography component="h1" className="visually-hidden">{data.portfolio.name}</Typography>}
@@ -1010,7 +1010,7 @@ export default function App() {
 
           {view === 'overview' && <AllocationSection data={data} />}
 
-          {view === 'holdings' && <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active sessionKey={String(authGeneration.current)} scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized}>
+          {<HoldingMutations visible={view === 'holdings'} portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active sessionKey={String(authGeneration.current)} scopeKey={`${data.portfolio.id}:${currency}:holdings`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized}>
             {(holdingActions) => <Paper component="section" className="table-card holdings-surface" aria-labelledby="holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', overflow: 'hidden' }}>
             <Stack className="section-heading" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between', p: { xs: 2, sm: 2.5 } }}><Box><Typography component="span" className="eyebrow">Canonical active lots</Typography><Typography component="h2" id="holdings-title" variant="h5" sx={{ mt: .5, mb: 0 }}>Holdings</Typography></Box><Typography color="text.secondary">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</Typography></Stack>
             <TableContainer className="table-scroll" sx={{ maxWidth: '100%', overflowX: 'auto' }}>
