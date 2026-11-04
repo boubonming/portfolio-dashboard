@@ -303,7 +303,7 @@ describe('HoldingMutations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Archive a holding' }))
 
     expect(screen.getByLabelText('Holding to archive')).toBeTruthy()
-    expect(screen.getByRole('option', { name: /NVDA.*NVIDIA Corporation.*2\.500 USD.*unit cost 100\.25 USD.*cost basis 250\.625 USD/i })).toBeTruthy()
+    expect(screen.getByRole('option', { name: /NVDA.*NVIDIA Corporation.*2\.500 units.*USD.*unit cost 100\.25 USD.*cost basis 250\.625 USD/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Continue to archive' })).toBeTruthy()
   })
 
@@ -320,7 +320,7 @@ describe('HoldingMutations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Continue to archive' }))
 
     expect(screen.getByRole('heading', { name: /Archive SAME holding/i })).toBeTruthy()
-    expect(within(screen.getByRole('dialog')).getByText(/Second lot.*2 USD.*unit cost 7 USD.*cost basis 14 USD/i)).toBeTruthy()
+    expect(within(screen.getByRole('dialog')).getByText(/Second lot.*2 units.*USD.*unit cost 7 USD.*cost basis 14 USD/i)).toBeTruthy()
     expect(screen.getByText(/Full lot ID: lot-second/i)).toBeTruthy()
     expect(screen.getByRole('button', { name: /Confirm archive holding/i })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
@@ -808,7 +808,7 @@ describe('HoldingMutations', () => {
     fireEvent.click(currentTriggers[1])
     fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
     expect(screen.getByRole('heading', { name: /Archive SAME holding/i })).toBeTruthy()
-    expect(screen.getByText(/Second lot.*2 USD.*unit cost 7 USD.*cost basis 14 USD/i)).toBeTruthy()
+    expect(screen.getByText(/Second lot.*2 units.*USD.*unit cost 7 USD.*cost basis 14 USD/i)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Cancel archive' }))
     expect(document.activeElement).toBe(triggers[1])
 
@@ -839,7 +839,7 @@ describe('HoldingMutations', () => {
     fireEvent.change(screen.getByLabelText('Cost basis'), { target: { value: '10' } })
     fireEvent.change(screen.getByLabelText('Holding currency'), { target: { value: 'USD' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/server could not apply/i))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/not confirmed.*may already be recorded/i))
     const dialog = screen.getByRole('dialog')
     expect(dialog.contains(screen.getByRole('alert'))).toBe(true)
     expect(document.activeElement).toBe(screen.getByRole('alert'))
@@ -1131,7 +1131,7 @@ describe('HoldingMutations', () => {
     expect(document.activeElement).toBe(heading)
     for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
     fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/server could not apply/i))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/not confirmed.*may already be recorded/i))
     const alert = screen.getByRole('alert')
     expect(document.activeElement).toBe(alert)
     fireEvent.keyDown(alert, { key: 'Tab' })
@@ -1262,5 +1262,98 @@ describe('HoldingMutations', () => {
     expect(Number.parseFloat(paper.style.top) + menuRect.height).toBeLessThanOrEqual(240 - 8)
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight })
+  })
+
+  it('freezes a pending create and retries the exact stored request after uncertainty', async () => {
+    const props = baseProps()
+    let rejectFirst: (reason: unknown) => void = () => undefined
+    let calls = 0
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>((_input, init) => {
+      calls += 1
+      if (calls === 1) return new Promise<Response>((_resolve, reject) => { rejectFirst = reject })
+      return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...receipt, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    const firstInit = fetchMock.mock.calls[0][1]
+    const firstBody = firstInit?.body
+    const firstKey = new Headers(firstInit?.headers as HeadersInit).get('Idempotency-Key')
+    expect((screen.getByLabelText('Quantity') as HTMLInputElement).disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '3' } })
+    rejectFirst(new TypeError('connection lost'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same save' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same save' }))
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
+    const retryInit = fetchMock.mock.calls[1][1]
+    expect(retryInit?.body).toBe(firstBody)
+    expect(new Headers(retryInit?.headers as HeadersInit).get('Idempotency-Key')).toBe(firstKey)
+    expect(JSON.parse(String(retryInit?.body)).quantity).toBe('2')
+  })
+
+  it('retains an uncertain create through a same-session scope detour without offering an unsafe retry', async () => {
+    const props = { ...baseProps(), sessionKey: 'session-1', scopeKey: 'portfolio-default:MYR:holdings' }
+    const fetchMock = vi.fn(async () => { throw new TypeError('connection lost') })
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/not confirmed/i))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    rerender(<HoldingMutations {...props} scopeKey="portfolio-default:USD:holdings" />)
+    expect(screen.queryByRole('button', { name: 'Retry same save' })).toBeNull()
+    expect((screen.getByRole('button', { name: 'Add holding' }) as HTMLButtonElement).disabled).toBe(true)
+    rerender(<HoldingMutations {...props} />)
+    expect(screen.getByRole('button', { name: 'Retry same save' })).toBeTruthy()
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('announces a validated receipt before a pending Holdings read resolves', async () => {
+    const props = baseProps()
+    let resolveRefresh: (etag: string) => void = () => undefined
+    const onRefresh = vi.fn(() => new Promise<string>((resolve) => { resolveRefresh = resolve }))
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => ({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...receipt, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }) } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} onRefresh={onRefresh} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByRole('status').textContent).toMatch(/Holding added.*NEW.*2 units.*USD.*lot lot-new/i)
+    resolveRefresh('"portfolio-default-8"')
+    await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/Holding added/i))
+  })
+
+  it('freezes the holding write lane after forbidden authority', async () => {
+    const props = baseProps()
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 403, headers: new Headers(), clone: () => ({ json: async () => ({}) }) } as unknown as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'FORBIDDEN'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/not authorized/i))
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect((screen.getByRole('button', { name: 'Create holding' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Retry same save' })).toBeNull()
+  })
+
+  it('freezes an idempotency conflict without offering a new key or retry', async () => {
+    const props = baseProps()
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 409, headers: new Headers(), clone: () => ({ json: async () => ({ error: { code: 'idempotency_conflict' } }) }) } as unknown as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'CONFLICT'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/frozen.*Holdings and Activity/i))
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('button', { name: 'Retry same save' })).toBeNull()
+    expect((screen.getByRole('button', { name: 'Create holding' }) as HTMLButtonElement).disabled).toBe(true)
   })
 })
