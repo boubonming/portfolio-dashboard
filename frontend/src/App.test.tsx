@@ -619,6 +619,90 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(document.activeElement).toBe(add))
   })
 
+  it('renders every inline validation key with a scoped field and full-toolbar label/help associations', async () => {
+    const invalidCases: Array<{ label: string; value: string }> = [
+      { label: 'Symbol', value: '' },
+      { label: 'Instrument currency', value: 'usd' },
+      { label: 'Description (optional)', value: 'x'.repeat(257) },
+      { label: 'Asset type (optional)', value: '!' },
+      { label: 'Exchange (optional)', value: '!' },
+      { label: 'Quantity', value: '0' },
+      { label: 'Unit cost', value: 'not-a-decimal' },
+      { label: 'Cost basis', value: '11' },
+      { label: 'Holding currency', value: 'usd' },
+      { label: 'Account ID (optional)', value: 'not valid' },
+      { label: 'Acquisition date (optional)', value: '2024-02-30' },
+    ]
+    for (const invalid of invalidCases) {
+      cleanup()
+      vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
+      render(<App />)
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+      for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+      fireEvent.change(screen.getByLabelText(invalid.label), { target: { value: invalid.value } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+      const target = screen.getByLabelText(invalid.label)
+      expect(target.id).not.toBe('currency')
+      expect(target.getAttribute('aria-describedby')).toContain(`${target.id}-helper-text`)
+      expect(document.querySelectorAll('[id]').length).toBe(new Set(Array.from(document.querySelectorAll('[id]')).map((element) => element.id)).size)
+    }
+
+    cleanup()
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    fireEvent.click(screen.getByLabelText('Existing instrument ID'))
+    fireEvent.change(screen.getByLabelText('Instrument ID'), { target: { value: 'not valid' } })
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '2' } })
+    fireEvent.change(screen.getByLabelText('Unit cost'), { target: { value: '5' } })
+    fireEvent.change(screen.getByLabelText('Cost basis'), { target: { value: '10' } })
+    fireEvent.change(screen.getByLabelText('Holding currency'), { target: { value: 'USD' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    const instrumentID = screen.getByLabelText('Instrument ID')
+    expect(instrumentID.id).toBe('instrument-id')
+    expect(instrumentID.getAttribute('aria-describedby')).toContain('instrument-id-helper-text')
+  }, 15000)
+
+  it('shows the full-App Add receipt and focuses it while the follow-up Holdings read is pending', async () => {
+    let overviewCalls = 0
+    let resolveFollowUp: ((response: Response) => void) | undefined
+    const addReceipt = {
+      operation: 'create', result: 'applied', holding: {
+        portfolio_id: 'portfolio-default', holding_id: 'lot-app-new', instrument_id: 'instrument-app-new', symbol: 'APPNEW',
+        quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null,
+        lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null,
+      }, portfolio_revision: 8, snapshot_state: 'stale', current_snapshot_id: 'snapshot-1',
+      actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-app',
+      activity_event_id: 'activity-app', idempotency_key: '',
+    }
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 1) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
+        return new Promise<Response>((resolve) => { resolveFollowUp = resolve })
+      }
+      if (url.endsWith('/holdings') && init?.method === 'POST') return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...addReceipt, idempotency_key: new Headers(init.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'APPNEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/holdings') && init?.method === 'POST')).toHaveLength(1))
+    const receiptStatus = () => screen.getAllByRole('status').find((node) => node.textContent?.includes('Holding added')) as HTMLElement
+    await waitFor(() => expect(receiptStatus().textContent).toMatch(/Holding added.*APPNEW.*2 units.*lot lot-app-new/i))
+    expect(document.activeElement).toBe(receiptStatus())
+    expect(receiptStatus().textContent).toMatch(/valuation snapshot is stale/i)
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/holdings') && init?.method === 'POST')).toHaveLength(1)
+    resolveFollowUp?.({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => completeOverview } as Response)
+    await waitFor(() => expect(receiptStatus().textContent).toMatch(/Holding added/i))
+  })
+
   it('renders complete snapshots, flags, filtering and currency changes', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)

@@ -352,7 +352,7 @@ describe('HoldingMutations', () => {
     fireEvent.change(screen.getByLabelText('Holding currency'), { target: { value: 'USD' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
-    expect(document.activeElement).toBe(origin)
+    expect(document.activeElement).toBe(screen.getByRole('status'))
     const [, init] = fetchMock.mock.calls[0]
     expect(init?.method).toBe('POST')
     expect(new Headers(init?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
@@ -776,6 +776,32 @@ describe('HoldingMutations', () => {
     expect(screen.getByRole('alert').textContent).toMatch(/fix the highlighted/i)
     expect(document.activeElement).toBe(screen.getByLabelText('Symbol'))
     expect(screen.getByLabelText('Symbol').getAttribute('aria-describedby')).toContain('symbol-helper-text')
+  })
+
+  it('focuses every validation key on its mapped dialog field', () => {
+    const invalidCases: Array<{ label: string; value: string }> = [
+      { label: 'Symbol', value: '!' },
+      { label: 'Instrument currency', value: 'usd' },
+      { label: 'Description (optional)', value: 'x'.repeat(257) },
+      { label: 'Asset type (optional)', value: '!' },
+      { label: 'Exchange (optional)', value: '!' },
+      { label: 'Quantity', value: '0' },
+      { label: 'Unit cost', value: 'not-a-decimal' },
+      { label: 'Cost basis', value: '11' },
+      { label: 'Holding currency', value: 'usd' },
+      { label: 'Account ID (optional)', value: 'not valid' },
+      { label: 'Acquisition date (optional)', value: '2024-02-30' },
+    ]
+    for (const invalid of invalidCases) {
+      cleanup()
+      render(<HoldingMutations {...baseProps()} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+      for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+      fireEvent.change(screen.getByLabelText(invalid.label), { target: { value: invalid.value } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+      expect(document.activeElement).toBe(screen.getByLabelText(invalid.label))
+      expect(screen.getByLabelText(invalid.label).getAttribute('aria-describedby')).toContain(`${screen.getByLabelText(invalid.label).id}-helper-text`)
+    }
   })
 
   it('exercises the production row-menu path for exact-lot archive, outside close, and focus restoration', async () => {
@@ -1324,9 +1350,85 @@ describe('HoldingMutations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
     await waitFor(() => expect(onRefresh).toHaveBeenCalledOnce())
     expect(screen.queryByRole('dialog')).toBeNull()
-    expect(screen.getByRole('status').textContent).toMatch(/Holding added.*NEW.*2 units.*USD.*lot lot-new/i)
+    const status = screen.getByRole('status')
+    expect(status.textContent).toMatch(/Holding added.*NEW.*2 units.*USD.*lot lot-new/i)
+    expect(document.activeElement).toBe(status)
     resolveRefresh('"portfolio-default-8"')
     await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/Holding added/i))
+  })
+
+  it('focuses a validated archive receipt before a pending Holdings read resolves', async () => {
+    const props = baseProps()
+    let resolveRefresh: (etag: string) => void = () => undefined
+    const onRefresh = vi.fn(() => new Promise<string>((resolve) => { resolveRefresh = resolve }))
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => ({
+      ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }),
+      json: async () => ({ ...receipt, operation: 'remove', holding: { ...receipt.holding, holding_id: 'lot-a', lifecycle: 'removed', removed_at: '2026-01-02T12:00:00.000000000Z' }, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }),
+    } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} onRefresh={onRefresh} />)
+    openArchive('lot-a')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledOnce())
+    const status = screen.getByRole('status')
+    expect(status.textContent).toMatch(/Holding archived.*NEW.*2 units.*USD.*lot lot-a/i)
+    expect(document.activeElement).toBe(status)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    resolveRefresh('"portfolio-default-8"')
+    await waitFor(() => expect(screen.getByRole('status')).toBeTruthy())
+  })
+
+  it('allows safe Add dismissal after forbidden or conflicting writes without reopening the write lane', async () => {
+    for (const response of [
+      { status: 403, body: {} },
+      { status: 409, body: { error: { code: 'idempotency_conflict' } } },
+    ]) {
+      cleanup()
+      const fetchMock = vi.fn(async () => ({ ok: false, status: response.status, headers: new Headers(), clone: () => ({ json: async () => response.body }) }) as unknown as Response)
+      vi.stubGlobal('fetch', fetchMock)
+      render(<HoldingMutations {...baseProps()} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+      for (const [label, value] of [['Symbol', 'BLOCKED'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+      await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+      expect(screen.getByRole('alert').textContent).toMatch(response.status === 403 ? /not authorized/i : /frozen/i)
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(screen.getByRole('alert').textContent).toMatch(response.status === 403 ? /not authorized/i : /frozen/i)
+      expect((screen.getByRole('button', { name: 'Add holding' }) as HTMLButtonElement).disabled).toBe(true)
+      expect(fetchMock).toHaveBeenCalledOnce()
+    }
+  })
+
+  it('keeps a forbidden or conflicting archive explanation reachable until safe cancellation', async () => {
+    for (const response of [
+      { status: 403, body: {} },
+      { status: 409, body: { error: { code: 'idempotency_conflict' } } },
+    ]) {
+      cleanup()
+      const fetchMock = vi.fn(async () => ({ ok: false, status: response.status, headers: new Headers(), clone: () => ({ json: async () => response.body }) }) as unknown as Response)
+      vi.stubGlobal('fetch', fetchMock)
+      render(<HoldingMutations {...baseProps()} />)
+      openArchive('lot-a')
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+      await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+      expect(screen.getByRole('dialog').textContent).toMatch(response.status === 403 ? /not authorized/i : /frozen/i)
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(screen.getByRole('alert').textContent).toMatch(/not authorized|frozen/i)
+      expect((screen.getByRole('button', { name: 'Close archive controls' }) as HTMLButtonElement).disabled).toBe(true)
+      expect(fetchMock).toHaveBeenCalledOnce()
+    }
+  })
+
+  it('keeps unresolved recovery honest about reload and sign-out memory loss', async () => {
+    const fetchMock = vi.fn(async () => { throw new TypeError('connection lost') })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'UNCERTAIN'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/reload or sign-out loses.*memory/i))
   })
 
   it('freezes the holding write lane after forbidden authority', async () => {

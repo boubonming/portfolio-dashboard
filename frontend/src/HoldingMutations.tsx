@@ -205,6 +205,7 @@ type Props = {
   onRefresh: () => Promise<string | void>
   onUnauthorized: () => void
   onShowReceiptHolding?: (holdingId: string) => void
+  memoryBoundaryNotice?: string
   /** Keep the authenticated mutation owner mounted while another view is shown. */
   visible?: boolean
   children?: (renderHoldingActions: (holding: Holding) => ReactNode) => ReactNode
@@ -226,7 +227,7 @@ type ModalBackground = { element: HTMLElement; inert: boolean; ariaHidden: strin
 type ArchiveContext = { sessionKey: string; portfolioId: string; scopeKey: string; lotId: string }
 type AddContext = { sessionKey: string; portfolioId: string; scopeKey: string; origin: HTMLButtonElement | null }
 
-export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, sessionKey = scopeKey, onRefresh, onUnauthorized, onShowReceiptHolding, visible = true, children }: Props) {
+export default function HoldingMutations({ portfolioId, overviewETag, csrfToken, holdings, active, scopeKey, sessionKey = scopeKey, onRefresh, onUnauthorized, onShowReceiptHolding, memoryBoundaryNotice = '', visible = true, children }: Props) {
   const [formOpen, setFormOpen] = useState(false)
   const [openMenuLotId, setOpenMenuLotId] = useState<string | null>(null)
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 })
@@ -258,6 +259,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const archiveErrorRef = useRef<HTMLDivElement>(null)
   const addButtonRef = useRef<HTMLButtonElement>(null)
   const statusRef = useRef<HTMLParagraphElement>(null)
+  const receiptFocusRef = useRef(false)
   const contentRef = useRef<HTMLElement>(null)
   const archiveTriggerRefs = useRef(new Map<string, HTMLButtonElement>())
   const archiveMenuRefs = useRef(new Map<string, HTMLElement>())
@@ -349,15 +351,15 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   archiveLotRef.current = archiveContextRef.current ? archiveLot : null
 
   const addContextMatches = Boolean(addContextRef.current && addContextRef.current.sessionKey === sessionKey && addContextRef.current.portfolioId === portfolioId && addContextRef.current.scopeKey === scopeKey)
-  const sessionAuthorityMatches = authorityRef.current.valid && !blockedRef.current && authorityRef.current.active === active && authorityRef.current.sessionKey === sessionKey && authorityRef.current.portfolioId === portfolioId
+  const sessionAuthorityMatches = authorityRef.current.valid && authorityRef.current.active === active && authorityRef.current.sessionKey === sessionKey && authorityRef.current.portfolioId === portfolioId
   const authorityMatches = sessionAuthorityMatches && authorityRef.current.scopeKey === scopeKey
-  const isAuthorityCurrent = () => authorityRef.current.valid && !blockedRef.current && authorityRef.current.active === active && authorityRef.current.sessionKey === sessionKey && authorityRef.current.portfolioId === portfolioId && authorityRef.current.scopeKey === scopeKey
+  const isAuthorityCurrent = () => authorityRef.current.valid && authorityRef.current.active === active && authorityRef.current.sessionKey === sessionKey && authorityRef.current.portfolioId === portfolioId && authorityRef.current.scopeKey === scopeKey
   const menuContextMatches = Boolean(menuContextRef.current && menuContextRef.current.sessionKey === sessionKey && menuContextRef.current.portfolioId === portfolioId && menuContextRef.current.scopeKey === scopeKey && holdings.some((holding) => holding.lot_id === menuContextRef.current?.lotId))
   const effectiveFormOpen = visible && active && !authorityChanged && formOpen && addContextMatches
   const effectiveMenuLotId = active && !authorityChanged && authorityMatches && menuContextMatches ? openMenuLotId : null
 
   const archiveContextMatches = Boolean(archiveLot && archiveContextRef.current && archiveContextRef.current.sessionKey === sessionKey && archiveContextRef.current.portfolioId === portfolioId && archiveContextRef.current.scopeKey === scopeKey && archiveContextRef.current.lotId === archiveLot.lot_id)
-  const archiveVisible = visible && active && authorityMatches && archiveContextMatches
+  const archiveVisible = visible && active && archiveContextMatches && (authorityMatches || writeBlockedRef.current || conflictFrozenRef.current)
 
   const abortWork = () => {
     clearArchiveState()
@@ -552,6 +554,11 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   useLayoutEffect(() => {
     if (readRecovery && !busy) statusRef.current?.focus()
   }, [readRecovery, busy, status])
+  useLayoutEffect(() => {
+    if (!receiptFocusRef.current || !confirmedReceipt) return
+    receiptFocusRef.current = false
+    statusRef.current?.focus()
+  }, [confirmedReceipt, status])
   const validationFieldByKey: Record<string, string> = {
     instrumentId: 'instrument-id', symbol: 'symbol', instrumentCurrency: 'instrument-currency',
     description: 'description', assetType: 'asset-type', exchange: 'exchange', quantity: 'quantity',
@@ -677,6 +684,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       if (!current()) return
       validateHoldingMutationReceipt(receipt, { operation, portfolioId, idempotencyKey: attempt.key, body: attempt.body, lotId, responseETag: response.headers.get('ETag') || '' })
       const result = (receipt as { result: 'applied' | 'replayed' }).result
+      receiptFocusRef.current = true
       setConfirmedReceipt({ operation, result, holding: receipt.holding as Record<string, unknown>, portfolioRevision: receipt.portfolio_revision as number, snapshotState: receipt.snapshot_state as 'stale' | 'no_snapshot', auditEventId: receipt.audit_event_id as string, activityEventId: receipt.activity_event_id as string, idempotencyKey: receipt.idempotency_key as string })
       if (operation === 'create') createAttempt.current = null
       else removeAttempt.current = null
@@ -685,7 +693,11 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       const receiptHolding = receipt.holding as Record<string, unknown>
       const receiptLotId = String(receiptHolding.holding_id)
       const receiptLabel = `${String(receiptHolding.symbol)} · ${String(receiptHolding.quantity)} units · ${String(receiptHolding.currency)} · unit cost ${String(receiptHolding.unit_cost)} · cost basis ${String(receiptHolding.cost_basis)} · lot ${receiptLotId}`
-      const completionLabel = `${operation === 'create' ? 'Holding added' : 'Holding archived'}${result === 'replayed' ? ' (replayed)' : ''}. Change recorded; ${receiptLabel}. Holdings reload is separate.`
+      const replayLabel = result === 'replayed' ? 'Already recorded; no additional change was made.' : 'Change recorded.'
+      const valuationLabel = receipt.snapshot_state === 'stale'
+        ? 'The existing valuation snapshot is stale; this holding change did not recalculate it.'
+        : 'No immutable valuation snapshot exists yet; valuation totals remain withheld.'
+      const completionLabel = `${operation === 'create' ? 'Holding added' : 'Holding archived'}. ${replayLabel} ${receiptLabel}. ${valuationLabel} Holdings reload is separate.`
       busyRef.current = false
       setBusy(false)
       setReadRecovery(false)
@@ -714,12 +726,12 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
         onUnauthorized()
         return
       }
-      if (reason instanceof TypeError) { setAttemptUnresolved(); setStatus(''); setError(`Network uncertainty: the holding change was not confirmed and may already be recorded. Retry same ${operation === 'create' ? 'save' : 'archive'}; the original attempt is preserved.`); return }
+      if (reason instanceof TypeError) { setAttemptUnresolved(); setStatus(''); setError(`Network uncertainty: the holding change was not confirmed and may already be recorded. Retry same ${operation === 'create' ? 'save' : 'archive'}; the original attempt is preserved. Reload or sign-out loses this in-memory recovery; absence is not proof that no change was recorded.`); return }
       const attemptRetained = operation === 'create' ? createAttempt.current === attempt : removeAttempt.current === attempt
       if (attemptRetained && (!(reason instanceof APIError) || reason.status >= 500 || reason.status === 409)) setAttemptUnresolved()
       setStatus('')
       const uncertain = attemptRetained && (!(reason instanceof APIError) || reason.status >= 500 || reason.status === 409)
-      setError(uncertain ? `The holding change was not confirmed and may already be recorded. Retry the same ${operation === 'create' ? 'save' : 'archive'}; the original attempt is preserved.` : reason instanceof Error ? reason.message : 'The holding change could not be applied. Try again.')
+      setError(uncertain ? `The holding change was not confirmed and may already be recorded. Retry the same ${operation === 'create' ? 'save' : 'archive'}; the original attempt is preserved. Reload or sign-out loses this in-memory recovery; absence is not proof that no change was recorded.` : reason instanceof Error ? reason.message : 'The holding change could not be applied. Try again.')
     } finally {
       if (controllerRef.current === controller) { controllerRef.current = null; busyRef.current = false; setBusy(false) }
     }
@@ -847,12 +859,12 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   }
 
   const closeForm = () => {
-    if (busy || !isAuthorityCurrent()) return
+    if (busy || (!isAuthorityCurrent() && !writeBlockedRef.current && !conflictFrozenRef.current)) return
     addRestoreRef.current = addContextRef.current?.origin || addButtonRef.current
     if (!hasUnresolvedAttempt) addContextRef.current = null
     setFormOpen(false)
     setErrors({})
-    setError(hasUnresolvedAttempt ? 'The previous save is unresolved; retry the same save to confirm it.' : '')
+    if (!hasUnresolvedAttempt && !writeBlockedRef.current && !conflictFrozenRef.current) setError('')
   }
 
   const openForm = (origin: HTMLButtonElement) => {
@@ -865,7 +877,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
 
   const cancelArchive = (lotId: string) => {
     const context = archiveContextRef.current
-    if (busy || !isAuthorityCurrent() || !context || context.sessionKey !== sessionKey || context.portfolioId !== portfolioId || context.scopeKey !== scopeKey || context.lotId !== lotId) return
+    if (busy || (!isAuthorityCurrent() && !writeBlockedRef.current && !conflictFrozenRef.current) || !context || context.sessionKey !== sessionKey || context.portfolioId !== portfolioId || context.scopeKey !== scopeKey || context.lotId !== lotId) return
     archiveRestoreRef.current = { lotId, success: false }
     setArchiveLot(null)
     if (unresolvedRef.current && removeAttempt.current?.lotId === lotId) setError('The archive is unresolved; it may already be recorded. Retry the same archive to confirm, or check Holdings and Activity.')
@@ -941,11 +953,12 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
   const unresolvedCopy = unresolvedScopeMismatch
     ? 'The unresolved holding change is retained in authorized memory. Return to the original Holdings scope to retry the identical request; check Holdings and Activity after reload or sign-out because this memory will be lost.'
     : conflictFrozen
-      ? 'This holding attempt is frozen. Check Holdings and Activity before making a new change.'
-      : 'The holding change is unresolved; it may already be recorded. Check Holdings and Activity or retry the identical request.'
+      ? 'This holding attempt is frozen. Check Holdings and Activity before making a new change. Reload or sign-out loses this in-memory recovery; absence is not proof that no change was recorded.'
+      : 'The holding change is unresolved; it may already be recorded. Check Holdings and Activity or retry the identical request. Reload or sign-out loses this in-memory recovery; absence is not proof that no change was recorded.'
   return <>
     <Paper component="section" ref={contentRef} onScrollCapture={repositionMenu} className="holding-mutation-card" aria-labelledby="manage-holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', p: { xs: 1.5, sm: 2.5 } }}>
       <Stack className="holding-actions-bar" direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between' }}><Box><Typography component="span" className="eyebrow">Holdings</Typography><Typography component="h2" className="visually-hidden" id="manage-holdings-title">Manage holdings</Typography></Box><Box className="holding-actions"><Button ref={addButtonRef} type="button" onClick={(event) => openForm(event.currentTarget)} disabled={busy || hasUnresolvedAttempt || writeBlocked} variant="contained" startIcon={<Add aria-hidden="true" />}>Add holding</Button></Box></Stack>
+      {memoryBoundaryNotice && <p className="notice warning" role="status">{memoryBoundaryNotice}</p>}
       {status && <p ref={statusRef} className="notice success" role="status" aria-live="polite" tabIndex={-1}>{status}{confirmedReceipt && <span className="receipt-detail"> Receipt: lot {String(confirmedReceipt.holding.holding_id)} · revision {confirmedReceipt.portfolioRevision} · audit {confirmedReceipt.auditEventId} · Activity {confirmedReceipt.activityEventId}</span>}{confirmedReceipt?.operation === 'create' && onShowReceiptHolding && <Button type="button" size="small" onClick={showAddedHolding}>Show added holding</Button>}</p>}
       {readRecovery && confirmedReceipt && <p className="notice error" role="alert">Holdings could not be reloaded. The recorded change is preserved. <Button type="button" size="small" onClick={retryLoadingHoldings} disabled={readRecoveryBusy}>{readRecoveryBusy ? 'Retrying Holdings…' : 'Retry loading holdings'}</Button></p>}
       {(hasUnresolvedAttempt || writeBlocked || conflictFrozen || (error && !(readRecovery && confirmedReceipt))) && !archiveLot && !effectiveFormOpen && <p className="notice error" role="alert">{unresolvedScopeMismatch ? unresolvedCopy : error || unresolvedCopy}{hasUnresolvedAttempt && !conflictFrozen && createAttempt.current && createAttempt.current.scopeKey === scopeKey && <Button type="button" size="small" onClick={reopenUnresolvedCreate}>Retry same save</Button>}{hasUnresolvedAttempt && !conflictFrozen && removeAttempt.current && removeAttempt.current.scopeKey === scopeKey && <Button type="button" size="small" onClick={reopenUnresolvedArchive}>Retry same archive</Button>}</p>}

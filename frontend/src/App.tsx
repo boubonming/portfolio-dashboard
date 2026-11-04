@@ -858,7 +858,6 @@ export default function App() {
       if (!current()) return null
       if (session.authenticated !== true || !session.csrf_token || !session.expires_at || !scheduleExpiry(session.expires_at, generation, controller)) return 'Unable to sign in right now.'
       csrfToken.current = session.csrf_token
-      setMemoryBoundaryNotice('')
       setAuthState('authenticated')
       return null
     } catch (reason) {
@@ -1016,7 +1015,7 @@ export default function App() {
 
           {view === 'overview' && <AllocationSection data={data} />}
 
-          {<HoldingMutations visible={view === 'holdings'} portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active sessionKey={String(authGeneration.current)} scopeKey={`${data.portfolio.id}:${currency}:holdings`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized} onShowReceiptHolding={(holdingId) => {
+          {<HoldingMutations visible={view === 'holdings'} portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active sessionKey={String(authGeneration.current)} scopeKey={`${data.portfolio.id}:${currency}:holdings`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized} memoryBoundaryNotice={memoryBoundaryNotice} onShowReceiptHolding={(holdingId) => {
             setFilter('')
             window.setTimeout(() => {
               const row = Array.from(document.querySelectorAll<HTMLElement>('[data-holding-lot-id]')).find((candidate) => candidate.dataset.holdingLotId === holdingId)
