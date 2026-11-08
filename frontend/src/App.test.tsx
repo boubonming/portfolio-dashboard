@@ -635,7 +635,8 @@ describe('Portfolio Dashboard', () => {
     ]
     for (const invalid of invalidCases) {
       cleanup()
-      vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
+      const validationFetch = authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response))
+      vi.stubGlobal('fetch', validationFetch)
       render(<App />)
       await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
       fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
@@ -645,11 +646,15 @@ describe('Portfolio Dashboard', () => {
       const target = screen.getByLabelText(invalid.label)
       expect(target.id).not.toBe('currency')
       expect(target.getAttribute('aria-describedby')).toContain(`${target.id}-helper-text`)
+      await waitFor(() => expect(target.getAttribute('aria-invalid')).toBe('true'))
+      expect(document.activeElement).toBe(target)
+      expect(screen.getByText(/Fix the highlighted fields before creating the holding/i)).toBeTruthy()
+      expect(validationFetch.mock.calls.filter(([input, init]) => String(input).endsWith('/holdings') && init?.method === 'POST')).toHaveLength(0)
       expect(document.querySelectorAll('[id]').length).toBe(new Set(Array.from(document.querySelectorAll('[id]')).map((element) => element.id)).size)
     }
 
     cleanup()
-    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)))
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
@@ -663,7 +668,7 @@ describe('Portfolio Dashboard', () => {
     const instrumentID = screen.getByLabelText('Instrument ID')
     expect(instrumentID.id).toBe('instrument-id')
     expect(instrumentID.getAttribute('aria-describedby')).toContain('instrument-id-helper-text')
-  }, 15000)
+  }, 30000)
 
   it('shows the full-App Add receipt and focuses it while the follow-up Holdings read is pending', async () => {
     let overviewCalls = 0
@@ -2245,5 +2250,73 @@ describe('Portfolio Dashboard', () => {
     expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/holdings/lot-first') && init?.method === 'DELETE')).toBe(false)
     await waitFor(() => expect(document.querySelector('[data-holding-lot-id="lot-second"]')).toBeNull())
     expect(document.querySelector('[data-holding-lot-id="lot-first"]')).toBeTruthy()
+  })
+
+  it('dismisses a conflicting Add dialog to a connected recovery explanation without enabling writes', async () => {
+    let postCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
+      if (url.endsWith('/holdings') && init?.method === 'POST') {
+        postCalls += 1
+        return Promise.resolve(new Response(JSON.stringify({ error: { code: 'idempotency_conflict' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'CONFLICT'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    const recovery = screen.getByRole('alert')
+    expect(recovery.textContent).toMatch(/frozen|conflicts with an existing request/i)
+    expect(document.activeElement).toBe(recovery)
+    const root = document.getElementById('root')
+    if (root) expect(root.inert).toBe(false)
+    else expect(document.querySelector('main[aria-hidden="true"]')).toBeNull()
+    expect(postCalls).toBe(1)
+    expect((screen.getByRole('button', { name: 'Add holding' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('dismisses a forbidden Archive dialog to a connected recovery explanation without enabling writes', async () => {
+    let deleteCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
+      if (init?.method === 'DELETE' && url.endsWith('/holdings/lot-a')) {
+        deleteCalls += 1
+        return Promise.resolve({ ok: false, status: 403, json: async () => ({ error: 'forbidden' }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel archive' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    const recovery = screen.getByRole('alert')
+    expect(recovery.textContent).toMatch(/not authorized|disabled/i)
+    expect(document.activeElement).toBe(recovery)
+    const root = document.getElementById('root')
+    if (root) expect(root.inert).toBe(false)
+    else expect(document.querySelector('main[aria-hidden="true"]')).toBeNull()
+    expect(deleteCalls).toBe(1)
+    expect((screen.getByRole('button', { name: 'Add holding' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('shows memory-boundary guidance on a fresh authenticated Holdings entry', async () => {
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    expect(screen.getByText(/If an earlier holding change was not confirmed, check Holdings and Activity before adding it again/i)).toBeTruthy()
+    expect(screen.getByText(/absence is not proof that no change was recorded/i)).toBeTruthy()
   })
   })

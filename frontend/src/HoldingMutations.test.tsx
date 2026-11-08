@@ -872,7 +872,7 @@ describe('HoldingMutations', () => {
     expect((screen.getByLabelText('Symbol') as HTMLInputElement).value).toBe('RETRY')
     expect(root.getAttribute('aria-hidden')).toBe('true')
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(document.activeElement).toBe(origin)
+    expect(document.activeElement).toBe(screen.getByRole('alert'))
     expect(root.hasAttribute('aria-hidden')).toBe(false)
     root.remove()
   })
