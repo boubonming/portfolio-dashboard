@@ -654,7 +654,8 @@ describe('Portfolio Dashboard', () => {
     }
 
     cleanup()
-    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)))
+    const validationFetch = authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response))
+    vi.stubGlobal('fetch', validationFetch)
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
@@ -668,6 +669,14 @@ describe('Portfolio Dashboard', () => {
     const instrumentID = screen.getByLabelText('Instrument ID')
     expect(instrumentID.id).toBe('instrument-id')
     expect(instrumentID.getAttribute('aria-describedby')).toContain('instrument-id-helper-text')
+    await waitFor(() => expect(instrumentID.getAttribute('aria-invalid')).toBe('true'))
+    expect(document.activeElement).toBe(instrumentID)
+    const describedIDs = instrumentID.getAttribute('aria-describedby')?.split(/\s+/).filter(Boolean) || []
+    expect(describedIDs).toContain('instrument-id-helper-text')
+    expect(describedIDs.map((id) => document.getElementById(id)).every((node) => node?.isConnected)).toBe(true)
+    expect(screen.getByText(/Enter the immutable instrument ID/i)).toBeTruthy()
+    expect(document.querySelectorAll('[id]').length).toBe(new Set(Array.from(document.querySelectorAll('[id]')).map((element) => element.id)).size)
+    expect(validationFetch.mock.calls.filter(([input, init]) => String(input).endsWith('/holdings') && init?.method === 'POST')).toHaveLength(0)
   }, 30000)
 
   it('shows the full-App Add receipt and focuses it while the follow-up Holdings read is pending', async () => {
@@ -2319,4 +2328,186 @@ describe('Portfolio Dashboard', () => {
     expect(screen.getByText(/If an earlier holding change was not confirmed, check Holdings and Activity before adding it again/i)).toBeTruthy()
     expect(screen.getByText(/absence is not proof that no change was recorded/i)).toBeTruthy()
   })
+
+  it.each([
+    ['inline', 'network'], ['inline', 'server'], ['inline', 'malformed'], ['inline', 'mismatched'],
+    ['existing', 'network'], ['existing', 'server'], ['existing', 'malformed'], ['existing', 'mismatched'],
+  ] as const)('retains an identical full-App %s create attempt after %s uncertainty and scope return', async (mode, failure) => {
+    let postCalls = 0
+    let overviewCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: `"portfolio-default-${overviewCalls + 6}"` }), json: async () => completeOverview } as Response)
+      }
+      if (url.endsWith('/holdings') && init?.method === 'POST') {
+        postCalls += 1
+        if (postCalls === 1) {
+          if (failure === 'network') return Promise.reject(new TypeError('connection lost'))
+          if (failure === 'server') return Promise.resolve(new Response(JSON.stringify({ error: { code: 'internal_error' } }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
+          if (failure === 'mismatched') return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ operation: 'create', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-late', instrument_id: 'instrument-new', symbol: 'NEW', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-late', activity_event_id: 'activity-late', idempotency_key: 'wrong-key-000000000000' }) } as Response)
+          return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
+        }
+        return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ operation: 'create', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-late', instrument_id: 'instrument-new', symbol: 'NEW', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-late', activity_event_id: 'activity-late', idempotency_key: new Headers(init.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    if (mode === 'existing') {
+      fireEvent.click(screen.getByLabelText('Existing instrument ID'))
+      fireEvent.change(screen.getByLabelText('Instrument ID'), { target: { value: 'instrument-new' } })
+    } else {
+      for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    }
+    for (const [label, value] of [['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/not confirmed|uncertainty|invalid holding receipt/i))
+    const firstPost = fetchMock.mock.calls.find(([input, requestInit]) => String(input).endsWith('/holdings') && requestInit?.method === 'POST')
+    const firstInit = firstPost?.[1]
+    const firstKey = new Headers(firstInit?.headers as HeadersInit).get('Idempotency-Key')
+    const expectedBody = mode === 'existing'
+      ? JSON.stringify({ instrument: { instrument_id: 'instrument-new' }, quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD' })
+      : JSON.stringify({ instrument: { symbol: 'NEW', currency: 'USD' }, quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD' })
+    expect(firstInit?.body).toBe(expectedBody)
+    expect(new Headers(firstInit?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '3' } })
+    expect((screen.getByLabelText('Quantity') as HTMLInputElement).value).toBe('2')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    fireEvent.change(screen.getByLabelText('Reporting currency'), { target: { value: 'USD' } })
+    await waitFor(() => expect(overviewCalls).toBeGreaterThan(1))
+    fireEvent.change(screen.getByLabelText('Reporting currency'), { target: { value: 'MYR' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same save' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same save' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Retry same save' }))
+    await waitFor(() => expect(postCalls).toBe(2))
+    const retryPost = fetchMock.mock.calls.filter(([input, requestInit]) => String(input).endsWith('/holdings') && requestInit?.method === 'POST')[1]
+    expect(retryPost?.[1]?.body).toBe(firstInit?.body)
+    expect(new Headers(retryPost?.[1]?.headers as HeadersInit).get('Idempotency-Key')).toBe(firstKey)
+    expect(new Headers(retryPost?.[1]?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
+    await waitFor(() => expect(screen.getByText(/Holding added.*lot-late/i)).toBeTruthy())
   })
+
+  it.each(['network', 'server', 'malformed', 'mismatched'] as const)('retains an identical full-App archive attempt after %s uncertainty and blocks other lots', async (failure) => {
+    let overviewCalls = 0
+    let deleteCalls = 0
+    const archiveReceipt = { operation: 'remove', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'instrument-a', symbol: 'AAA', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'removed', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: '2026-01-03T12:00:00.000000000Z' }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-archive', activity_event_id: 'activity-archive', idempotency_key: '' }
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: `"portfolio-default-${overviewCalls + 6}"` }), json: async () => completeOverview } as Response)
+      }
+      if (init?.method === 'DELETE' && url.endsWith('/holdings/lot-a')) {
+        deleteCalls += 1
+        if (deleteCalls === 1) {
+          if (failure === 'network') return Promise.reject(new TypeError('connection lost'))
+          if (failure === 'server') return Promise.resolve(new Response(JSON.stringify({ error: { code: 'internal_error' } }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
+          if (failure === 'mismatched') return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...archiveReceipt, idempotency_key: 'wrong-key-000000000000' }) } as Response)
+          return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
+        }
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...archiveReceipt, idempotency_key: new Headers(init.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+    await waitFor(() => expect(screen.getByRole('dialog').textContent).toMatch(/not confirmed|uncertainty|invalid holding receipt/i))
+    const firstDelete = fetchMock.mock.calls.find(([input, requestInit]) => String(input).endsWith('/holdings/lot-a') && requestInit?.method === 'DELETE')
+    const firstInit = firstDelete?.[1]
+    const firstKey = new Headers(firstInit?.headers as HeadersInit).get('Idempotency-Key')
+    expect(firstKey).toBeTruthy()
+    expect(new Headers(firstInit?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
+    expect((screen.getByRole('button', { name: 'Confirm archive holding' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel archive' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect((screen.getByRole('button', { name: 'Add holding' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Reporting currency'), { target: { value: 'USD' } })
+    await waitFor(() => expect(overviewCalls).toBeGreaterThan(1))
+    fireEvent.change(screen.getByLabelText('Reporting currency'), { target: { value: 'MYR' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same archive' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same archive' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Retry same archive' }))
+    await waitFor(() => expect(deleteCalls).toBe(2))
+    const retryDelete = fetchMock.mock.calls.filter(([input, requestInit]) => String(input).endsWith('/holdings/lot-a') && requestInit?.method === 'DELETE')[1]
+    expect(retryDelete?.[0]).toBe(firstDelete?.[0])
+    expect(new Headers(retryDelete?.[1]?.headers as HeadersInit).get('Idempotency-Key')).toBe(firstKey)
+    expect(new Headers(retryDelete?.[1]?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
+    await waitFor(() => expect(screen.getByText(/Holding archived.*lot-a/i)).toBeTruthy())
+  })
+
+  it('aborts pending full-App holding writes on logout and ignores late responses', async () => {
+    let resolvePost: ((response: Response) => void) | undefined
+    let postCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
+      if (url.endsWith('/holdings') && init?.method === 'POST') {
+        postCalls += 1
+        return new Promise<Response>((resolve) => { resolvePost = resolve })
+      }
+      if (url.includes('/auth/logout')) return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({ authenticated: false }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'LATE'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(postCalls).toBe(1))
+    fireEvent.click(document.querySelector('.sign-out') as HTMLElement)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    resolvePost?.({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
+    await flushEffects()
+    expect(screen.queryByText(/Holding added/i)).toBeNull()
+    expect(screen.queryByText(/Retry same save/i)).toBeNull()
+    expect(screen.queryByText(/LATE/i)).toBeNull()
+    expect(fetchMock.mock.calls.filter(([input, requestInit]) => String(input).endsWith('/holdings') && requestInit?.method === 'POST')).toHaveLength(1)
+  })
+
+  it('expires a pending full-App holding attempt without accepting its late receipt', async () => {
+    vi.useFakeTimers()
+    try {
+      let resolvePost: ((response: Response) => void) | undefined
+      let postCalls = 0
+      const session = { ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: new Date(Date.now() + 1000).toISOString() }) } as Response
+      const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url.includes('/auth/session')) return Promise.resolve(session)
+        if (url.includes('/overview')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
+        if (url.endsWith('/holdings') && init?.method === 'POST') {
+          postCalls += 1
+          return new Promise<Response>((resolve) => { resolvePost = resolve })
+        }
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({ authenticated: false }) } as Response)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      render(<App />)
+      await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+      for (const [label, value] of [['Symbol', 'EXPIRE'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+      await vi.waitFor(() => expect(postCalls).toBe(1))
+      await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve() })
+      await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+      resolvePost?.({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
+      await act(async () => { await Promise.resolve() })
+      expect(screen.queryByText(/Holding added/i)).toBeNull()
+      expect(screen.queryByRole('button', { name: /Retry same save/i })).toBeNull()
+      expect(fetchMock.mock.calls.filter(([input, requestInit]) => String(input).endsWith('/holdings') && requestInit?.method === 'POST')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
