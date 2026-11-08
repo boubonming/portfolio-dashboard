@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import App, { compareDecimalStrings, formatDecimalForDisplay, isCSVContentType, safeCSVFilename, type PortfolioOverview } from './App'
+import App, { compareDecimalStrings, formatDecimalForDisplay, formatMoneyForDisplay, isCSVContentType, safeCSVFilename, type PortfolioOverview } from './App'
 import * as api from './api'
 import { committedStyleRules, committedStyleSelectors, hasMatchingDeclaration, matchingStyleRules, installCommittedStyles } from './cssTestUtils'
 
@@ -748,6 +748,113 @@ describe('Portfolio Dashboard', () => {
     expect(compareDecimalStrings('10.02', '10.1')).toBeLessThan(0)
     expect(compareDecimalStrings('-2', '-10')).toBeGreaterThan(0)
     expect(compareDecimalStrings('1.000', '1')).toBe(0)
+  })
+
+  it('formats tiny nonzero money with a signed compact marker and preserves exact strings', () => {
+    expect(formatMoneyForDisplay('0', 'USD')).toBe('0 USD')
+    expect(formatMoneyForDisplay('0.00125', 'USD')).toBe('<0.01 USD')
+    expect(formatMoneyForDisplay('0.009', 'USD')).toBe('<0.01 USD')
+    expect(formatMoneyForDisplay('-0.00125', 'USD')).toBe('−<0.01 USD')
+    expect(formatMoneyForDisplay('-0.009', 'USD')).toBe('−<0.01 USD')
+    expect(formatMoneyForDisplay('10.0001', 'USD')).toBe('10 USD')
+    expect(formatMoneyForDisplay('0.00125', 'USD', true)).toBe('0.00125 USD')
+    expect(formatMoneyForDisplay('-0.00125', 'USD', true)).toBe('-0.00125 USD')
+    expect(formatMoneyForDisplay.toString()).not.toMatch(/Number|parseFloat|toFixed|Math\\./)
+  })
+
+  it('shows truthful Holdings valuation context, source time, raw quality and exact amounts', async () => {
+    const s2Overview: PortfolioOverview = {
+      ...completeOverview,
+      snapshot: { ...completeOverview.snapshot, state: 'incomplete', complete: false, as_of: '2026-01-02T12:00:00.000000000Z', reporting_total: undefined },
+      holdings: [{ ...completeOverview.holdings[0], quantity: '0.125', unit_cost: '0.00125', cost_basis: '10.0001', latest_price: '-0.00125', latest_value: '0.00125', unrealised_pnl: '0.00125', reporting_value: undefined, quote_source: 'fixture-feed', freshness: { status: 'fresh', market_at: '2026-01-02T11:30:00.000000000Z' }, data_quality: ['delayed_source'] }],
+    }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => s2Overview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    expect(screen.getByRole('heading', { name: 'Incomplete' })).toBeTruthy()
+    expect(screen.getByText('As of 2026-01-02 12:00:00 UTC · Completeness describes valuation coverage, not wall-clock freshness.')).toBeTruthy()
+    expect(screen.getByText('Reporting values: MYR')).toBeTruthy()
+    expect(screen.getAllByText('<0.01 USD').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('−<0.01 USD').length).toBeGreaterThan(0)
+    expect(screen.getByText('Source: fixture-feed')).toBeTruthy()
+    expect(screen.getByText('Market time: 2026-01-02 11:30:00 UTC')).toBeTruthy()
+    expect(screen.getByText('delayed_source')).toBeTruthy()
+    expect(screen.queryByText('0 USD')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Show exact amounts' }))
+    expect(screen.getByRole('button', { name: 'Use compact amounts' })).toBeTruthy()
+    expect(screen.getAllByText('0.00125 USD').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('-0.00125 USD').length).toBeGreaterThan(0)
+    expect(screen.getByText('0.125')).toBeTruthy()
+  })
+
+  it('does not relabel stale reporting values during a currency transition', async () => {
+    let resolveUSD: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('currency=USD')) return new Promise<Response>((resolve) => { resolveUSD = resolve })
+      return Promise.resolve({ ok: true, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    expect(screen.getByRole('heading', { name: 'Complete' })).toBeTruthy()
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(screen.getByText(/Updating to USD; existing amounts remain labeled MYR/)).toBeTruthy())
+    expect(screen.getByRole('columnheader', { name: /reporting value \(MYR\)/i })).toBeTruthy()
+    expect(screen.getByText('100.5 MYR')).toBeTruthy()
+    resolveUSD?.({ ok: true, json: async () => ({ ...completeOverview, reporting_currency: 'USD' }) } as Response)
+    await waitFor(() => expect(screen.getByRole('columnheader', { name: /reporting value \(USD\)/i })).toBeTruthy())
+    expect(screen.getByText('100.5 USD')).toBeTruthy()
+  })
+
+  it('separates first-run empty Holdings from filtered-empty recovery', async () => {
+    const emptyOverview = { ...completeOverview, holdings: [], snapshot: { state: 'no_snapshot' as const, complete: false, subtotals: [] } }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => emptyOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByText('No holdings yet. Add your first holding to begin.')).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy()
+
+    cleanup()
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, json: async () => String(input).includes('currency=USD') ? { ...completeOverview, reporting_currency: 'USD' } : completeOverview } as Response))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /sort by latest price/i }))
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(screen.getByRole('columnheader', { name: /reporting value \(USD\)/i })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText(/filter holdings/i), { target: { value: 'NO_MATCH' } })
+    expect(screen.getByText('No holdings match this filter.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Clear filter' })).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: /latest price/i }).getAttribute('aria-sort')).toBe('ascending')
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }))
+    const filterInput = screen.getByLabelText(/filter holdings/i) as HTMLInputElement
+    expect(filterInput.value).toBe('')
+    expect(screen.getByText('AAA')).toBeTruthy()
+    expect((screen.getByLabelText(/reporting currency/i) as HTMLSelectElement).value).toBe('USD')
+  })
+
+  it('renders no-snapshot Holdings context with unavailable valuation time and source time', async () => {
+    const noSnapshot = { ...completeOverview, snapshot: { state: 'no_snapshot' as const, complete: false, subtotals: [] }, holdings: [{ ...completeOverview.holdings[0], quote_source: undefined, freshness: { status: 'missing' } }] }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => noSnapshot } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'No valuation snapshot' })).toBeTruthy())
+    expect(screen.getByText('As of Not available · Completeness describes valuation coverage, not wall-clock freshness.')).toBeTruthy()
+    expect(screen.getByText('Source: Unavailable')).toBeTruthy()
+    expect(screen.getByText('Market time: Unavailable')).toBeTruthy()
+    expect(screen.queryByText('No holdings match this filter.')).toBeNull()
+  })
+
+  it('compares exact sort order in both directions when compact values collide', async () => {
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => decimalSortOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    const rows = () => within(screen.getByRole('table', { name: 'Holdings' })).getAllByRole('row').slice(1).map((row) => within(row).getByRole('rowheader').querySelector('strong')?.textContent)
+    const header = screen.getByRole('columnheader', { name: /latest market value/i })
+    fireEvent.click(screen.getByRole('button', { name: /sort by latest market value/i }))
+    expect(rows()).toEqual(['TWO', 'TEN', 'TEN1', 'TEN02'])
+    expect(header.getAttribute('aria-sort')).toBe('ascending')
+    fireEvent.click(screen.getByRole('button', { name: /sort by latest market value/i }))
+    expect(rows()).toEqual(['TEN02', 'TEN1', 'TEN', 'TWO'])
+    expect(header.getAttribute('aria-sort')).toBe('descending')
   })
 
   it('formats monetary decimals exactly to at most two places with ties away from zero', () => {
@@ -2456,7 +2563,7 @@ describe('Portfolio Dashboard', () => {
       let resolveWrite: ((response: Response) => void) | undefined
       let writeInit: RequestInit | undefined
       let writeCalls = 0
-      const expiry = new Date(Date.now() + 1000).toISOString()
+      const expiry = new Date(Date.now() + (authorityLoss === 'expiry' ? 1000 : 10_000)).toISOString()
       const validAddReceipt = {
         operation: 'create', result: 'applied',
         holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-late', instrument_id: 'instrument-new', symbol: 'LATE', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null },
