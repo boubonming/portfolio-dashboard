@@ -619,6 +619,104 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(document.activeElement).toBe(add))
   })
 
+  it('renders every inline validation key with a scoped field and full-toolbar label/help associations', async () => {
+    const invalidCases: Array<{ label: string; value: string }> = [
+      { label: 'Symbol', value: '' },
+      { label: 'Instrument currency', value: 'usd' },
+      { label: 'Description (optional)', value: 'x'.repeat(257) },
+      { label: 'Asset type (optional)', value: '!' },
+      { label: 'Exchange (optional)', value: '!' },
+      { label: 'Quantity', value: '0' },
+      { label: 'Unit cost', value: 'not-a-decimal' },
+      { label: 'Cost basis', value: '11' },
+      { label: 'Holding currency', value: 'usd' },
+      { label: 'Account ID (optional)', value: 'not valid' },
+      { label: 'Acquisition date (optional)', value: '2024-02-30' },
+    ]
+    for (const invalid of invalidCases) {
+      cleanup()
+      const validationFetch = authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response))
+      vi.stubGlobal('fetch', validationFetch)
+      render(<App />)
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+      for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+      fireEvent.change(screen.getByLabelText(invalid.label), { target: { value: invalid.value } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+      const target = screen.getByLabelText(invalid.label)
+      expect(target.id).not.toBe('currency')
+      expect(target.getAttribute('aria-describedby')).toContain(`${target.id}-helper-text`)
+      await waitFor(() => expect(target.getAttribute('aria-invalid')).toBe('true'))
+      expect(document.activeElement).toBe(target)
+      expect(screen.getByText(/Fix the highlighted fields before creating the holding/i)).toBeTruthy()
+      expect(validationFetch.mock.calls.filter(([input, init]) => String(input).endsWith('/holdings') && init?.method === 'POST')).toHaveLength(0)
+      expect(document.querySelectorAll('[id]').length).toBe(new Set(Array.from(document.querySelectorAll('[id]')).map((element) => element.id)).size)
+    }
+
+    cleanup()
+    const validationFetch = authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response))
+    vi.stubGlobal('fetch', validationFetch)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    fireEvent.click(screen.getByLabelText('Existing instrument ID'))
+    fireEvent.change(screen.getByLabelText('Instrument ID'), { target: { value: 'not valid' } })
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '2' } })
+    fireEvent.change(screen.getByLabelText('Unit cost'), { target: { value: '5' } })
+    fireEvent.change(screen.getByLabelText('Cost basis'), { target: { value: '10' } })
+    fireEvent.change(screen.getByLabelText('Holding currency'), { target: { value: 'USD' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    const instrumentID = screen.getByLabelText('Instrument ID')
+    expect(instrumentID.id).toBe('instrument-id')
+    expect(instrumentID.getAttribute('aria-describedby')).toContain('instrument-id-helper-text')
+    await waitFor(() => expect(instrumentID.getAttribute('aria-invalid')).toBe('true'))
+    expect(document.activeElement).toBe(instrumentID)
+    const describedIDs = instrumentID.getAttribute('aria-describedby')?.split(/\s+/).filter(Boolean) || []
+    expect(describedIDs).toContain('instrument-id-helper-text')
+    expect(describedIDs.map((id) => document.getElementById(id)).every((node) => node?.isConnected)).toBe(true)
+    expect(screen.getByText(/Enter the immutable instrument ID/i)).toBeTruthy()
+    expect(document.querySelectorAll('[id]').length).toBe(new Set(Array.from(document.querySelectorAll('[id]')).map((element) => element.id)).size)
+    expect(validationFetch.mock.calls.filter(([input, init]) => String(input).endsWith('/holdings') && init?.method === 'POST')).toHaveLength(0)
+  }, 30000)
+
+  it('shows the full-App Add receipt and focuses it while the follow-up Holdings read is pending', async () => {
+    let overviewCalls = 0
+    let resolveFollowUp: ((response: Response) => void) | undefined
+    const addReceipt = {
+      operation: 'create', result: 'applied', holding: {
+        portfolio_id: 'portfolio-default', holding_id: 'lot-app-new', instrument_id: 'instrument-app-new', symbol: 'APPNEW',
+        quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null,
+        lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null,
+      }, portfolio_revision: 8, snapshot_state: 'stale', current_snapshot_id: 'snapshot-1',
+      actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-app',
+      activity_event_id: 'activity-app', idempotency_key: '',
+    }
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 1) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
+        return new Promise<Response>((resolve) => { resolveFollowUp = resolve })
+      }
+      if (url.endsWith('/holdings') && init?.method === 'POST') return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...addReceipt, idempotency_key: new Headers(init.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'APPNEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/holdings') && init?.method === 'POST')).toHaveLength(1))
+    const receiptStatus = () => screen.getAllByRole('status').find((node) => node.textContent?.includes('Holding added')) as HTMLElement
+    await waitFor(() => expect(receiptStatus().textContent).toMatch(/Holding added.*APPNEW.*2 units.*lot lot-app-new/i))
+    expect(document.activeElement).toBe(receiptStatus())
+    expect(receiptStatus().textContent).toMatch(/valuation snapshot is stale/i)
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/holdings') && init?.method === 'POST')).toHaveLength(1)
+    resolveFollowUp?.({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => completeOverview } as Response)
+    await waitFor(() => expect(receiptStatus().textContent).toMatch(/Holding added/i))
+  })
+
   it('renders complete snapshots, flags, filtering and currency changes', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
@@ -2089,5 +2187,339 @@ describe('Portfolio Dashboard', () => {
     expect(globalThis.sessionStorage?.getItem('thesis_draft') ?? null).toBeNull()
     expect(globalThis.localStorage?.getItem('thesis_response') ?? null).toBeNull()
     expect(globalThis.sessionStorage?.getItem('thesis_history') ?? null).toBeNull()
+  })
+
+  it('keeps a full-App holding receipt through a failed read and retries only the read', async () => {
+    const addedHolding = { ...completeOverview.holdings[0], lot_id: 'lot-new', symbol: 'NEW', name: 'New Fund', description: undefined, quantity: '2', currency: 'USD', unit_cost: '5', cost_basis: '10' }
+    const holdingReceipt = {
+      operation: 'create', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-new', instrument_id: 'instrument-new', symbol: 'NEW', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-new', activity_event_id: 'activity-new', idempotency_key: '',
+    }
+    let overviewCalls = 0
+    let postCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 2) return Promise.reject(new TypeError('overview unavailable'))
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: `"portfolio-default-${overviewCalls + 6}"` }), json: async () => ({ ...completeOverview, holdings: overviewCalls >= 3 ? [...completeOverview.holdings, addedHolding] : completeOverview.holdings }) } as Response)
+      }
+      if (url.endsWith('/holdings') && init?.method === 'POST') {
+        postCalls += 1
+        return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...holdingReceipt, idempotency_key: new Headers(init.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Filter holdings'), { target: { value: 'hidden-filter' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByText(/Holding added.*lot-new/i).textContent).toMatch(/Holding added.*lot-new/i))
+    expect(postCalls).toBe(1)
+    expect(screen.getByRole('button', { name: 'Retry loading holdings' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading holdings' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Show added holding' })).toBeTruthy())
+    expect(postCalls).toBe(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Show added holding' }))
+    await waitFor(() => expect(document.querySelector('[data-holding-lot-id="lot-new"]')).toBeTruthy())
+    expect(document.activeElement).toBe(document.querySelector('[data-holding-lot-id="lot-new"]'))
+  })
+
+  it('archives the selected full lot through the full App while preserving a same-symbol lot', async () => {
+    const firstLot = { ...completeOverview.holdings[0], lot_id: 'lot-first', symbol: 'SAME', name: 'First lot' }
+    const secondLot = { ...completeOverview.holdings[0], lot_id: 'lot-second', symbol: 'SAME', name: 'Second lot', quantity: '2', unit_cost: '7', cost_basis: '14' }
+    const archiveReceipt = {
+      operation: 'remove', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-second', instrument_id: 'instrument-same', symbol: 'SAME', quantity: '2', unit_cost: '7', cost_basis: '14', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'removed', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: '2026-01-03T12:00:00.000000000Z' }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-archive', activity_event_id: 'activity-archive', idempotency_key: '',
+    }
+    let overviewCalls = 0
+    let deleteCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: `"portfolio-default-${overviewCalls + 6}"` }), json: async () => ({ ...completeOverview, holdings: overviewCalls >= 2 ? [firstLot] : [firstLot, secondLot] }) } as Response)
+      }
+      if (init?.method === 'DELETE' && url.endsWith('/holdings/lot-second')) {
+        deleteCalls += 1
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...archiveReceipt, idempotency_key: new Headers(init.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for SAME lot lot-second' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+    expect(screen.getByRole('dialog').textContent).toMatch(/2 units.*USD.*unit cost 7 USD.*cost basis 14 USD.*lot-second/i)
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+    await waitFor(() => expect(screen.getByText(/Holding archived.*lot-second/i)).toBeTruthy())
+    expect(deleteCalls).toBe(1)
+    expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith('/holdings/lot-first') && init?.method === 'DELETE')).toBe(false)
+    await waitFor(() => expect(document.querySelector('[data-holding-lot-id="lot-second"]')).toBeNull())
+    expect(document.querySelector('[data-holding-lot-id="lot-first"]')).toBeTruthy()
+  })
+
+  it('dismisses a conflicting Add dialog to a connected recovery explanation without enabling writes', async () => {
+    let postCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
+      if (url.endsWith('/holdings') && init?.method === 'POST') {
+        postCalls += 1
+        return Promise.resolve(new Response(JSON.stringify({ error: { code: 'idempotency_conflict' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'CONFLICT'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    const recovery = screen.getByRole('alert')
+    expect(recovery.textContent).toMatch(/frozen|conflicts with an existing request/i)
+    expect(document.activeElement).toBe(recovery)
+    const root = document.getElementById('root')
+    if (root) expect(root.inert).toBe(false)
+    else expect(document.querySelector('main[aria-hidden="true"]')).toBeNull()
+    expect(postCalls).toBe(1)
+    expect((screen.getByRole('button', { name: 'Add holding' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('dismisses a forbidden Archive dialog to a connected recovery explanation without enabling writes', async () => {
+    let deleteCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
+      if (init?.method === 'DELETE' && url.endsWith('/holdings/lot-a')) {
+        deleteCalls += 1
+        return Promise.resolve({ ok: false, status: 403, json: async () => ({ error: 'forbidden' }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel archive' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    const recovery = screen.getByRole('alert')
+    expect(recovery.textContent).toMatch(/not authorized|disabled/i)
+    expect(document.activeElement).toBe(recovery)
+    const root = document.getElementById('root')
+    if (root) expect(root.inert).toBe(false)
+    else expect(document.querySelector('main[aria-hidden="true"]')).toBeNull()
+    expect(deleteCalls).toBe(1)
+    expect((screen.getByRole('button', { name: 'Add holding' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('shows memory-boundary guidance on a fresh authenticated Holdings entry', async () => {
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    expect(screen.getByText(/If an earlier holding change was not confirmed, check Holdings and Activity before adding it again/i)).toBeTruthy()
+    expect(screen.getByText(/absence is not proof that no change was recorded/i)).toBeTruthy()
+  })
+
+  it.each([
+    ['inline', 'network'], ['inline', 'server'], ['inline', 'malformed'], ['inline', 'unreadable'], ['inline', 'mismatched'],
+    ['existing', 'network'], ['existing', 'server'], ['existing', 'malformed'], ['existing', 'unreadable'], ['existing', 'mismatched'],
+  ] as const)('retains an identical full-App %s create attempt after %s uncertainty and scope return', async (mode, failure) => {
+    let postCalls = 0
+    let overviewCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: `"portfolio-default-${overviewCalls + 6}"` }), json: async () => completeOverview } as Response)
+      }
+      if (url.endsWith('/holdings') && init?.method === 'POST') {
+        postCalls += 1
+        if (postCalls === 1) {
+          if (failure === 'network') return Promise.reject(new TypeError('connection lost'))
+          if (failure === 'server') return Promise.resolve(new Response(JSON.stringify({ error: { code: 'internal_error' } }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
+          if (failure === 'unreadable') return Promise.resolve(new Response('{"operation":', { status: 201, headers: { 'Content-Type': 'application/json' } }))
+          if (failure === 'mismatched') return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ operation: 'create', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-late', instrument_id: 'instrument-new', symbol: 'NEW', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-late', activity_event_id: 'activity-late', idempotency_key: 'wrong-key-000000000000' }) } as Response)
+          return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
+        }
+        return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ operation: 'create', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-late', instrument_id: 'instrument-new', symbol: 'NEW', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-late', activity_event_id: 'activity-late', idempotency_key: new Headers(init.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    if (mode === 'existing') {
+      fireEvent.click(screen.getByLabelText('Existing instrument ID'))
+      fireEvent.change(screen.getByLabelText('Instrument ID'), { target: { value: 'instrument-new' } })
+    } else {
+      for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    }
+    for (const [label, value] of [['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/not confirmed|uncertainty|invalid holding receipt/i))
+    const firstPost = fetchMock.mock.calls.find(([input, requestInit]) => String(input).endsWith('/holdings') && requestInit?.method === 'POST')
+    const firstInit = firstPost?.[1]
+    const firstKey = new Headers(firstInit?.headers as HeadersInit).get('Idempotency-Key')
+    const expectedBody = mode === 'existing'
+      ? JSON.stringify({ instrument: { instrument_id: 'instrument-new' }, quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD' })
+      : JSON.stringify({ instrument: { symbol: 'NEW', currency: 'USD' }, quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD' })
+    expect(firstInit?.body).toBe(expectedBody)
+    expect(new Headers(firstInit?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '3' } })
+    expect((screen.getByLabelText('Quantity') as HTMLInputElement).value).toBe('2')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    fireEvent.change(screen.getByLabelText('Reporting currency'), { target: { value: 'USD' } })
+    await waitFor(() => expect(overviewCalls).toBeGreaterThan(1))
+    fireEvent.change(screen.getByLabelText('Reporting currency'), { target: { value: 'MYR' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same save' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same save' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Retry same save' }))
+    await waitFor(() => expect(postCalls).toBe(2))
+    const retryPost = fetchMock.mock.calls.filter(([input, requestInit]) => String(input).endsWith('/holdings') && requestInit?.method === 'POST')[1]
+    expect(retryPost?.[1]?.body).toBe(firstInit?.body)
+    expect(new Headers(retryPost?.[1]?.headers as HeadersInit).get('Idempotency-Key')).toBe(firstKey)
+    expect(new Headers(retryPost?.[1]?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
+    await waitFor(() => expect(screen.getByText(/Holding added.*lot-late/i)).toBeTruthy())
+  })
+
+  it.each(['network', 'server', 'malformed', 'unreadable', 'mismatched'] as const)('retains an identical full-App archive attempt after %s uncertainty and blocks other lots', async (failure) => {
+    let overviewCalls = 0
+    let deleteCalls = 0
+    const archiveReceipt = { operation: 'remove', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'instrument-a', symbol: 'AAA', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'removed', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: '2026-01-03T12:00:00.000000000Z' }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-archive', activity_event_id: 'activity-archive', idempotency_key: '' }
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: `"portfolio-default-${overviewCalls + 6}"` }), json: async () => completeOverview } as Response)
+      }
+      if (init?.method === 'DELETE' && url.endsWith('/holdings/lot-a')) {
+        deleteCalls += 1
+        if (deleteCalls === 1) {
+          if (failure === 'network') return Promise.reject(new TypeError('connection lost'))
+          if (failure === 'server') return Promise.resolve(new Response(JSON.stringify({ error: { code: 'internal_error' } }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
+          if (failure === 'unreadable') return Promise.resolve(new Response('{"operation":', { status: 200, headers: { 'Content-Type': 'application/json' } }))
+          if (failure === 'mismatched') return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...archiveReceipt, idempotency_key: 'wrong-key-000000000000' }) } as Response)
+          return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
+        }
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...archiveReceipt, idempotency_key: new Headers(init.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+    await waitFor(() => expect(screen.getByRole('dialog').textContent).toMatch(/not confirmed|uncertainty|invalid holding receipt/i))
+    const firstDelete = fetchMock.mock.calls.find(([input, requestInit]) => String(input).endsWith('/holdings/lot-a') && requestInit?.method === 'DELETE')
+    const firstInit = firstDelete?.[1]
+    const firstKey = new Headers(firstInit?.headers as HeadersInit).get('Idempotency-Key')
+    expect(firstKey).toBeTruthy()
+    expect(new Headers(firstInit?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
+    expect((screen.getByRole('button', { name: 'Confirm archive holding' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel archive' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect((screen.getByRole('button', { name: 'Add holding' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Reporting currency'), { target: { value: 'USD' } })
+    await waitFor(() => expect(overviewCalls).toBeGreaterThan(1))
+    fireEvent.change(screen.getByLabelText('Reporting currency'), { target: { value: 'MYR' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same archive' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same archive' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy())
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Retry same archive' }))
+    await waitFor(() => expect(deleteCalls).toBe(2))
+    const retryDelete = fetchMock.mock.calls.filter(([input, requestInit]) => String(input).endsWith('/holdings/lot-a') && requestInit?.method === 'DELETE')[1]
+    expect(retryDelete?.[0]).toBe(firstDelete?.[0])
+    expect(new Headers(retryDelete?.[1]?.headers as HeadersInit).get('Idempotency-Key')).toBe(firstKey)
+    expect(new Headers(retryDelete?.[1]?.headers as HeadersInit).get('If-Match')).toBe('"portfolio-default-7"')
+    await waitFor(() => expect(screen.getByText(/Holding archived.*lot-a/i)).toBeTruthy())
+  })
+
+  it.each([
+    ['add', 'logout'], ['add', 'expiry'], ['archive', 'logout'], ['archive', 'expiry'],
+  ] as const)('aborts a pending full-App %s write on %s before accepting a late matching receipt', async (operation, authorityLoss) => {
+    if (authorityLoss === 'expiry') vi.useFakeTimers()
+    try {
+      let resolveWrite: ((response: Response) => void) | undefined
+      let writeInit: RequestInit | undefined
+      let writeCalls = 0
+      const expiry = new Date(Date.now() + 1000).toISOString()
+      const validAddReceipt = {
+        operation: 'create', result: 'applied',
+        holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-late', instrument_id: 'instrument-new', symbol: 'LATE', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null },
+        portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null,
+        actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-late', activity_event_id: 'activity-late',
+        idempotency_key: '',
+      }
+      const validArchiveReceipt = {
+        operation: 'remove', result: 'applied',
+        holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'instrument-a', symbol: 'AAA', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'removed', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: '2026-01-03T12:00:00.000000000Z' },
+        portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null,
+        actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-archive', activity_event_id: 'activity-archive',
+        idempotency_key: '',
+      }
+      const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url.includes('/auth/session')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: expiry }) } as Response)
+        if (url.includes('/overview')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
+        const isWrite = operation === 'add' ? url.endsWith('/holdings') && init?.method === 'POST' : url.endsWith('/holdings/lot-a') && init?.method === 'DELETE'
+        if (isWrite) {
+          writeCalls += 1
+          writeInit = init
+          return new Promise<Response>((resolve) => { resolveWrite = resolve })
+        }
+        if (url.includes('/auth/logout')) return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({ authenticated: false }) } as Response)
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      const waitForTest = authorityLoss === 'expiry' ? vi.waitFor : waitFor
+      render(<App />)
+      await waitForTest(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+      if (operation === 'add') {
+        fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+        for (const [label, value] of [['Symbol', 'LATE'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+        fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+      } else {
+        fireEvent.click(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+      }
+      await waitForTest(() => expect(writeCalls).toBe(1))
+      const signal = writeInit?.signal as AbortSignal | undefined
+      expect(signal).toBeTruthy()
+      if (authorityLoss === 'logout') {
+        fireEvent.click(document.querySelector('.sign-out') as HTMLElement)
+      } else {
+        await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve() })
+      }
+      await waitForTest(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+      expect(signal?.aborted).toBe(true)
+      expect(resolveWrite).toBeTypeOf('function')
+      const receipt = operation === 'add' ? { ...validAddReceipt, idempotency_key: new Headers(writeInit?.headers as HeadersInit).get('Idempotency-Key') } : { ...validArchiveReceipt, idempotency_key: new Headers(writeInit?.headers as HeadersInit).get('Idempotency-Key') }
+      resolveWrite!({ ok: true, status: operation === 'add' ? 201 : 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => receipt } as Response)
+      await flushEffects()
+      expect(screen.queryByText(/Holding (added|archived)/i)).toBeNull()
+      expect(screen.queryByRole('button', { name: /Retry same (save|archive)/i })).toBeNull()
+      expect(screen.queryByText(/LATE/i)).toBeNull()
+      expect(fetchMock.mock.calls.filter(([input, requestInit]) => {
+        const candidate = String(input)
+        return operation === 'add' ? candidate.endsWith('/holdings') && requestInit?.method === 'POST' : candidate.endsWith('/holdings/lot-a') && requestInit?.method === 'DELETE'
+      })).toHaveLength(1)
+    } finally {
+      if (authorityLoss === 'expiry') vi.useRealTimers()
+    }
   })
 })

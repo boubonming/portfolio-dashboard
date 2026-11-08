@@ -434,7 +434,7 @@ function validateActivityPage(value: unknown): ActivityPage {
   return page
 }
 
-function Login({ onLogin, externalError = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; externalError?: string }) {
+function Login({ onLogin, externalError = '', memoryBoundaryNotice = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; externalError?: string; memoryBoundaryNotice?: string }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [state, setState] = useState<'idle' | 'submitting'>('idle')
@@ -466,6 +466,7 @@ function Login({ onLogin, externalError = '' }: { onLogin: (username: string, pa
     <Card component="form" className="login-card" onSubmit={submit} aria-labelledby="login-title" variant="outlined">
       <CardContent sx={{ display: 'grid', gap: 1.25, p: { xs: 2.5, sm: 3 } }}>
         <Typography component="h2" id="login-title" variant="h5">Sign in</Typography>
+        {memoryBoundaryNotice && <Box className="notice warning" role="status" sx={{ mt: 1 }}>{memoryBoundaryNotice}</Box>}
         <TextField inputRef={usernameRef} id="username" name="username" label="Username" slotProps={{ htmlInput: { 'aria-label': 'Username' } }} autoComplete="username" autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required fullWidth />
         <TextField id="password" name="password" type="password" label="Password" slotProps={{ htmlInput: { 'aria-label': 'Password' } }} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required fullWidth />
         {(error || externalError) && <Box className="notice error" role="alert" sx={{ mt: 1 }}>{error || externalError}</Box>}
@@ -498,6 +499,7 @@ export default function App() {
   const [refreshError, setRefreshError] = useState('')
   const [refreshAnnouncement, setRefreshAnnouncement] = useState('')
   const [authError, setAuthError] = useState('')
+  const [memoryBoundaryNotice, setMemoryBoundaryNotice] = useState('')
   const csrfToken = useRef<string | undefined>(undefined)
   const [filter, setFilter] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('symbol')
@@ -559,6 +561,7 @@ export default function App() {
     if (expiryTimerRef.current) clearTimeout(expiryTimerRef.current)
     expiryTimerRef.current = setTimeout(() => {
       if (controller.signal.aborted || authGeneration.current !== generation) return
+      setMemoryBoundaryNotice('If a holding change was in progress, sign in and check Holdings and Activity. Reload or expiry loses in-memory recovery and absence is not proof that no change was recorded.')
       clearPrivateState()
       setAuthError('Your session expired. Please sign in again.')
       setAuthState('login')
@@ -867,6 +870,7 @@ export default function App() {
 
   const logout = useCallback(async () => {
     const token = csrfToken.current
+    setMemoryBoundaryNotice('If a holding change was in progress, sign in and check Holdings and Activity. Sign-out loses in-memory recovery and absence is not proof that no change was recorded.')
     clearPrivateState()
     const generation = authGeneration.current
     setAuthState('login')
@@ -887,6 +891,7 @@ export default function App() {
   }, [clearPrivateState])
 
   const handleThesisUnauthorized = useCallback(() => {
+    setMemoryBoundaryNotice('If a holding change was in progress, sign in and check Holdings and Activity. The expired session cannot prove that an earlier change was absent.')
     clearPrivateState()
     setAuthState('login')
   }, [clearPrivateState])
@@ -950,7 +955,7 @@ export default function App() {
     <TableCell component="th" scope="col" sortDirection={sortKey === key ? (sortDirection === 'ascending' ? 'asc' : 'desc') : false} aria-sort={sortKey === key ? sortDirection : 'none'}>{sortButton(label, key)}</TableCell>
   )
 
-  if (authState === 'login') return <Login onLogin={signIn} externalError={authError} />
+  if (authState === 'login') return <Login onLogin={signIn} externalError={authError} memoryBoundaryNotice={memoryBoundaryNotice} />
   if (authState === 'checking') return <Box component="main" className="shell" aria-busy="true"><Paper className="notice" role="status" aria-live="polite" sx={{ mt: 3, p: 3 }}><Typography component="h1" variant="h4">Checking your session…</Typography><Typography>Loading portfolio securely.</Typography></Paper></Box>
 
   const navTabs: Array<{ value: typeof view; label: string; ariaLabel?: string }> = [
@@ -994,7 +999,7 @@ export default function App() {
       {authError && <Paper className="notice error" role="alert" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Session error</Typography><Typography>{authError}</Typography></Paper>}
       {state === 'error' && <Paper className="notice error" role="alert" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Unable to load portfolio</Typography><Typography>{error}</Typography><Button type="button" onClick={() => load()}>Try again</Button></Paper>}
 
-      {state === 'ready' && data && (
+      {(state === 'ready' || state === 'loading' || state === 'error') && data && (
         <>
           <Box id="portfolio-content" tabIndex={-1} />
           {view !== 'overview' && <Typography component="h1" className="visually-hidden">{data.portfolio.name}</Typography>}
@@ -1010,7 +1015,13 @@ export default function App() {
 
           {view === 'overview' && <AllocationSection data={data} />}
 
-          {view === 'holdings' && <HoldingMutations portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active sessionKey={String(authGeneration.current)} scopeKey={`${data.portfolio.id}:${currency}:${view}`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized}>
+          {<HoldingMutations visible={view === 'holdings'} portfolioId={data.portfolio.id} overviewETag={overviewETag} csrfToken={csrfToken.current} holdings={data.holdings} active sessionKey={String(authGeneration.current)} scopeKey={`${data.portfolio.id}:${currency}:holdings`} onRefresh={refreshHoldingOverview} onUnauthorized={handleThesisUnauthorized} memoryBoundaryNotice={memoryBoundaryNotice} onShowReceiptHolding={(holdingId) => {
+            setFilter('')
+            window.setTimeout(() => {
+              const row = Array.from(document.querySelectorAll<HTMLElement>('[data-holding-lot-id]')).find((candidate) => candidate.dataset.holdingLotId === holdingId)
+              row?.focus()
+            }, 0)
+          }}>
             {(holdingActions) => <Paper component="section" className="table-card holdings-surface" aria-labelledby="holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', overflow: 'hidden' }}>
             <Stack className="section-heading" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between', p: { xs: 2, sm: 2.5 } }}><Box><Typography component="span" className="eyebrow">Canonical active lots</Typography><Typography component="h2" id="holdings-title" variant="h5" sx={{ mt: .5, mb: 0 }}>Holdings</Typography></Box><Typography color="text.secondary">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</Typography></Stack>
             <TableContainer className="table-scroll" sx={{ maxWidth: '100%', overflowX: 'auto' }}>
@@ -1021,7 +1032,7 @@ export default function App() {
                   <TableCell component="th" scope="col">Source unit cost</TableCell>{sortHeader('Cost basis', 'cost_basis')}{sortHeader('Latest price', 'latest_price')}{sortHeader('Latest market value', 'latest_value')}{sortHeader('Unrealised P/L', 'unrealised_pnl')}{sortHeader('Reporting value', 'reporting_value')}{sortHeader('Freshness', 'freshness')}
                   <TableCell component="th" scope="col">Broker / date</TableCell><TableCell component="th" scope="col"><span className="visually-hidden">Holding actions</span></TableCell>
                 </TableRow></TableHead>
-                <TableBody>{visibleHoldings.map((holding) => <TableRow key={holding.lot_id} hover>
+                <TableBody>{visibleHoldings.map((holding) => <TableRow key={holding.lot_id} hover tabIndex={-1} data-holding-lot-id={holding.lot_id}>
                     <TableCell component="th" scope="row"><strong>{holding.symbol}</strong><span className="subline">{holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'} · lot {holding.lot_id.slice(-8)}</span></TableCell>
                     <TableCell className="numeric">{holding.quantity}</TableCell><TableCell>{holding.currency}</TableCell><TableCell className="numeric">{formatDecimalForDisplay(holding.unit_cost)}</TableCell><TableCell className="numeric">{formatDecimalForDisplay(holding.cost_basis)}</TableCell><TableCell className="numeric">{latestPriceCell(holding)}</TableCell><TableCell className="numeric">{latestMarketValueCell(holding)}</TableCell><TableCell className="numeric">{unrealisedPnLCell(holding)}</TableCell><TableCell className="numeric">{data.snapshot.complete ? formatDecimalForDisplay(holding.reporting_value) : 'Withheld'}</TableCell><TableCell><Chip size="small" className={`flag ${qualityClass(holding)}`} label={qualityLabel(holding)} />{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</TableCell>
                     <TableCell>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><Button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`} size="small">Open thesis</Button><Button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`} size="small">View reviews</Button></TableCell>
