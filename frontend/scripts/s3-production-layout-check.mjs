@@ -53,9 +53,34 @@ async function waitFor(expression, timeout = 5000) {
   }
   throw new Error(`Timed out waiting for ${expression}`)
 }
+async function settle() {
+  await new Promise((resolve) => setTimeout(resolve, 75))
+}
 async function activateTab(label) {
   await evaluate(`(() => { const tab = [...document.querySelectorAll('[role="tab"]')].find((node) => node.textContent?.includes(${JSON.stringify(label)})); tab?.click(); return Boolean(tab); })()`)
   await waitFor(`Boolean([...document.querySelectorAll('[role="tab"]')].find((node) => node.textContent?.includes(${JSON.stringify(label)}) && node.getAttribute('aria-selected') === 'true'))`)
+}
+async function keyPress(key, { shift = false, wait = true } = {}) {
+  const params = { key, code: key, modifiers: shift ? 8 : 0 }
+  const virtualKeyCodes = { Enter: 13, Tab: 9, ArrowRight: 39 }
+  if (virtualKeyCodes[key]) Object.assign(params, { windowsVirtualKeyCode: virtualKeyCodes[key], nativeVirtualKeyCode: virtualKeyCodes[key] })
+  await command('Input.dispatchKeyEvent', { type: 'keyDown', ...params })
+  await command('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
+  if (wait) await settle()
+}
+async function horizontalWheel(rect, deltaX) {
+  await command('Input.dispatchMouseEvent', {
+    type: 'mouseWheel',
+    x: rect.left + rect.width / 2,
+    y: Math.max(2, Math.min(rect.top + 20, 780)),
+    deltaX,
+    deltaY: 0,
+  })
+  await settle()
+}
+function assertRootWithinViewport(value, label) {
+  assert.ok(value.rootScrollWidth <= value.innerWidth + 1, `${label} root overflow: ${JSON.stringify(value)}`)
+  assert.ok(value.bodyScrollWidth <= value.innerWidth + 1, `${label} body overflow: ${JSON.stringify(value)}`)
 }
 
 await command('Page.enable')
@@ -69,157 +94,272 @@ await waitFor('Boolean([...document.querySelectorAll("button")].some((button) =>
 let shell = await evaluate(`(() => ({ innerWidth, clientWidth: document.documentElement.clientWidth, rootScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth, tabs: [...document.querySelectorAll('[role="tab"]')].length, signOut: [...document.querySelectorAll('button')].some((node) => node.textContent?.includes('Sign out')) }))()`)
 const desktopShell = shell
 assert.equal(shell.tabs, 6)
-assert.ok(shell.rootScrollWidth <= shell.innerWidth, JSON.stringify(shell))
-assert.ok(shell.bodyScrollWidth <= shell.innerWidth, JSON.stringify(shell))
+assertRootWithinViewport(shell, 'desktop shell')
 assert.equal(shell.signOut, true)
 
 for (const view of ['Overview', 'Holdings', 'Activity', 'Reviews', 'Market Data', 'Settings']) {
   await activateTab(view)
-  const viewCheck = await evaluate(`(() => ({ rootScrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, heading: document.querySelector('h1')?.id, skip: Boolean(document.querySelector('.skip-link')), selected: [...document.querySelectorAll('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true')?.textContent }))()`)
-  assert.ok(viewCheck.rootScrollWidth <= shell.innerWidth, `${view}: ${JSON.stringify(viewCheck)}`)
+  const viewCheck = await evaluate(`(() => ({ innerWidth, rootScrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, heading: document.querySelector('h1')?.id, skip: Boolean(document.querySelector('.skip-link')), selected: [...document.querySelectorAll('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true')?.textContent, bodyScrollWidth: document.body.scrollWidth }))()`)
+  assertRootWithinViewport(viewCheck, `desktop ${view}`)
   assert.ok(viewCheck.heading, `${view} has no current heading`)
   assert.equal(viewCheck.skip, true, `${view} has no skip link`)
   assert.equal(viewCheck.selected?.includes(view), true, `${view} selected tab mismatch`)
   await evaluate(`(() => { document.querySelector('.skip-link')?.focus(); return document.activeElement?.classList.contains('skip-link') })()`)
-  await command('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 })
-  await command('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 })
+  await keyPress('Enter', { wait: false })
   await waitFor('document.activeElement?.id === "portfolio-content"')
 }
 
 await command('Emulation.setDeviceMetricsOverride', { width: 320, height: 800, deviceScaleFactor: 1, mobile: false })
 await evaluate('window.dispatchEvent(new Event("resize")); true')
-await new Promise((resolve) => setTimeout(resolve, 100))
+await settle()
 shell = await evaluate(`(() => ({ innerWidth, clientWidth: document.documentElement.clientWidth, rootScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth, tabs: [...document.querySelectorAll('[role="tab"]')].length, signOut: [...document.querySelectorAll('button')].some((node) => node.textContent?.includes('Sign out')) }))()`)
 assert.equal(shell.tabs, 6)
-assert.ok(shell.rootScrollWidth <= shell.innerWidth, JSON.stringify(shell))
-assert.ok(shell.bodyScrollWidth <= shell.innerWidth, JSON.stringify(shell))
+assertRootWithinViewport(shell, '320px shell')
 assert.equal(shell.signOut, true)
 for (const view of ['Overview', 'Holdings', 'Activity', 'Reviews', 'Market Data', 'Settings']) {
   await activateTab(view)
-  const viewCheck = await evaluate(`(() => ({ rootScrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, heading: document.querySelector('h1')?.id, skip: Boolean(document.querySelector('.skip-link')), selected: [...document.querySelectorAll('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true')?.textContent }))()`)
-  assert.ok(viewCheck.rootScrollWidth <= shell.innerWidth, `${view}: ${JSON.stringify(viewCheck)}`)
+  const viewCheck = await evaluate(`(() => ({ innerWidth, rootScrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, heading: document.querySelector('h1')?.id, skip: Boolean(document.querySelector('.skip-link')), selected: [...document.querySelectorAll('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true')?.textContent, bodyScrollWidth: document.body.scrollWidth }))()`)
+  assertRootWithinViewport(viewCheck, `320px ${view}`)
   assert.ok(viewCheck.heading, `${view} has no current heading`)
   assert.equal(viewCheck.skip, true, `${view} has no skip link`)
   assert.equal(viewCheck.selected?.includes(view), true, `${view} selected tab mismatch`)
   await evaluate(`(() => { document.querySelector('.skip-link')?.focus(); return document.activeElement?.classList.contains('skip-link') })()`)
-  await command('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 })
-  await command('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 })
+  await keyPress('Enter', { wait: false })
   await waitFor('document.activeElement?.id === "portfolio-content"')
 }
 
+async function marketState() {
+  return evaluate(`(() => {
+    const region = document.querySelector('[role="region"][aria-label*="Market"]')
+    const table = region?.querySelector('table')
+    const rows = region ? [...region.querySelectorAll('tbody tr')] : []
+    const controls = rows.flatMap((row) => [...row.querySelectorAll('select, input')]).filter((control) => !control.disabled)
+    const identities = rows.map((row) => row.querySelector('.mapping-identity-cell'))
+    const rr = region?.getBoundingClientRect()
+    const rect = (node) => node?.getBoundingClientRect().toJSON()
+    const focused = document.activeElement
+    const focusedRect = focused && focused !== document.body ? focused.getBoundingClientRect() : null
+    const edgeHit = (x, y) => { const node = document.elementFromPoint(x, y); return node === focused || Boolean(node && focused?.contains(node)) }
+    return {
+      innerWidth,
+      rootScrollWidth: document.documentElement.scrollWidth,
+      bodyScrollWidth: document.body.scrollWidth,
+      scrollLeft: region?.scrollLeft,
+      region: rect(region),
+      table: rect(table),
+      scrollWidth: region?.scrollWidth,
+      clientWidth: region?.clientWidth,
+      rows: rows.length,
+      symbols: rows.map((row) => row.querySelector('.mapping-identity-cell strong')?.textContent?.trim()),
+      identities: identities.map(rect),
+      candidateRadios: rows.flatMap((row) => [...row.querySelectorAll('input[type="radio"]')]).length,
+      unavailableRows: rows.filter((row) => /unavailable/i.test(row.textContent || '')).length,
+      controls: controls.map((control) => ({ type: control.getAttribute('type') || control.tagName.toLowerCase(), label: control.getAttribute('aria-label') || '' })),
+      rowControlCounts: rows.map((row) => [...row.querySelectorAll('select, input')].filter((control) => !control.disabled).length),
+      focused: focused && focused !== document.body ? { index: controls.indexOf(focused), type: focused.getAttribute('type') || focused.tagName.toLowerCase(), rect: focusedRect?.toJSON(), identityRect: focused.closest('.mapping-identity-cell')?.getBoundingClientRect().toJSON(), leftHit: focusedRect ? edgeHit(focusedRect.left + 1, focusedRect.top + focusedRect.height / 2) : false, rightHit: focusedRect ? edgeHit(focusedRect.right - 1, focusedRect.top + focusedRect.height / 2) : false } : null,
+    }
+  })()`)
+}
+function assertMarketState(state, label, { requireRows = true } = {}) {
+  assertRootWithinViewport(state, label)
+  if (!requireRows) return
+  assert.equal(state.rows, 2, `${label}: expected both same-symbol mapping rows: ${JSON.stringify(state)}`)
+  assert.deepEqual(state.symbols, ['SAME', 'SAME'], `${label}: expected same-symbol fixture rows`)
+  assert.equal(state.candidateRadios, 1, `${label}: populated candidate path was not exercised`)
+  assert.equal(state.unavailableRows, 1, `${label}: unavailable discovery row was not exercised`)
+  assert.equal(state.controls.length, 11, `${label}: expected radio plus five mapping controls per row`)
+  assert.deepEqual(state.rowControlCounts, [6, 5], `${label}: expected populated-candidate and unavailable rows with all controls`)
+  assert.deepEqual(state.controls.reduce((counts, control) => ({ ...counts, [control.type]: (counts[control.type] || 0) + 1 }), {}), { radio: 1, select: 2, input: 6, checkbox: 2 }, `${label}: expected candidate/provider/field/confirmation control types`)
+  assert.ok(state.table.width <= state.scrollWidth + 1, `${label}: table exceeds scroll extent: ${JSON.stringify(state)}`)
+  if (state.scrollWidth > state.clientWidth + 1) assert.ok(Math.abs(state.table.width - state.scrollWidth) <= 2, `${label}: table/scroll extent diverged: ${JSON.stringify(state)}`)
+  assert.ok(state.identities.every((identity) => identity.left >= state.region.left - 1 && identity.right <= state.region.right + 1), `${label}: identity left the usable region: ${JSON.stringify(state)}`)
+}
+function assertFocusedMarket(state, expectedIndex, label) {
+  const focused = state.focused
+  assert.ok(focused, `${label}: no active mapping control`)
+  assert.equal(focused.index, expectedIndex, `${label}: native focus reached the wrong mapping control`)
+  assert.ok(focused.rect.left >= state.region.left - 1, `${label}: focused control left edge is clipped: ${JSON.stringify(state)}`)
+  assert.ok(focused.rect.right <= state.region.right + 1, `${label}: focused control right edge is clipped: ${JSON.stringify(state)}`)
+  if (focused.identityRect) {
+    assert.ok(focused.rect.left >= state.region.left - 1 && focused.rect.right <= focused.identityRect.right + 1, `${label}: candidate control escaped its sticky identity cell: ${JSON.stringify(state)}`)
+  } else {
+    assert.ok(focused.rect.left >= state.identities[0].right + 4, `${label}: focused control is hidden under sticky identity: ${JSON.stringify(state)}`)
+  }
+  assert.equal(focused.leftHit, true, `${label}: left edge hit test missed the focused control`)
+  assert.equal(focused.rightHit, true, `${label}: right edge hit test missed the focused control`)
+}
+async function nativeMarketScan(direction) {
+  const reverse = direction === 'reverse'
+  const expected = await evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Market"]'); const controls = [...region.querySelectorAll('tbody tr select, tbody tr input')].filter((control) => !control.disabled); region.scrollIntoView({ block: 'start' }); region.scrollLeft = 0; return controls.map((control) => ({ type: control.getAttribute('type') || control.tagName.toLowerCase(), label: control.getAttribute('aria-label') || '' })); })()`)
+  assert.equal(expected.length, 11, `Market ${direction} scan has an unexpected control count`)
+  if (direction === 'forward') {
+    await evaluate(`document.querySelector('[role="region"][aria-label*="Market"]')?.focus(); true`)
+    for (let index = 0; index < expected.length; index += 1) {
+      await keyPress('Tab')
+      const state = await marketState()
+      assertMarketState(state, `Market native forward ${index}`)
+      assertFocusedMarket(state, index, `Market native forward ${index}`)
+    }
+  } else {
+    await evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Market"]'); const controls = [...region.querySelectorAll('tbody tr select, tbody tr input')].filter((control) => !control.disabled); document.activeElement?.blur(); controls.at(-1)?.focus(); return Boolean(document.activeElement); })()`)
+    for (let index = expected.length - 1; index >= 0; index -= 1) {
+      const state = await marketState()
+      assertMarketState(state, `Market native reverse ${index}`)
+      assertFocusedMarket(state, index, `Market native reverse ${index}`)
+      if (index > 0) await keyPress('Tab', { shift: true })
+    }
+  }
+  return expected
+}
+async function marketHorizontalSweep(label) {
+  await evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Market"]'); region.scrollIntoView({ block: 'start' }); region.scrollLeft = 0; region.focus(); return region.getBoundingClientRect().toJSON(); })()`)
+  let state = await marketState()
+  assertMarketState(state, `${label} horizontal start`)
+  const maxScroll = state.scrollWidth ? state.scrollWidth - state.clientWidth : 0
+  const samples = [state.scrollLeft || 0, maxScroll]
+  if (maxScroll > 0) {
+    let last = state.scrollLeft || 0
+    for (let index = 0; index < 30; index += 1) {
+      await horizontalWheel(state.region, 450)
+      state = await marketState()
+      assertMarketState(state, `${label} wheel forward ${index}`)
+      if (!samples.includes(state.scrollLeft)) samples.push(state.scrollLeft)
+      if (state.scrollLeft === last) break
+      last = state.scrollLeft
+    }
+    assert.ok((state.scrollLeft || 0) >= maxScroll - 1, `${label}: native wheel did not reach actual max: ${JSON.stringify(state)}`)
+    for (let index = 0; index < 30; index += 1) {
+      await horizontalWheel(state.region, -450)
+      state = await marketState()
+      assertMarketState(state, `${label} wheel reverse ${index}`)
+      if (!samples.includes(state.scrollLeft)) samples.push(state.scrollLeft)
+      if (state.scrollLeft === 0) break
+    }
+    assert.equal(state.scrollLeft, 0, `${label}: native reverse wheel did not return to zero`)
+    await evaluate(`document.querySelector('[role="region"][aria-label*="Market"]')?.focus(); true`)
+    for (let index = 0; index < 4; index += 1) {
+      await keyPress('ArrowRight')
+      state = await marketState()
+      assertMarketState(state, `${label} keyboard horizontal ${index}`)
+    }
+  }
+  assert.ok(samples.length >= 1)
+  return { ...state, samples }
+}
+
+await command('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
+await evaluate('window.dispatchEvent(new Event("resize")); true')
+await settle()
 await activateTab('Market Data')
 await waitFor('Boolean(document.querySelector("[role=region][aria-label*=Market] tbody tr"))')
-const marketResult = await evaluate(`(async () => {
-  const region = document.querySelector('[role="region"][aria-label*="Market"]')
-  region.scrollIntoView({ block: 'start' })
-  await new Promise((resolve) => requestAnimationFrame(resolve))
-  const rows = [...region.querySelectorAll('tbody tr')]
-  const controls = rows.flatMap((row) => [...row.querySelectorAll('select, input')])
-  const identity = rows[0].querySelector('.mapping-identity-cell')
-  const regionRect = region.getBoundingClientRect()
-  const identityWidth = identity.getBoundingClientRect().width
-  const focusRects = []
-  for (const control of controls) {
-    control.focus()
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-    const rect = control.getBoundingClientRect()
-    const inIdentity = Boolean(control.closest('.mapping-identity-cell'))
-    focusRects.push({ left: rect.left, right: rect.right, regionLeft: regionRect.left, regionRight: regionRect.right, identityRight: regionRect.left + identityWidth, inIdentity })
-  }
-  region.scrollIntoView({ block: 'start' })
-  await new Promise((resolve) => requestAnimationFrame(resolve))
-  region.scrollLeft = 0
-  const startIdentity = identity.getBoundingClientRect()
-  const wheelTarget = region.getBoundingClientRect()
-  return { region: regionRect.toJSON(), startIdentity: startIdentity.toJSON(), wheelTarget: wheelTarget.toJSON(), identity: identity.getBoundingClientRect().toJSON(), scrollWidth: region.scrollWidth, rootScrollWidth: document.documentElement.scrollWidth, focusRects, farRight: null }
-})()`)
-assert.ok(marketResult.rootScrollWidth <= shell.innerWidth, JSON.stringify(marketResult))
-assert.ok(marketResult.scrollWidth > marketResult.region.width, JSON.stringify(marketResult))
-await command('Input.dispatchMouseEvent', { type: 'mouseWheel', x: marketResult.wheelTarget.left + marketResult.wheelTarget.width / 2, y: Math.min(marketResult.wheelTarget.top + 20, 780), deltaX: 2000, deltaY: 0 })
-await new Promise((resolve) => setTimeout(resolve, 100))
-const wheelResult = await evaluate(`(() => { const region=document.querySelector('[role="region"][aria-label*="Market"]'); const identity=region.querySelector('.mapping-identity-cell'); const rr=region.getBoundingClientRect(); const ir=identity.getBoundingClientRect(); return {scrollLeft:region.scrollLeft, region:rr.toJSON(), identity:ir.toJSON()}; })()`)
-assert.ok(wheelResult.scrollLeft > 0, JSON.stringify(wheelResult))
-assert.ok(wheelResult.identity.left >= wheelResult.region.left, JSON.stringify(wheelResult))
-assert.ok(wheelResult.identity.right <= wheelResult.region.right + 1, JSON.stringify(wheelResult))
+await waitFor('document.querySelectorAll("[role=region][aria-label*=Market] input[type=radio]").length === 1')
+const marketDesktop = await marketHorizontalSweep('desktop Market')
+await nativeMarketScan('forward')
+await nativeMarketScan('reverse')
+await command('Emulation.setDeviceMetricsOverride', { width: 320, height: 800, deviceScaleFactor: 1, mobile: false })
+await evaluate('window.dispatchEvent(new Event("resize")); true')
+await settle()
+await activateTab('Market Data')
+const market320 = await marketHorizontalSweep('320px Market')
+await nativeMarketScan('forward')
+await nativeMarketScan('reverse')
 const marketResultAfterWheel = await evaluate(`(async () => {
   const region = document.querySelector('[role="region"][aria-label*="Market"]')
   const rows = [...region.querySelectorAll('tbody tr')]
-  const identity = rows[0].querySelector('.mapping-identity-cell')
   region.scrollLeft = region.scrollWidth
-  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-  const endIdentity = identity.getBoundingClientRect()
-  const farRightControl = rows[0].querySelector('td:last-child input[type="checkbox"]')
+  const farRightControl = rows.at(-1)?.querySelector('td:last-child input[type="checkbox"]')
   farRightControl?.focus()
   await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-  const farRight = farRightControl?.getBoundingClientRect()
-  return { region: region.getBoundingClientRect().toJSON(), startIdentity: identity.getBoundingClientRect().toJSON(), identity: endIdentity.toJSON(), scrollWidth: region.scrollWidth, rootScrollWidth: document.documentElement.scrollWidth, focusRects: [], farRight: farRight?.toJSON() }
+  const identity = rows[0]?.querySelector('.mapping-identity-cell')
+  return { region: region.getBoundingClientRect().toJSON(), identity: identity?.getBoundingClientRect().toJSON(), farRight: farRightControl?.getBoundingClientRect().toJSON(), scrollLeft: region.scrollLeft, scrollWidth: region.scrollWidth, rootScrollWidth: document.documentElement.scrollWidth, innerWidth }
 })()`)
-assert.ok(marketResultAfterWheel.rootScrollWidth <= shell.innerWidth, JSON.stringify(marketResultAfterWheel))
-assert.ok(marketResultAfterWheel.farRight.left >= marketResultAfterWheel.identity.right + 4, JSON.stringify(marketResultAfterWheel))
-assert.ok(marketResultAfterWheel.farRight.right <= marketResultAfterWheel.region.right - 4, JSON.stringify(marketResultAfterWheel))
-for (const rect of marketResult.focusRects) {
-  if (rect.inIdentity) {
-    assert.ok(rect.left >= rect.regionLeft, JSON.stringify(rect))
-    assert.ok(rect.right <= rect.identityRight + 1, JSON.stringify(rect))
-  } else {
-    assert.ok(rect.left >= rect.identityRight + 4, JSON.stringify(rect))
-    assert.ok(rect.right <= rect.regionRight - 4, JSON.stringify(rect))
-  }
+assert.ok(marketResultAfterWheel.farRight, `Market far-right confirmation control is missing: ${JSON.stringify(marketResultAfterWheel)}`)
+assert.ok(marketResultAfterWheel.identity.left >= marketResultAfterWheel.region.left - 1 && marketResultAfterWheel.identity.right <= marketResultAfterWheel.region.right + 1, `Market identity left the region at max scroll: ${JSON.stringify(marketResultAfterWheel)}`)
+assert.ok(marketResultAfterWheel.farRight.left >= marketResultAfterWheel.identity.right + 4, `Market far-right control is under sticky identity: ${JSON.stringify(marketResultAfterWheel)}`)
+assert.ok(marketResultAfterWheel.farRight.left >= marketResultAfterWheel.region.left && marketResultAfterWheel.farRight.right <= marketResultAfterWheel.region.right, `Market far-right control is clipped at max scroll: ${JSON.stringify(marketResultAfterWheel)}`)
+
+async function holdingsState() {
+  return evaluate(`(() => {
+    const region = document.querySelector('[role="region"][aria-label*="Holdings"]')
+    const controls = [...region.querySelectorAll('button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])')].filter((control) => !control.disabled)
+    const identity = region.querySelector('.holding-identity-cell')
+    const focused = document.activeElement
+    const focusedRect = focused && focused !== document.body ? focused.getBoundingClientRect() : null
+    return { innerWidth, rootScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth, region: region.getBoundingClientRect().toJSON(), scrollWidth: region.scrollWidth, controls: controls.length, focused: focused && focused !== document.body ? { index: controls.indexOf(focused), rect: focusedRect?.toJSON(), inIdentity: Boolean(focused.closest('.holding-identity-cell')), identityRight: identity?.getBoundingClientRect().right, leftHit: focusedRect ? document.elementFromPoint(focusedRect.left + 1, focusedRect.top + focusedRect.height / 2) === focused : false, rightHit: focusedRect ? document.elementFromPoint(focusedRect.right - 1, focusedRect.top + focusedRect.height / 2) === focused : false } : null, identity: identity?.getBoundingClientRect().toJSON(), action: region.querySelector('.row-action-trigger')?.getBoundingClientRect().toJSON(), lotLabels: [...region.querySelectorAll('tbody tr .holding-identity-cell')].map((node) => node.textContent) }
+  })()`)
 }
-for (const identity of [marketResult.startIdentity, marketResultAfterWheel.identity]) {
-  assert.ok(identity.left >= marketResult.region.left, JSON.stringify(marketResult))
-  assert.ok(identity.right <= marketResult.region.right + 1, JSON.stringify(marketResult))
+async function nativeHoldingsScan(direction) {
+  const expected = await evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Holdings"]'); return [...region.querySelectorAll('button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])')].filter((control) => !control.disabled).length })()`)
+  assert.ok(expected > 0, `Holdings ${direction} scan has no controls`)
+  await evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Holdings"]'); region.scrollIntoView({ block: 'start' }); region.scrollLeft = ${direction === 'reverse' ? 'region.scrollWidth' : '0'}; const controls = [...region.querySelectorAll('button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])')].filter((control) => !control.disabled); if (${JSON.stringify(direction)} === 'reverse') controls.at(-1)?.focus(); else region.focus(); return controls.length; })()`)
+  const sequence = []
+  if (direction === 'forward') {
+    for (let index = 0; index < expected; index += 1) {
+      await keyPress('Tab')
+      const state = await holdingsState()
+      assert.equal(state.focused?.index, index, `Holdings forward native focus mismatch: ${JSON.stringify(state)}`)
+      assert.ok(state.focused.rect.left >= state.region.left - 1 && state.focused.rect.right <= state.region.right + 1, `Holdings forward focus clipped: ${JSON.stringify(state)}`)
+      if (!state.focused.inIdentity) assert.ok(state.focused.rect.left >= state.focused.identityRight + 4, `Holdings forward focus hidden under identity: ${JSON.stringify(state)}`)
+      assert.equal(state.focused.leftHit, true)
+      assert.equal(state.focused.rightHit, true)
+      sequence.push(state.focused.index)
+    }
+  } else {
+    for (let index = expected - 1; index >= 0; index -= 1) {
+      const state = await holdingsState()
+      assert.equal(state.focused?.index, index, `Holdings reverse native focus mismatch: ${JSON.stringify(state)}`)
+      assert.ok(state.focused.rect.left >= state.region.left - 1 && state.focused.rect.right <= state.region.right + 1, `Holdings reverse focus clipped: ${JSON.stringify(state)}`)
+      if (!state.focused.inIdentity) assert.ok(state.focused.rect.left >= state.focused.identityRight + 4, `Holdings reverse focus hidden under identity: ${JSON.stringify(state)}`)
+      assert.equal(state.focused.leftHit, true)
+      assert.equal(state.focused.rightHit, true)
+      sequence.push(state.focused.index)
+      if (index > 0) await keyPress('Tab', { shift: true })
+    }
+  }
+  return sequence
+}
+async function holdingsGeometry(label) {
+  await activateTab('Holdings')
+  await waitFor('Boolean(document.querySelector("[role=region][aria-label*=Holdings] tbody tr"))')
+  const state = await holdingsState()
+  assertRootWithinViewport(state, label)
+  assert.equal(state.lotLabels.length, 2, `${label}: expected two same-symbol lots`)
+  assert.notEqual(state.lotLabels[0], state.lotLabels[1], `${label}: same-symbol lot identity collapsed`)
+  await nativeHoldingsScan('forward')
+  await nativeHoldingsScan('reverse')
+  const result = await evaluate(`(async () => { const region=document.querySelector('[role="region"][aria-label*="Holdings"]'); const identity=region.querySelector('.holding-identity-cell'); region.scrollLeft=region.scrollWidth; const action=region.querySelector('.row-action-trigger'); action?.focus(); await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))); return { rootScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth, innerWidth, region: region.getBoundingClientRect().toJSON(), scrollWidth: region.scrollWidth, identity: identity.getBoundingClientRect().toJSON(), action: action?.getBoundingClientRect().toJSON(), lotLabels: [...region.querySelectorAll('tbody tr .holding-identity-cell')].map((node) => node.textContent) } })()`)
+  assertRootWithinViewport(result, label)
+  assert.ok(result.scrollWidth > result.region.width, `${label}: table is not horizontally bounded`)
+  assert.ok(result.action?.left >= result.identity.right + 4 && result.action.right <= result.region.right, `${label}: far-right action is not reachable: ${JSON.stringify(result)}`)
+  assert.ok(result.identity.left >= result.region.left - 1 && result.identity.right <= result.region.right + 1, `${label}: sticky identity left the region`)
+  return result
 }
 
-await activateTab('Holdings')
-await waitFor('Boolean(document.querySelector("[role=region][aria-label*=Holdings] tbody tr"))')
-const holdingsControlCount = await evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Holdings"]'); return [...region.querySelectorAll('button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])')].filter((control) => !control.disabled).length })()`)
-await evaluate(`document.querySelector('[role="region"][aria-label*="Holdings"]')?.focus(); true`)
-const holdingsFocus = []
-for (let index = 0; index < holdingsControlCount; index += 1) {
-  await command('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 })
-  await command('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 })
-  await new Promise((resolve) => setTimeout(resolve, 30))
-  const focused = await evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Holdings"]'); const control = document.activeElement; const rect = control?.getBoundingClientRect(); const regionRect = region.getBoundingClientRect(); return { inside: region.contains(control), inIdentity: Boolean(control?.closest('.holding-identity-cell')), label: control?.getAttribute('aria-label') || control?.textContent?.trim(), left: rect?.left, right: rect?.right, regionLeft: regionRect.left, regionRight: regionRect.right, identityRight: region.querySelector('.holding-identity-cell').getBoundingClientRect().right, scrollLeft: region.scrollLeft } })()`)
-  assert.equal(focused.inside, true, JSON.stringify(focused))
-  holdingsFocus.push(focused)
-}
-assert.equal(holdingsFocus.length, holdingsControlCount)
-assert.ok((await evaluate('document.documentElement.scrollWidth')) <= shell.innerWidth, JSON.stringify(holdingsFocus))
-for (const rect of holdingsFocus.filter((candidate) => !candidate.inIdentity)) {
-  assert.ok(rect.left >= rect.identityRight + 4, JSON.stringify(rect))
-  assert.ok(rect.right <= rect.regionRight - 4, JSON.stringify(rect))
-}
-const holdingsResult = await evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Holdings"]'); const identity = region.querySelector('.holding-identity-cell'); region.scrollLeft = region.scrollWidth; const action = region.querySelector('.row-action-trigger'); return { rootScrollWidth: document.documentElement.scrollWidth, region: region.getBoundingClientRect().toJSON(), scrollWidth: region.scrollWidth, identity: identity.getBoundingClientRect().toJSON(), action: action?.getBoundingClientRect().toJSON(), lotLabels: [...region.querySelectorAll('tbody tr .holding-identity-cell')].map((node) => node.textContent) } })()`)
-assert.ok(holdingsResult.rootScrollWidth <= shell.innerWidth, JSON.stringify(holdingsResult))
-assert.ok(holdingsResult.scrollWidth > holdingsResult.region.width, JSON.stringify(holdingsResult))
-assert.ok(holdingsResult.action?.right <= holdingsResult.region.right + 1, JSON.stringify(holdingsResult))
-assert.equal(holdingsResult.lotLabels.length, 2)
-assert.notEqual(holdingsResult.lotLabels[0], holdingsResult.lotLabels[1])
-await evaluate(`document.querySelector('.row-action-trigger')?.click(); true`)
-await waitFor('Boolean(document.querySelector("[role=menu]"))')
-const menuAtDesktopNarrow = await evaluate(`(() => { const paper = document.querySelector('.row-action-menu'); const rect = paper.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, viewport: { width: innerWidth, height: innerHeight } } })()`)
-for (const edge of ['left', 'top']) assert.ok(menuAtDesktopNarrow[edge] >= 0, JSON.stringify(menuAtDesktopNarrow))
-assert.ok(menuAtDesktopNarrow.right <= menuAtDesktopNarrow.viewport.width, JSON.stringify(menuAtDesktopNarrow))
-assert.ok(menuAtDesktopNarrow.bottom <= menuAtDesktopNarrow.viewport.height, JSON.stringify(menuAtDesktopNarrow))
+await command('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
+await evaluate('window.dispatchEvent(new Event("resize")); true')
+await settle()
+const holdingsDesktop = await holdingsGeometry('desktop Holdings')
 await command('Emulation.setDeviceMetricsOverride', { width: 320, height: 520, deviceScaleFactor: 1, mobile: false })
 await evaluate('window.dispatchEvent(new Event("resize")); true')
-await new Promise((resolve) => setTimeout(resolve, 75))
-const menuAfterResize = await evaluate(`(() => { const paper = document.querySelector('.row-action-menu'); const rect = paper.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, viewport: { width: innerWidth, height: innerHeight } } })()`)
-assert.ok(menuAfterResize.right <= menuAfterResize.viewport.width, JSON.stringify(menuAfterResize))
-assert.ok(menuAfterResize.bottom <= menuAfterResize.viewport.height, JSON.stringify(menuAfterResize))
+await settle()
+const holdingsNarrow = await holdingsGeometry('resized 320px Holdings')
+await evaluate(`document.querySelector('.row-action-trigger')?.click(); true`)
+await waitFor('Boolean(document.querySelector("[role=menu]"))')
+const menuAtNarrow = await evaluate(`(() => { const paper = document.querySelector('.row-action-menu'); const rect = paper.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, viewport: { width: innerWidth, height: innerHeight } } })()`)
+for (const edge of ['left', 'top']) assert.ok(menuAtNarrow[edge] >= 0, JSON.stringify(menuAtNarrow))
+assert.ok(menuAtNarrow.right <= menuAtNarrow.viewport.width, JSON.stringify(menuAtNarrow))
+assert.ok(menuAtNarrow.bottom <= menuAtNarrow.viewport.height, JSON.stringify(menuAtNarrow))
 await evaluate('window.scrollTo(0, 120); true')
-await new Promise((resolve) => setTimeout(resolve, 75))
+await settle()
 const menuAfterWindowScroll = await evaluate(`(() => { const paper = document.querySelector('.row-action-menu'); const rect = paper.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, viewport: { width: innerWidth, height: innerHeight }, rootScrollWidth: document.documentElement.scrollWidth } })()`)
 assert.ok(menuAfterWindowScroll.right <= menuAfterWindowScroll.viewport.width, JSON.stringify(menuAfterWindowScroll))
 assert.ok(menuAfterWindowScroll.bottom <= menuAfterWindowScroll.viewport.height, JSON.stringify(menuAfterWindowScroll))
 assert.ok(menuAfterWindowScroll.rootScrollWidth <= menuAfterWindowScroll.viewport.width, JSON.stringify(menuAfterWindowScroll))
 await evaluate('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); true')
 await command('Emulation.setPageScaleFactor', { pageScaleFactor: 2 })
-await new Promise((resolve) => setTimeout(resolve, 100))
+await settle()
 const reflow = await evaluate(`(() => ({ innerWidth, rootScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth, signOut: [...document.querySelectorAll('button')].some((node) => node.textContent?.includes('Sign out')), scale: visualViewport?.scale }))()`)
-assert.ok(reflow.rootScrollWidth <= reflow.innerWidth, JSON.stringify(reflow))
-assert.ok(reflow.bodyScrollWidth <= reflow.innerWidth, JSON.stringify(reflow))
+assertRootWithinViewport(reflow, '200% page-scale reflow')
 assert.equal(reflow.signOut, true)
-console.log(JSON.stringify({ desktop: desktopShell, viewport: shell, market: marketResult, marketAfterWheel: wheelResult, marketFarRight: marketResultAfterWheel, holdings: holdingsResult, holdingsFocus, reflow, menus: { atDesktopNarrow: menuAtDesktopNarrow, afterResize: menuAfterResize, afterWindowScroll: menuAfterWindowScroll } }, null, 2))
+console.log(JSON.stringify({ desktop: desktopShell, viewport: shell, market: { desktop: marketDesktop, narrow: market320, farRight: marketResultAfterWheel }, holdings: { desktop: holdingsDesktop, narrow: holdingsNarrow }, reflow, menus: { atNarrow: menuAtNarrow, afterWindowScroll: menuAfterWindowScroll } }, null, 2))
 socket.close()
