@@ -787,6 +787,30 @@ describe('Portfolio Dashboard', () => {
     expect(screen.getByText('0.125')).toBeTruthy()
   })
 
+  it('treats a stale complete snapshot as incomplete after holdings change', async () => {
+    const staleOverview: PortfolioOverview = {
+      ...completeOverview,
+      snapshot: { ...completeOverview.snapshot, state: 'stale', complete: true },
+      holdings: completeOverview.holdings.map((holding) => ({ ...holding, unrealised_pnl: '5', freshness: { status: 'fresh' } })),
+    }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => staleOverview } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    expect(screen.getByRole('heading', { name: 'Incomplete' })).toBeTruthy()
+    expect(screen.getByText(/Holdings changed after this snapshot; reporting values and P\/L are withheld/)).toBeTruthy()
+    expect(screen.getAllByText('Withheld')).toHaveLength(2)
+    expect(screen.getAllByText('Unavailable')).toHaveLength(2)
+    expect(screen.queryByText('100.5 MYR')).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Overview' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    expect(screen.getByText('Incomplete valuation')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Valuation is out of date' })).toBeTruthy()
+    expect(screen.getByText(/Reporting total and P\/L are intentionally withheld/)).toBeTruthy()
+    expect(screen.queryByText('No immutable snapshot yet')).toBeNull()
+    expect(screen.queryByText('100.5 MYR')).toBeNull()
+  })
+
   it('does not relabel stale reporting values during a currency transition', async () => {
     let resolveUSD: ((response: Response) => void) | undefined
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
