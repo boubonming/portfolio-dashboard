@@ -664,6 +664,72 @@ describe('HoldingMutations', () => {
     expect(document.activeElement).toBe(cancel)
   })
 
+  it('warns before leaving while an uncertain holding attempt is retained', async () => {
+    const props = baseProps()
+    let calls = 0
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>((_input, init) => {
+      calls += 1
+      if (calls === 1) return Promise.reject(new TypeError('connection lost'))
+      return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...receipt, idempotency_key: new Headers(init?.headers as HeadersInit).get('Idempotency-Key') }) } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'NEW'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/uncertainty/i))
+
+    const leaving = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(leaving)
+    expect(leaving.defaultPrevented).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same save' }))
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalledOnce())
+    const afterResolution = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(afterResolution)
+    expect(afterResolution.defaultPrevented).toBe(false)
+  })
+
+  it('describes a frozen Add dialog only with rendered recovery guidance', async () => {
+    const props = baseProps()
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: { code: 'idempotency_conflict' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+    for (const [label, value] of [['Symbol', 'CONFLICT'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/frozen/i))
+    const dialog = screen.getByRole('dialog')
+    const describedBy = dialog.getAttribute('aria-describedby')?.split(/\s+/) || []
+    expect(describedBy.length).toBeGreaterThan(0)
+    for (const id of describedBy) expect(document.getElementById(id)).toBeTruthy()
+    expect(within(dialog).getByText(/Reload or sign-out loses this in-memory recovery/i)).toBeTruthy()
+  })
+
+  it('retains frozen Archive guidance and the leave warning after safe dismissal', async () => {
+    const props = baseProps()
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: { code: 'idempotency_conflict' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<HoldingMutations {...props} />)
+    openArchive('lot-a')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/frozen/i))
+    const dialog = screen.getByRole('dialog')
+    const describedBy = dialog.getAttribute('aria-describedby')?.split(/\s+/) || []
+    for (const id of describedBy) expect(document.getElementById(id)).toBeTruthy()
+    expect(within(dialog).getByText(/Reload or sign-out loses this in-memory recovery/i)).toBeTruthy()
+
+    const leaving = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(leaving)
+    expect(leaving.defaultPrevented).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel archive' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByRole('alert').textContent).toMatch(/frozen/i)
+    const afterDismissal = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(afterDismissal)
+    expect(afterDismissal.defaultPrevented).toBe(true)
+  })
+
   it('tears down an archive modal before a changed portfolio and scope can reuse it', () => {
     const root = document.createElement('div')
     root.id = 'root'

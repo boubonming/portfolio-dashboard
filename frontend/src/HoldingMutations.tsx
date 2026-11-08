@@ -576,6 +576,16 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
     unresolvedRef.current = false
     setUnresolved(false)
   }
+  const attemptNeedsLeaveWarning = active && Boolean(createAttempt.current || removeAttempt.current) && (busy || hasUnresolvedAttempt || conflictFrozen)
+  useEffect(() => {
+    if (!attemptNeedsLeaveWarning) return
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warnBeforeUnload)
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload)
+  }, [active, attemptNeedsLeaveWarning, conflictFrozen, hasUnresolvedAttempt, portfolioId, scopeKey, sessionKey])
   const update = (field: keyof Draft, value: string) => {
     if (busyRef.current || !isAuthorityCurrent() || hasUnresolvedAttempt) return
     setDraft((current) => ({ ...current, [field]: value }))
@@ -958,6 +968,9 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       ? 'This holding attempt is frozen. Check Holdings and Activity before making a new change. Reload or sign-out loses this in-memory recovery; absence is not proof that no change was recorded.'
       : 'The holding change is unresolved; it may already be recorded. Check Holdings and Activity or retry the identical request. Reload or sign-out loses this in-memory recovery; absence is not proof that no change was recorded.'
   const memoryNotice = memoryBoundaryNotice || 'If an earlier holding change was not confirmed, check Holdings and Activity before adding it again. Reload or sign-out loses in-memory recovery; absence is not proof that no change was recorded.'
+  const dialogHasRecoveryGuidance = hasUnresolvedAttempt || conflictFrozen
+  const addDialogDescription = ['holding-form-description', dialogHasRecoveryGuidance ? 'holding-form-recovery' : '', error ? 'holding-form-error' : ''].filter(Boolean).join(' ')
+  const archiveDialogDescription = ['archive-dialog-description', dialogHasRecoveryGuidance ? 'archive-dialog-recovery' : '', error ? 'archive-dialog-error' : ''].filter(Boolean).join(' ')
   return <>
     <Paper component="section" ref={contentRef} onScrollCapture={repositionMenu} className="holding-mutation-card" aria-labelledby="manage-holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', p: { xs: 1.5, sm: 2.5 } }}>
       <Stack className="holding-actions-bar" direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between' }}><Box><Typography component="span" className="eyebrow">Holdings</Typography><Typography component="h2" className="visually-hidden" id="manage-holdings-title">Manage holdings</Typography></Box><Box className="holding-actions"><Button ref={addButtonRef} type="button" onClick={(event) => openForm(event.currentTarget)} disabled={busy || hasUnresolvedAttempt || writeBlocked} variant="contained" startIcon={<Add aria-hidden="true" />}>Add holding</Button></Box></Stack>
@@ -992,7 +1005,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       disableRestoreFocus
       transitionDuration={0}
       aria-labelledby="holding-form-title"
-      aria-describedby={error ? 'holding-form-description holding-form-recovery holding-form-error' : hasUnresolvedAttempt ? 'holding-form-description holding-form-recovery' : 'holding-form-description'}
+      aria-describedby={addDialogDescription}
       fullWidth
       maxWidth="md"
       slotProps={{ paper: { sx: { maxHeight: 'calc(100vh - 2rem)' } } }}
@@ -1001,7 +1014,7 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
         <DialogTitle id="holding-form-title" ref={focusFormHeading} tabIndex={-1}>Add one holding</DialogTitle>
         <DialogContent dividers sx={{ display: 'grid', gap: 1.5 }}>
           <Typography id="holding-form-description" color="text.secondary">Use an existing portfolio instrument ID or define one new instrument. Financial values stay as exact text.</Typography>
-          {hasUnresolvedAttempt && <Alert id="holding-form-recovery" severity="warning" role="status">{unresolvedCopy}</Alert>}
+          {dialogHasRecoveryGuidance && <Alert id="holding-form-recovery" severity="warning" role="status">{unresolvedCopy}</Alert>}
           <FormControl component="fieldset" variant="standard">
             <Typography component="legend" sx={{ fontWeight: 700 }}>Instrument mode</Typography>
             <FormHelperText id="instrument-mode-help">Existing mode uses an immutable instrument ID. Inline mode creates one new instrument identity; Symbol is display and market-data text, never the identity.</FormHelperText>
@@ -1026,12 +1039,12 @@ export default function HoldingMutations({ portfolioId, overviewETag, csrfToken,
       disableRestoreFocus
       transitionDuration={0}
       aria-labelledby="archive-dialog-title"
-      aria-describedby={error ? 'archive-dialog-description archive-dialog-recovery archive-dialog-error' : hasUnresolvedAttempt ? 'archive-dialog-description archive-dialog-recovery' : 'archive-dialog-description'}
+      aria-describedby={archiveDialogDescription}
       fullWidth
       maxWidth="sm"
     >
       <DialogTitle id="archive-dialog-title" ref={focusArchiveHeading} tabIndex={-1}>Archive {archiveLot.symbol} holding?</DialogTitle>
-      <DialogContent dividers><Typography id="archive-dialog-description">You are archiving <strong>{holdingDisplayLabel(archiveLot)}</strong>. This is a logical removal only; it does not sell, trade, or permanently delete the holding. Its financial history, reviews, thesis and audit records remain preserved.</Typography>{hasUnresolvedAttempt && <Alert id="archive-dialog-recovery" severity="warning" role="status" sx={{ mt: 1 }}>{unresolvedCopy}</Alert>}<Typography color="text.secondary" sx={{ mt: 1 }} title={archiveLot.lot_id}>Lot ID: {shortenedLotID(archiveLot.lot_id)} <span className="visually-hidden">Full lot ID: {archiveLot.lot_id}</span></Typography>{error && <Alert ref={archiveErrorRef} id="archive-dialog-error" severity="error" role="alert" aria-live="assertive" tabIndex={-1} sx={{ mt: 1 }}>{error}</Alert>}</DialogContent>
+      <DialogContent dividers><Typography id="archive-dialog-description">You are archiving <strong>{holdingDisplayLabel(archiveLot)}</strong>. This is a logical removal only; it does not sell, trade, or permanently delete the holding. Its financial history, reviews, thesis and audit records remain preserved.</Typography>{dialogHasRecoveryGuidance && <Alert id="archive-dialog-recovery" severity="warning" role="status" sx={{ mt: 1 }}>{unresolvedCopy}</Alert>}<Typography color="text.secondary" sx={{ mt: 1 }} title={archiveLot.lot_id}>Lot ID: {shortenedLotID(archiveLot.lot_id)} <span className="visually-hidden">Full lot ID: {archiveLot.lot_id}</span></Typography>{error && <Alert ref={archiveErrorRef} id="archive-dialog-error" severity="error" role="alert" aria-live="assertive" tabIndex={-1} sx={{ mt: 1 }}>{error}</Alert>}</DialogContent>
       <DialogActions><Button type="button" variant="contained" onClick={confirmArchive} disabled={busy || writeBlocked || conflictFrozen || (!mutationETagValid && !removeAttempt.current)} aria-busy={busy}>{busy ? 'Archiving holding…' : 'Confirm archive holding'}</Button>{hasUnresolvedAttempt && !conflictFrozen && removeAttempt.current && <Button type="button" variant="outlined" onClick={confirmArchive} disabled={busy} aria-busy={busy}>Retry same archive</Button>}<Button type="button" onClick={() => cancelArchive(archiveLot.lot_id)} disabled={busy}>Cancel archive</Button></DialogActions>
     </Dialog>}
   </>
