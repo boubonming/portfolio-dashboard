@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/boubonming/portfolio-dashboard/internal/auth"
+	"github.com/boubonming/portfolio-dashboard/internal/domain"
 	"github.com/boubonming/portfolio-dashboard/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -62,6 +65,40 @@ func TestMachineCanCreateAndReplayHoldingThroughMutationRoute(t *testing.T) {
 	if first.Header().Get("Location") == "" || first.Header().Get("ETag") != `"portfolio-api-1"` {
 		t.Fatalf("headers location=%q etag=%q", first.Header().Get("Location"), first.Header().Get("ETag"))
 	}
+}
+
+func captureHoldingHistoryRows(t *testing.T, database *store.Store, query string, args ...any) []string {
+	t.Helper()
+	rows, err := database.DB.Query(query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make([]string, 0)
+	for rows.Next() {
+		values := make([]any, len(columns))
+		pointers := make([]any, len(columns))
+		for index := range values {
+			pointers[index] = &values[index]
+		}
+		if err := rows.Scan(pointers...); err != nil {
+			t.Fatal(err)
+		}
+		parts := make([]string, len(columns))
+		for index, column := range columns {
+			parts[index] = fmt.Sprintf("%s=%#v", column, values[index])
+		}
+		result = append(result, strings.Join(parts, ";"))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func TestHoldingMutationLostResponseReplayPreservesSnapshotReviewThesisAndActivity(t *testing.T) {
@@ -124,10 +161,54 @@ func TestHoldingMutationLostResponseReplayPreservesSnapshotReviewThesisAndActivi
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandlerWithAuth(database, auth.Config{Username: "fixture-user", PasswordHash: string(hash), SessionSecret: fixtureSessionSecret(), PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour, Machine: auth.MachineConfig{PrincipalID: "lost-response-machine", PortfolioID: "portfolio-api", BearerSecret: secret, PortfolioRead: true, HoldingsWrite: true}})
+	handler, err := NewHandlerWithAuth(database, auth.Config{Username: "fixture-user", PasswordHash: string(hash), SessionSecret: fixtureSessionSecret(), PublicOrigin: "https://example.test", CookieSecure: true, SessionTTL: time.Hour, Machine: auth.MachineConfig{PrincipalID: "lost-response-machine", PortfolioID: "portfolio-api", BearerSecret: secret, PortfolioRead: true, ReviewsWrite: true, HoldingsWrite: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	reviewSnapshot, err := database.ReviewSnapshot(ctx, "portfolio-api", snapshot.SnapshotID, false)
+	if err != nil || len(reviewSnapshot.Holdings) == 0 {
+		t.Fatalf("review snapshot=%+v err=%v", reviewSnapshot, err)
+	}
+	submission := domain.ReviewSubmission{
+		SnapshotID: snapshot.SnapshotID, CalculationVersion: snapshot.CalculationVersion,
+		Scope:  domain.ReviewScope{Type: "holding", HoldingIDs: []string{"lot-api"}, InstrumentIDs: []string{"instrument-api"}},
+		Status: "complete", Recommendation: "hold", Rationale: "Preserve this authoritative review", Risks: []string{"history risk"},
+		Counterarguments: []string{"history counterargument"}, Conditions: []string{"history condition"}, ModelOpinion: "Preserve this model opinion",
+		SourcedFacts: []domain.SourcedFact{{Statement: "Historical fact", EvidenceIDs: []string{"history-evidence"}}},
+		Evidence:     []domain.ReviewEvidence{{EvidenceID: "history-evidence", URL: "https://example.test/history", Title: "Historical source", AccessedAt: timestamp, Availability: "available", Freshness: "current", Excerpt: "Historical evidence"}},
+		Model:        domain.ModelProvenance{Provider: "local", Model: "s1-test-model", Version: "1", Runtime: "hermes-environment"}, GeneratedAt: timestamp,
+	}
+	fingerprint, err := store.ReviewFingerprint(submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advisoryReview, _, err := database.SubmitAdvisoryReview(ctx, auth.MachinePrincipal{PrincipalID: "lost-response-machine", PortfolioID: "portfolio-api", PortfolioRead: true, ReviewsWrite: true}, "portfolio-api", "history-review-key-000001", fingerprint, submission)
+	if err != nil {
+		t.Fatalf("authoritative review=%v", err)
+	}
+	reviewID := advisoryReview.ReviewID
+	historyRows := map[string][]string{
+		"snapshots":                              captureHoldingHistoryRows(t, database, `SELECT * FROM snapshots WHERE id=?`, snapshot.SnapshotID),
+		"review_snapshots":                       captureHoldingHistoryRows(t, database, `SELECT * FROM review_snapshots WHERE portfolio_id=? AND snapshot_id=?`, "portfolio-api", snapshot.SnapshotID),
+		"snapshot_holdings":                      captureHoldingHistoryRows(t, database, `SELECT * FROM snapshot_holdings WHERE portfolio_id=? AND snapshot_id=? AND holding_id=?`, "portfolio-api", snapshot.SnapshotID, "lot-api"),
+		"advisory_reviews":                       captureHoldingHistoryRows(t, database, `SELECT * FROM advisory_reviews WHERE id=?`, reviewID),
+		"review_targets":                         captureHoldingHistoryRows(t, database, `SELECT * FROM review_targets WHERE review_id=?`, reviewID),
+		"review_risks":                           captureHoldingHistoryRows(t, database, `SELECT * FROM review_risks WHERE review_id=?`, reviewID),
+		"review_counterarguments":                captureHoldingHistoryRows(t, database, `SELECT * FROM review_counterarguments WHERE review_id=?`, reviewID),
+		"review_conditions":                      captureHoldingHistoryRows(t, database, `SELECT * FROM review_conditions WHERE review_id=?`, reviewID),
+		"review_metrics":                         captureHoldingHistoryRows(t, database, `SELECT * FROM review_metrics WHERE review_id=?`, reviewID),
+		"review_evidence":                        captureHoldingHistoryRows(t, database, `SELECT * FROM review_evidence WHERE review_id=?`, reviewID),
+		"review_sourced_facts":                   captureHoldingHistoryRows(t, database, `SELECT * FROM review_sourced_facts WHERE review_id=?`, reviewID),
+		"review_fact_evidence":                   captureHoldingHistoryRows(t, database, `SELECT * FROM review_fact_evidence WHERE review_id=?`, reviewID),
+		"review_submission_permission_snapshots": captureHoldingHistoryRows(t, database, `SELECT * FROM review_submission_permission_snapshots WHERE review_id=?`, reviewID),
+		"review_idempotency":                     captureHoldingHistoryRows(t, database, `SELECT * FROM review_idempotency WHERE review_id=?`, reviewID),
+		"portfolio_theses":                       captureHoldingHistoryRows(t, database, `SELECT * FROM portfolio_theses WHERE id=?`, "thesis-preserved"),
+		"thesis_revisions":                       captureHoldingHistoryRows(t, database, `SELECT * FROM thesis_revisions WHERE thesis_id=?`, "thesis-preserved"),
+		"audit_event":                            captureHoldingHistoryRows(t, database, `SELECT * FROM audit_events WHERE id IN ('audit-preserved') OR entity_id=?`, reviewID),
+		"audit_event_portfolios":                 captureHoldingHistoryRows(t, database, `SELECT * FROM audit_event_portfolios WHERE audit_event_id IN ('audit-preserved') OR audit_event_id IN (SELECT id FROM audit_events WHERE entity_id=?)`, reviewID),
+		"activity_events":                        captureHoldingHistoryRows(t, database, `SELECT * FROM activity_events WHERE id='activity-preserved' OR entity_id=?`, reviewID),
+	}
+
 	request := func(method, target, body, key, etag string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, target, strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+secret)
@@ -188,25 +269,39 @@ func TestHoldingMutationLostResponseReplayPreservesSnapshotReviewThesisAndActivi
 		t.Fatalf("create replay counts lots=%d audits=%d activities=%d receipts=%d", lots, createAudits, createActivities, createReceipts)
 	}
 	removeKey := "lost-remove-key-000001"
-	firstRemove := request(http.MethodDelete, "/api/v1/portfolios/portfolio-api/holdings/"+created.Holding.HoldingID, "", removeKey, `"portfolio-api-1"`)
+	firstRemove := request(http.MethodDelete, "/api/v1/portfolios/portfolio-api/holdings/lot-api", "", removeKey, `"portfolio-api-1"`)
 	if firstRemove.Code != http.StatusOK {
 		t.Fatalf("first remove status=%d body=%s", firstRemove.Code, firstRemove.Body.String())
 	}
-	removeReplay := request(http.MethodDelete, "/api/v1/portfolios/portfolio-api/holdings/"+created.Holding.HoldingID, "", removeKey, `"portfolio-api-1"`)
-	if removeReplay.Code != http.StatusOK || removeReplay.Body.String() != firstRemove.Body.String() {
-		t.Fatalf("remove replay status=%d body=%s first=%s", removeReplay.Code, removeReplay.Body.String(), firstRemove.Body.String())
+	var removed struct {
+		Holding struct {
+			HoldingID string `json:"holding_id"`
+			Quantity  string `json:"quantity"`
+			UnitCost  string `json:"unit_cost"`
+			CostBasis string `json:"cost_basis"`
+		} `json:"holding"`
 	}
-	if err := database.DB.QueryRow(`SELECT lifecycle FROM lots WHERE id=?`, created.Holding.HoldingID).Scan(&body); err != nil {
+	if err := json.Unmarshal(firstRemove.Body.Bytes(), &removed); err != nil {
 		t.Fatal(err)
 	}
-	if body != "removed" {
-		t.Fatalf("replayed archive lifecycle=%q", body)
+	if removed.Holding.HoldingID != "lot-api" || removed.Holding.Quantity != "0.125" || removed.Holding.UnitCost != "1.20" || removed.Holding.CostBasis != "0.15" {
+		t.Fatalf("archive receipt=%+v", removed)
+	}
+	removeReplay := request(http.MethodDelete, "/api/v1/portfolios/portfolio-api/holdings/lot-api", "", removeKey, `"portfolio-api-1"`)
+	if removeReplay.Code != http.StatusOK || removeReplay.Body.String() != firstRemove.Body.String() {
+		t.Fatalf("remove replay status=%d body=%s first=%s", removeReplay.Code, removeReplay.Body.String(), firstRemove.Body.String())
 	}
 	if err := database.DB.QueryRow(`SELECT lifecycle FROM lots WHERE id='lot-api'`).Scan(&body); err != nil {
 		t.Fatal(err)
 	}
+	if body != "removed" {
+		t.Fatalf("replayed history-bearing archive lifecycle=%q", body)
+	}
+	if err := database.DB.QueryRow(`SELECT lifecycle FROM lots WHERE id=?`, created.Holding.HoldingID).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
 	if body != "active" {
-		t.Fatalf("same-symbol fixture lot lifecycle=%q", body)
+		t.Fatalf("same-symbol created lot lifecycle=%q", body)
 	}
 	var removeAudits, removeActivities, removeReceipts int
 	for query, destination := range map[string]*int{
@@ -243,6 +338,32 @@ func TestHoldingMutationLostResponseReplayPreservesSnapshotReviewThesisAndActivi
 	}
 	if snapshotPayload == "" || reviewPayload == "" || thesisSummary == "" || auditPayload == "" || activitySummary == "" || gotSnapshotPayload != snapshotPayload || gotReviewPayload != reviewPayload || gotThesisSummary != thesisSummary || gotAuditPayload != auditPayload || gotActivitySummary != activitySummary {
 		t.Fatal("historical snapshot, review, thesis, audit, or activity changed or was empty during replay")
+	}
+	afterHistoryRows := map[string][]string{
+		"snapshots":                              captureHoldingHistoryRows(t, database, `SELECT * FROM snapshots WHERE id=?`, snapshot.SnapshotID),
+		"review_snapshots":                       captureHoldingHistoryRows(t, database, `SELECT * FROM review_snapshots WHERE portfolio_id=? AND snapshot_id=?`, "portfolio-api", snapshot.SnapshotID),
+		"snapshot_holdings":                      captureHoldingHistoryRows(t, database, `SELECT * FROM snapshot_holdings WHERE portfolio_id=? AND snapshot_id=? AND holding_id=?`, "portfolio-api", snapshot.SnapshotID, "lot-api"),
+		"advisory_reviews":                       captureHoldingHistoryRows(t, database, `SELECT * FROM advisory_reviews WHERE id=?`, reviewID),
+		"review_targets":                         captureHoldingHistoryRows(t, database, `SELECT * FROM review_targets WHERE review_id=?`, reviewID),
+		"review_risks":                           captureHoldingHistoryRows(t, database, `SELECT * FROM review_risks WHERE review_id=?`, reviewID),
+		"review_counterarguments":                captureHoldingHistoryRows(t, database, `SELECT * FROM review_counterarguments WHERE review_id=?`, reviewID),
+		"review_conditions":                      captureHoldingHistoryRows(t, database, `SELECT * FROM review_conditions WHERE review_id=?`, reviewID),
+		"review_metrics":                         captureHoldingHistoryRows(t, database, `SELECT * FROM review_metrics WHERE review_id=?`, reviewID),
+		"review_evidence":                        captureHoldingHistoryRows(t, database, `SELECT * FROM review_evidence WHERE review_id=?`, reviewID),
+		"review_sourced_facts":                   captureHoldingHistoryRows(t, database, `SELECT * FROM review_sourced_facts WHERE review_id=?`, reviewID),
+		"review_fact_evidence":                   captureHoldingHistoryRows(t, database, `SELECT * FROM review_fact_evidence WHERE review_id=?`, reviewID),
+		"review_submission_permission_snapshots": captureHoldingHistoryRows(t, database, `SELECT * FROM review_submission_permission_snapshots WHERE review_id=?`, reviewID),
+		"review_idempotency":                     captureHoldingHistoryRows(t, database, `SELECT * FROM review_idempotency WHERE review_id=?`, reviewID),
+		"portfolio_theses":                       captureHoldingHistoryRows(t, database, `SELECT * FROM portfolio_theses WHERE id=?`, "thesis-preserved"),
+		"thesis_revisions":                       captureHoldingHistoryRows(t, database, `SELECT * FROM thesis_revisions WHERE thesis_id=?`, "thesis-preserved"),
+		"audit_event":                            captureHoldingHistoryRows(t, database, `SELECT * FROM audit_events WHERE id IN ('audit-preserved') OR entity_id=?`, reviewID),
+		"audit_event_portfolios":                 captureHoldingHistoryRows(t, database, `SELECT * FROM audit_event_portfolios WHERE audit_event_id IN ('audit-preserved') OR audit_event_id IN (SELECT id FROM audit_events WHERE entity_id=?)`, reviewID),
+		"activity_events":                        captureHoldingHistoryRows(t, database, `SELECT * FROM activity_events WHERE id='activity-preserved' OR entity_id=?`, reviewID),
+	}
+	for name, before := range historyRows {
+		if after := afterHistoryRows[name]; strings.Join(before, "\n") != strings.Join(after, "\n") {
+			t.Fatalf("historical %s rows changed before=%v after=%v", name, before, after)
+		}
 	}
 }
 

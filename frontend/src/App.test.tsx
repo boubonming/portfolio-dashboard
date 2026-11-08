@@ -2330,8 +2330,8 @@ describe('Portfolio Dashboard', () => {
   })
 
   it.each([
-    ['inline', 'network'], ['inline', 'server'], ['inline', 'malformed'], ['inline', 'mismatched'],
-    ['existing', 'network'], ['existing', 'server'], ['existing', 'malformed'], ['existing', 'mismatched'],
+    ['inline', 'network'], ['inline', 'server'], ['inline', 'malformed'], ['inline', 'unreadable'], ['inline', 'mismatched'],
+    ['existing', 'network'], ['existing', 'server'], ['existing', 'malformed'], ['existing', 'unreadable'], ['existing', 'mismatched'],
   ] as const)('retains an identical full-App %s create attempt after %s uncertainty and scope return', async (mode, failure) => {
     let postCalls = 0
     let overviewCalls = 0
@@ -2346,6 +2346,7 @@ describe('Portfolio Dashboard', () => {
         if (postCalls === 1) {
           if (failure === 'network') return Promise.reject(new TypeError('connection lost'))
           if (failure === 'server') return Promise.resolve(new Response(JSON.stringify({ error: { code: 'internal_error' } }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
+          if (failure === 'unreadable') return Promise.resolve(new Response('{"operation":', { status: 201, headers: { 'Content-Type': 'application/json' } }))
           if (failure === 'mismatched') return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ operation: 'create', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-late', instrument_id: 'instrument-new', symbol: 'NEW', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-late', activity_event_id: 'activity-late', idempotency_key: 'wrong-key-000000000000' }) } as Response)
           return Promise.resolve({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
         }
@@ -2393,7 +2394,7 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByText(/Holding added.*lot-late/i)).toBeTruthy())
   })
 
-  it.each(['network', 'server', 'malformed', 'mismatched'] as const)('retains an identical full-App archive attempt after %s uncertainty and blocks other lots', async (failure) => {
+  it.each(['network', 'server', 'malformed', 'unreadable', 'mismatched'] as const)('retains an identical full-App archive attempt after %s uncertainty and blocks other lots', async (failure) => {
     let overviewCalls = 0
     let deleteCalls = 0
     const archiveReceipt = { operation: 'remove', result: 'applied', holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'instrument-a', symbol: 'AAA', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'removed', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: '2026-01-03T12:00:00.000000000Z' }, portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null, actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-archive', activity_event_id: 'activity-archive', idempotency_key: '' }
@@ -2408,6 +2409,7 @@ describe('Portfolio Dashboard', () => {
         if (deleteCalls === 1) {
           if (failure === 'network') return Promise.reject(new TypeError('connection lost'))
           if (failure === 'server') return Promise.resolve(new Response(JSON.stringify({ error: { code: 'internal_error' } }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
+          if (failure === 'unreadable') return Promise.resolve(new Response('{"operation":', { status: 200, headers: { 'Content-Type': 'application/json' } }))
           if (failure === 'mismatched') return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({ ...archiveReceipt, idempotency_key: 'wrong-key-000000000000' }) } as Response)
           return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
         }
@@ -2446,68 +2448,78 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByText(/Holding archived.*lot-a/i)).toBeTruthy())
   })
 
-  it('aborts pending full-App holding writes on logout and ignores late responses', async () => {
-    let resolvePost: ((response: Response) => void) | undefined
-    let postCalls = 0
-    const fetchMock = authenticatedFetch((input, init) => {
-      const url = String(input)
-      if (url.includes('/overview')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
-      if (url.endsWith('/holdings') && init?.method === 'POST') {
-        postCalls += 1
-        return new Promise<Response>((resolve) => { resolvePost = resolve })
-      }
-      if (url.includes('/auth/logout')) return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({ authenticated: false }) } as Response)
-      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    render(<App />)
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
-    fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
-    for (const [label, value] of [['Symbol', 'LATE'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
-    fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
-    await waitFor(() => expect(postCalls).toBe(1))
-    fireEvent.click(document.querySelector('.sign-out') as HTMLElement)
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
-    resolvePost?.({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
-    await flushEffects()
-    expect(screen.queryByText(/Holding added/i)).toBeNull()
-    expect(screen.queryByText(/Retry same save/i)).toBeNull()
-    expect(screen.queryByText(/LATE/i)).toBeNull()
-    expect(fetchMock.mock.calls.filter(([input, requestInit]) => String(input).endsWith('/holdings') && requestInit?.method === 'POST')).toHaveLength(1)
-  })
-
-  it('expires a pending full-App holding attempt without accepting its late receipt', async () => {
-    vi.useFakeTimers()
+  it.each([
+    ['add', 'logout'], ['add', 'expiry'], ['archive', 'logout'], ['archive', 'expiry'],
+  ] as const)('aborts a pending full-App %s write on %s before accepting a late matching receipt', async (operation, authorityLoss) => {
+    if (authorityLoss === 'expiry') vi.useFakeTimers()
     try {
-      let resolvePost: ((response: Response) => void) | undefined
-      let postCalls = 0
-      const session = { ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: new Date(Date.now() + 1000).toISOString() }) } as Response
+      let resolveWrite: ((response: Response) => void) | undefined
+      let writeInit: RequestInit | undefined
+      let writeCalls = 0
+      const expiry = new Date(Date.now() + 1000).toISOString()
+      const validAddReceipt = {
+        operation: 'create', result: 'applied',
+        holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-late', instrument_id: 'instrument-new', symbol: 'LATE', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'active', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: null },
+        portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null,
+        actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-late', activity_event_id: 'activity-late',
+        idempotency_key: '',
+      }
+      const validArchiveReceipt = {
+        operation: 'remove', result: 'applied',
+        holding: { portfolio_id: 'portfolio-default', holding_id: 'lot-a', instrument_id: 'instrument-a', symbol: 'AAA', quantity: '2', unit_cost: '5', cost_basis: '10', currency: 'USD', account_id: null, acquisition_date: null, lifecycle: 'removed', created_at: '2026-01-02T12:00:00.000000000Z', removed_at: '2026-01-03T12:00:00.000000000Z' },
+        portfolio_revision: 8, snapshot_state: 'no_snapshot', current_snapshot_id: null,
+        actor: { category: 'browser_user', id: 'local-owner', permissions: ['portfolio:read'] }, audit_event_id: 'audit-archive', activity_event_id: 'activity-archive',
+        idempotency_key: '',
+      }
       const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input)
-        if (url.includes('/auth/session')) return Promise.resolve(session)
+        if (url.includes('/auth/session')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token', expires_at: expiry }) } as Response)
         if (url.includes('/overview')) return Promise.resolve({ ok: true, status: 200, headers: new Headers({ ETag: '"portfolio-default-7"' }), json: async () => completeOverview } as Response)
-        if (url.endsWith('/holdings') && init?.method === 'POST') {
-          postCalls += 1
-          return new Promise<Response>((resolve) => { resolvePost = resolve })
+        const isWrite = operation === 'add' ? url.endsWith('/holdings') && init?.method === 'POST' : url.endsWith('/holdings/lot-a') && init?.method === 'DELETE'
+        if (isWrite) {
+          writeCalls += 1
+          writeInit = init
+          return new Promise<Response>((resolve) => { resolveWrite = resolve })
         }
-        return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({ authenticated: false }) } as Response)
+        if (url.includes('/auth/logout')) return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({ authenticated: false }) } as Response)
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
       })
       vi.stubGlobal('fetch', fetchMock)
+      const waitForTest = authorityLoss === 'expiry' ? vi.waitFor : waitFor
       render(<App />)
-      await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
-      fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
-      for (const [label, value] of [['Symbol', 'EXPIRE'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
-      fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
-      await vi.waitFor(() => expect(postCalls).toBe(1))
-      await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve() })
-      await vi.waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
-      resolvePost?.({ ok: true, status: 201, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => ({}) } as Response)
-      await act(async () => { await Promise.resolve() })
-      expect(screen.queryByText(/Holding added/i)).toBeNull()
-      expect(screen.queryByRole('button', { name: /Retry same save/i })).toBeNull()
-      expect(fetchMock.mock.calls.filter(([input, requestInit]) => String(input).endsWith('/holdings') && requestInit?.method === 'POST')).toHaveLength(1)
+      await waitForTest(() => expect(screen.getByRole('button', { name: 'Add holding' })).toBeTruthy())
+      if (operation === 'add') {
+        fireEvent.click(screen.getByRole('button', { name: 'Add holding' }))
+        for (const [label, value] of [['Symbol', 'LATE'], ['Instrument currency', 'USD'], ['Quantity', '2'], ['Unit cost', '5'], ['Cost basis', '10'], ['Holding currency', 'USD']] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } })
+        fireEvent.click(screen.getByRole('button', { name: 'Create holding' }))
+      } else {
+        fireEvent.click(screen.getByRole('button', { name: 'Actions for AAA lot lot-a' }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Archive holding' }))
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm archive holding' }))
+      }
+      await waitForTest(() => expect(writeCalls).toBe(1))
+      const signal = writeInit?.signal as AbortSignal | undefined
+      expect(signal).toBeTruthy()
+      if (authorityLoss === 'logout') {
+        fireEvent.click(document.querySelector('.sign-out') as HTMLElement)
+      } else {
+        await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve() })
+      }
+      await waitForTest(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+      expect(signal?.aborted).toBe(true)
+      expect(resolveWrite).toBeTypeOf('function')
+      const receipt = operation === 'add' ? { ...validAddReceipt, idempotency_key: new Headers(writeInit?.headers as HeadersInit).get('Idempotency-Key') } : { ...validArchiveReceipt, idempotency_key: new Headers(writeInit?.headers as HeadersInit).get('Idempotency-Key') }
+      resolveWrite!({ ok: true, status: operation === 'add' ? 201 : 200, headers: new Headers({ ETag: '"portfolio-default-8"' }), json: async () => receipt } as Response)
+      await flushEffects()
+      expect(screen.queryByText(/Holding (added|archived)/i)).toBeNull()
+      expect(screen.queryByRole('button', { name: /Retry same (save|archive)/i })).toBeNull()
+      expect(screen.queryByText(/LATE/i)).toBeNull()
+      expect(fetchMock.mock.calls.filter(([input, requestInit]) => {
+        const candidate = String(input)
+        return operation === 'add' ? candidate.endsWith('/holdings') && requestInit?.method === 'POST' : candidate.endsWith('/holdings/lot-a') && requestInit?.method === 'DELETE'
+      })).toHaveLength(1)
     } finally {
-      vi.useRealTimers()
+      if (authorityLoss === 'expiry') vi.useRealTimers()
     }
   })
 })
