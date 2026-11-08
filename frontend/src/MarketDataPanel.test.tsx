@@ -2,7 +2,7 @@ import userEvent from '@testing-library/user-event'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import MarketDataPanel from './MarketDataPanel'
-import { hasMatchingDeclaration, installCommittedStyles } from './cssTestUtils'
+import { committedStyleRules, hasMatchingDeclaration, installCommittedStyles } from './cssTestUtils'
 
 const providers = [
   { name: 'coingecko', configured: true, public: true },
@@ -54,6 +54,18 @@ afterEach(() => {
 })
 
 describe('MarketDataPanel', () => {
+  it('bounds narrow mapping identity and controls so the complete focus target fits beside the sticky cell', () => {
+    const removeStyles = installCommittedStyles()
+    try {
+      const narrowRules = committedStyleRules()
+      expect(narrowRules.some(({ cssText }) => cssText.includes('.market-data-table .mapping-identity-cell') && cssText.includes('width: 6rem'))).toBe(true)
+      expect(narrowRules.some(({ cssText }) => cssText.includes('table-layout: fixed'))).toBe(true)
+      expect(narrowRules.some(({ cssText }) => cssText.includes('min-width: 7.5rem') && cssText.includes('max-width: 7.5rem') && cssText.includes('width: 7.5rem'))).toBe(true)
+    } finally {
+      removeStyles()
+    }
+  })
+
   it('binds real market-data controls and raw table cells to scoped legacy rules', async () => {
     const removeStyles = installCommittedStyles()
     const fetchMock = vi.fn(() => json(setup()))
@@ -70,6 +82,9 @@ describe('MarketDataPanel', () => {
       expect(hasMatchingDeclaration(save, 'opacity', '.65', 'disabled')).toBe(true)
       const tableCells = Array.from(document.querySelectorAll('.market-data-table th, .market-data-table td'))
       expect(tableCells.length).toBeGreaterThan(0)
+      const mappingsRegion = screen.getByRole('region', { name: 'Market data mappings table horizontal scroll region' })
+      expect(mappingsRegion).toHaveProperty('tabIndex', 0)
+      expect(mappingsRegion.querySelector('.mapping-identity-cell')).toBeTruthy()
       expect(tableCells.every((cell) => hasMatchingDeclaration(cell, 'border', '1px'))).toBe(true)
 
     } finally {
