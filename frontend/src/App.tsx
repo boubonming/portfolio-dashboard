@@ -178,6 +178,19 @@ export function formatDecimalForDisplay(value: string | undefined): string {
   return `${negative && !zero ? '-' : ''}${integer}${cents ? `.${cents}` : ''}`
 }
 
+// Money remains exact at the API boundary. Compact display rounds only for
+// readability and keeps a signed marker when a nonzero value would round to 0.
+export function formatMoneyForDisplay(value: string | undefined, currency: string, exact = false): string {
+  if (value === undefined || value.trim() === '') return '—'
+  const trimmed = value.trim()
+  if (exact) return `${trimmed} ${currency}`
+  const compact = formatDecimalForDisplay(trimmed)
+  const sign = compareDecimalStrings(trimmed, '0')
+  const magnitude = trimmed.replace(/^[+-]/, '')
+  if (sign !== 0 && compareDecimalStrings(magnitude, '0.01') < 0) return `${sign < 0 ? '−' : ''}<0.01 ${currency}`
+  return `${compact} ${currency}`
+}
+
 // Compare canonical decimal strings without Number, parseFloat, or lexical
 // ordering. It also safely handles the optional values used by incomplete data.
 export function compareDecimalStrings(left: string | undefined, right: string | undefined): number {
@@ -214,9 +227,9 @@ function newRefreshRequestKey() {
   return `refresh-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
-export function unrealisedPnLStatus(holding: Holding): PnLStatus {
+export function unrealisedPnLStatus(holding: Holding, snapshotCurrent = true): PnLStatus {
   const value = holding.unrealised_pnl
-  if (value === undefined || !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) || holding.freshness.status !== 'fresh') return 'unavailable'
+  if (!snapshotCurrent || value === undefined || !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) || holding.freshness.status !== 'fresh') return 'unavailable'
   const comparison = compareDecimalStrings(value, '0')
   return comparison > 0 ? 'gain' : comparison < 0 ? 'loss' : 'break-even'
 }
@@ -234,27 +247,52 @@ function directionMarker(status: Exclude<PnLStatus, 'unavailable'>) {
   return <><span className="direction-icon" aria-hidden="true"><Icon fontSize="inherit" /><span className="direction-glyph">{directionGlyph(status)}</span></span><span className="visually-hidden">{pnlStatusLabel(status)}</span></>
 }
 
-function unrealisedPnLCell(holding: Holding) {
-  const status = unrealisedPnLStatus(holding)
+function unrealisedPnLCell(holding: Holding, exactAmounts: boolean, snapshotCurrent: boolean) {
+  const status = unrealisedPnLStatus(holding, snapshotCurrent)
   if (status === 'unavailable') return <Box component="span" className="pnl-unavailable" sx={{ color: 'text.secondary' }}>Unavailable</Box>
-  return <Box component="span" className={`pnl-${status}`} sx={{ bgcolor: status === 'gain' ? 'rgba(22,77,67,.65)' : status === 'loss' ? 'rgba(101,44,53,.8)' : 'rgba(61,62,70,.8)', border: 1, borderColor: status === 'gain' ? 'primary.main' : status === 'loss' ? 'error.main' : 'text.secondary', borderRadius: 1, display: 'inline-block', px: .5, py: .25 }}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatDecimalForDisplay(holding.unrealised_pnl)} {holding.currency}</span></span></Box>
+  return <Box component="span" className={`pnl-${status}`} sx={{ bgcolor: status === 'gain' ? 'rgba(22,77,67,.65)' : status === 'loss' ? 'rgba(101,44,53,.8)' : 'rgba(61,62,70,.8)', border: 1, borderColor: status === 'gain' ? 'primary.main' : status === 'loss' ? 'error.main' : 'text.secondary', borderRadius: 1, display: 'inline-block', px: .5, py: .25 }}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatMoneyForDisplay(holding.unrealised_pnl, holding.currency, exactAmounts)}</span></span></Box>
 }
 
-function latestPriceCell(holding: Holding) {
-  const status = unrealisedPnLStatus(holding)
-  const latestPrice = holding.latest_price?.trim()
-  if (status === 'unavailable' || !latestPrice) return <span>{formatDecimalForDisplay(latestPrice)}</span>
-  return <Box component="span" className={`pnl-${status}`} sx={{ color: status === 'gain' ? 'success.light' : status === 'loss' ? 'error.light' : 'text.primary' }}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatDecimalForDisplay(latestPrice)}</span></span></Box>
+function latestPriceCell(holding: Holding, exactAmounts: boolean, snapshotCurrent: boolean) {
+  const status = unrealisedPnLStatus(holding, snapshotCurrent)
+  if (status === 'unavailable' || !holding.latest_price?.trim()) return <span>{formatMoneyForDisplay(holding.latest_price, holding.currency, exactAmounts)}</span>
+  return <Box component="span" className={`pnl-${status}`} sx={{ color: status === 'gain' ? 'success.light' : status === 'loss' ? 'error.light' : 'text.primary' }}><span className="directional-amount">{directionMarker(status)}<span className="pnl-amount">{formatMoneyForDisplay(holding.latest_price, holding.currency, exactAmounts)}</span></span></Box>
 }
 
-function latestMarketValueCell(holding: Holding) {
-  const latestValue = formatDecimalForDisplay(holding.latest_value)
-  return <span>{latestValue === '—' ? latestValue : `${latestValue} ${holding.currency}`}</span>
+function latestMarketValueCell(holding: Holding, exactAmounts: boolean) {
+  return <span>{formatMoneyForDisplay(holding.latest_value, holding.currency, exactAmounts)}</span>
 }
 
 function displayDate(value?: string) {
   if (!value) return '—'
   return value.replace('T', ' ').replace(/\.\d+Z$/, 'Z')
+}
+
+function displayUTC(value?: string) {
+  if (!value) return 'Not available'
+  const normalized = value.replace('T', ' ').replace(/\.\d+Z$/, '').replace(/Z$/, '')
+  return `${normalized} UTC`
+}
+
+function valuationLabel(state: PortfolioOverview['snapshot']['state']) {
+  return state === 'complete' ? 'Complete' : state === 'incomplete' || state === 'stale' ? 'Incomplete' : 'No valuation snapshot'
+}
+
+function ValuationContext({ data, selectedCurrency }: { data: PortfolioOverview; selectedCurrency: string }) {
+  const reportingCurrency = data.reporting_currency || selectedCurrency
+  const currencyPending = reportingCurrency.toUpperCase() !== selectedCurrency.toUpperCase()
+  const status = valuationLabel(data.snapshot.state)
+  const stale = data.snapshot.state === 'stale'
+  return <Paper component="section" className="valuation-context" aria-labelledby="holdings-valuation-title" variant="outlined" sx={{ mt: 3, p: { xs: 1.5, sm: 2 } }}>
+    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ justifyContent: 'space-between', alignItems: { xs: 'flex-start', sm: 'center' } }}>
+      <Box>
+        <Typography component="span" className="eyebrow">Valuation context</Typography>
+        <Typography component="h2" id="holdings-valuation-title" variant="h6" sx={{ mt: .25, mb: .25 }}>{status}</Typography>
+        <Typography color="text.secondary">As of {displayUTC(data.snapshot.as_of)} · Completeness describes valuation coverage, not wall-clock freshness.{stale ? ' Holdings changed after this snapshot; reporting values and P/L are withheld until a new valuation is available.' : ''}</Typography>
+      </Box>
+      <Typography className="reporting-context" color="text.secondary">Reporting values: {reportingCurrency}{currencyPending ? ` · Updating to ${selectedCurrency}; existing amounts remain labeled ${reportingCurrency}` : ''}</Typography>
+    </Stack>
+  </Paper>
 }
 
 export function safeCSVFilename(contentDisposition: string | null, currency: string) {
@@ -291,6 +329,11 @@ function qualityClass(holding: Holding) {
   if (holding.data_quality.some((flag) => flag.startsWith('invalid') || flag === 'future')) return 'quality-error'
   if (holding.data_quality.length || holding.freshness.status !== 'fresh') return 'quality-warning'
   return 'quality-ok'
+}
+
+function qualitySummary(holding: Holding) {
+  if (holding.data_quality.length) return 'Attention'
+  return holding.freshness.status || 'ok'
 }
 
 function CoveragePanel({ allocation, unavailable }: { allocation: Allocation; unavailable: boolean }) {
@@ -502,6 +545,7 @@ export default function App() {
   const [memoryBoundaryNotice, setMemoryBoundaryNotice] = useState('')
   const csrfToken = useRef<string | undefined>(undefined)
   const [filter, setFilter] = useState('')
+  const [exactAmounts, setExactAmounts] = useState(false)
   const [sortKey, setSortKey] = useState<SortKey>('symbol')
   const [sortDirection, setSortDirection] = useState<SortDirection>('ascending')
   const authControllerRef = useRef<AbortController | null>(null)
@@ -928,8 +972,8 @@ export default function App() {
       if (sortKey === 'symbol' || sortKey === 'currency') comparison = (left[sortKey] || '').localeCompare(right[sortKey] || '')
       else if (sortKey === 'freshness') comparison = (left.freshness.status || '').localeCompare(right.freshness.status || '')
       else {
-        const leftValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(left) === 'unavailable' ? undefined : left.unrealised_pnl) : left[sortKey]
-        const rightValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(right) === 'unavailable' ? undefined : right.unrealised_pnl) : right[sortKey]
+        const leftValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(left, data.snapshot.state !== 'stale') === 'unavailable' ? undefined : left.unrealised_pnl) : left[sortKey]
+        const rightValue = sortKey === 'unrealised_pnl' && data ? (unrealisedPnLStatus(right, data.snapshot.state !== 'stale') === 'unavailable' ? undefined : right.unrealised_pnl) : right[sortKey]
         comparison = compareDecimalStrings(leftValue, rightValue)
       }
       if (comparison === 0) comparison = left.lot_id.localeCompare(right.lot_id)
@@ -954,6 +998,10 @@ export default function App() {
   const sortHeader = (label: string, key: SortKey) => (
     <TableCell component="th" scope="col" sortDirection={sortKey === key ? (sortDirection === 'ascending' ? 'asc' : 'desc') : false} aria-sort={sortKey === key ? sortDirection : 'none'}>{sortButton(label, key)}</TableCell>
   )
+
+  const reportingCurrency = data?.reporting_currency || currency
+  const snapshotComplete = Boolean(data?.snapshot.complete && data.snapshot.state === 'complete')
+  const snapshotCurrent = data?.snapshot.state !== 'stale'
 
   if (authState === 'login') return <Login onLogin={signIn} externalError={authError} memoryBoundaryNotice={memoryBoundaryNotice} />
   if (authState === 'checking') return <Box component="main" className="shell" aria-busy="true"><Paper className="notice" role="status" aria-live="polite" sx={{ mt: 3, p: 3 }}><Typography component="h1" variant="h4">Checking your session…</Typography><Typography>Loading portfolio securely.</Typography></Paper></Box>
@@ -987,7 +1035,8 @@ export default function App() {
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} useFlexGap sx={{ flexWrap: 'wrap', alignItems: { xs: 'stretch', md: 'center' } }}>
           <FormControl size="small" sx={{ minWidth: 170 }}><InputLabel id="currency-label">Reporting currency</InputLabel><Select native labelId="currency-label" id="currency" inputProps={{ 'aria-label': 'Reporting currency' }} value={currency} label="Reporting currency" onChange={(event) => setCurrency(event.target.value)}><option value="MYR">MYR</option><option value="USD">USD</option><option value="SGD">SGD</option><option value="JPY">JPY</option></Select></FormControl>
           <TextField inputRef={filterRef} id="filter" label="Filter holdings" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Symbol, currency or flag" size="small" sx={{ minWidth: { md: 250 }, flex: 1 }} />
-          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}><Button type="button" onClick={downloadCSV} disabled={exportState === 'loading'} aria-busy={exportState === 'loading'} startIcon={<Download aria-hidden="true" />}>{exportState === 'loading' ? 'Downloading CSV…' : 'Download CSV'}</Button><Button type="button" onClick={refreshPrices} disabled={refreshState === 'loading'} aria-busy={refreshState === 'loading'} startIcon={<Refresh aria-hidden="true" />}>{refreshState === 'loading' ? 'Refreshing prices…' : 'Refresh prices'}</Button></Stack>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}><Button type="button" onClick={downloadCSV} disabled={exportState === 'loading'} aria-busy={exportState === 'loading'} startIcon={<Download aria-hidden="true" />}>{exportState === 'loading' ? 'Downloading CSV…' : 'Download CSV'}</Button><Button type="button" onClick={refreshPrices} disabled={refreshState === 'loading'} aria-busy={refreshState === 'loading'} startIcon={<Refresh aria-hidden="true" />}>{refreshState === 'loading' ? 'Refreshing prices…' : 'Refresh prices'}</Button><Button type="button" onClick={() => setExactAmounts((current) => !current)} aria-pressed={exactAmounts}>{exactAmounts ? 'Use compact amounts' : 'Show exact amounts'}</Button></Stack>
+          <Typography className="amount-display-help" color="text.secondary">Compact amounts are rounded to two decimals. Price direction compares with recorded cost, not daily return.</Typography>
           {exportError && <Box className="notice error" role="alert">{exportError} <Button type="button" onClick={downloadCSV} size="small">Retry download</Button></Box>}
           {refreshAnnouncement && <Box component="span" className={`refresh-inline-status refresh-${refreshState}`} role="status" aria-live="polite">{refreshAnnouncement}</Box>}
           {refreshError && <Box component="span" className="notice error" role={refreshState === 'error' ? 'alert' : 'status'}>{refreshError}</Box>}
@@ -1003,15 +1052,17 @@ export default function App() {
         <>
           <Box id="portfolio-content" tabIndex={-1} />
           {view !== 'overview' && <Typography component="h1" className="visually-hidden">{data.portfolio.name}</Typography>}
+          {view === 'holdings' && <ValuationContext data={data} selectedCurrency={currency} />}
           {view === 'overview' && <Card component="section" className="overview" aria-labelledby="overview-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider' }}><CardContent sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 1fr' }, alignItems: 'center', p: { xs: 2, sm: 2.5 } }}>
             <Box><Typography component="span" className="eyebrow">Overview</Typography><Typography component="h2" id="overview-title" variant="h4" sx={{ mt: .5 }}>{data.portfolio.name}</Typography><Typography color="text.secondary">Reporting in {data.reporting_currency}</Typography></Box>
-            <Chip className={`state-pill state-${data.snapshot.state}`} label={data.snapshot.state === 'complete' ? 'Complete valuation' : data.snapshot.state === 'incomplete' ? 'Incomplete valuation' : 'No snapshot'} sx={{ justifySelf: { md: 'start' } }} />
-            {data.snapshot.complete && data.snapshot.reporting_total && <Box className="total"><Typography color="text.secondary">Reporting total</Typography><Typography component="strong" variant="h5">{data.snapshot.reporting_total} {data.reporting_currency}</Typography></Box>}
+            <Chip className={`state-pill state-${data.snapshot.state}`} label={data.snapshot.state === 'complete' ? 'Complete valuation' : data.snapshot.state === 'incomplete' || data.snapshot.state === 'stale' ? 'Incomplete valuation' : 'No snapshot'} sx={{ justifySelf: { md: 'start' } }} />
+            {snapshotComplete && data.snapshot.reporting_total && <Box className="total"><Typography color="text.secondary">Reporting total</Typography><Typography component="strong" variant="h5">{data.snapshot.reporting_total} {data.reporting_currency}</Typography></Box>}
             <Box component="dl" className="snapshot-meta" sx={{ m: 0, pl: { md: 2 }, borderLeft: { md: 1 }, borderColor: 'divider' }}><Box><Typography component="dt" variant="caption" color="text.secondary">Snapshot as-of</Typography><Typography component="dd" sx={{ m: 0, mt: .25 }}>{displayDate(data.snapshot.as_of)}</Typography></Box><Box sx={{ mt: 1 }}><Typography component="dt" variant="caption" color="text.secondary">Version</Typography><Typography component="dd" sx={{ m: 0, mt: .25, overflowWrap: 'anywhere' }}>{data.snapshot.calculation_version || 'Not available'}</Typography></Box></Box>
           </CardContent></Card>}
 
           {view === 'overview' && data.snapshot.state === 'no_snapshot' && <Paper className="notice" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">No immutable snapshot yet</Typography><Typography>A snapshot is a frozen point-in-time valuation calculated from the current holdings plus dated quotes and FX rates. It does not place trades or change holdings. Earnings, value and allocation are withheld until the required market inputs exist and a snapshot is created.</Typography></Paper>}
           {view === 'overview' && data.snapshot.state === 'incomplete' && <Paper className="notice warning" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Valuation is incomplete</Typography><Typography>Reporting total is intentionally withheld. Missing, stale or invalid market dependencies must be resolved before this view can be complete.</Typography></Paper>}
+          {view === 'overview' && data.snapshot.state === 'stale' && <Paper className="notice warning" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Valuation is out of date</Typography><Typography>Holdings changed after this snapshot. Reporting total and P/L are intentionally withheld until a new valuation is available.</Typography></Paper>}
 
           {view === 'overview' && <AllocationSection data={data} />}
 
@@ -1024,22 +1075,24 @@ export default function App() {
           }}>
             {(holdingActions) => <Paper component="section" className="table-card holdings-surface" aria-labelledby="holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', overflow: 'hidden' }}>
             <Stack className="section-heading" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between', p: { xs: 2, sm: 2.5 } }}><Box><Typography component="span" className="eyebrow">Canonical active lots</Typography><Typography component="h2" id="holdings-title" variant="h5" sx={{ mt: .5, mb: 0 }}>Holdings</Typography></Box><Typography color="text.secondary">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</Typography></Stack>
+            <span className="visually-hidden" aria-live="polite">{visibleHoldings.length} holding{visibleHoldings.length === 1 ? '' : 's'} shown.</span>
             <TableContainer className="table-scroll" sx={{ maxWidth: '100%', overflowX: 'auto' }}>
               <Table stickyHeader aria-label="Holdings" sx={{ minWidth: 1250 }}>
                 <caption className="visually-hidden">Holdings</caption>
                 <TableHead><TableRow>
                   {sortHeader('Instrument', 'symbol')}{sortHeader('Quantity', 'quantity')}{sortHeader('Currency', 'currency')}
-                  <TableCell component="th" scope="col">Source unit cost</TableCell>{sortHeader('Cost basis', 'cost_basis')}{sortHeader('Latest price', 'latest_price')}{sortHeader('Latest market value', 'latest_value')}{sortHeader('Unrealised P/L', 'unrealised_pnl')}{sortHeader('Reporting value', 'reporting_value')}{sortHeader('Freshness', 'freshness')}
+                  <TableCell component="th" scope="col">Source unit cost</TableCell>{sortHeader('Cost basis', 'cost_basis')}{sortHeader('Latest price', 'latest_price')}{sortHeader('Latest market value', 'latest_value')}{sortHeader('Unrealised P/L', 'unrealised_pnl')}{sortHeader(`Reporting value (${reportingCurrency})`, 'reporting_value')}{sortHeader('Freshness', 'freshness')}
                   <TableCell component="th" scope="col">Broker / date</TableCell><TableCell component="th" scope="col"><span className="visually-hidden">Holding actions</span></TableCell>
                 </TableRow></TableHead>
                 <TableBody>{visibleHoldings.map((holding) => <TableRow key={holding.lot_id} hover tabIndex={-1} data-holding-lot-id={holding.lot_id}>
                     <TableCell component="th" scope="row"><strong>{holding.symbol}</strong><span className="subline">{holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'} · lot {holding.lot_id.slice(-8)}</span></TableCell>
-                    <TableCell className="numeric">{holding.quantity}</TableCell><TableCell>{holding.currency}</TableCell><TableCell className="numeric">{formatDecimalForDisplay(holding.unit_cost)}</TableCell><TableCell className="numeric">{formatDecimalForDisplay(holding.cost_basis)}</TableCell><TableCell className="numeric">{latestPriceCell(holding)}</TableCell><TableCell className="numeric">{latestMarketValueCell(holding)}</TableCell><TableCell className="numeric">{unrealisedPnLCell(holding)}</TableCell><TableCell className="numeric">{data.snapshot.complete ? formatDecimalForDisplay(holding.reporting_value) : 'Withheld'}</TableCell><TableCell><Chip size="small" className={`flag ${qualityClass(holding)}`} label={qualityLabel(holding)} />{holding.quote_source && <span className="subline">{holding.quote_source}</span>}</TableCell>
+                    <TableCell className="numeric">{holding.quantity}</TableCell><TableCell>{holding.currency}</TableCell><TableCell className="numeric">{formatMoneyForDisplay(holding.unit_cost, holding.currency, exactAmounts)}</TableCell><TableCell className="numeric">{formatMoneyForDisplay(holding.cost_basis, holding.currency, exactAmounts)}</TableCell><TableCell className="numeric">{latestPriceCell(holding, exactAmounts, snapshotCurrent)}</TableCell><TableCell className="numeric">{latestMarketValueCell(holding, exactAmounts)}</TableCell><TableCell className="numeric">{unrealisedPnLCell(holding, exactAmounts, snapshotCurrent)}</TableCell><TableCell className="numeric">{snapshotComplete ? formatMoneyForDisplay(holding.reporting_value, reportingCurrency, exactAmounts) : 'Withheld'}</TableCell><TableCell><Chip size="small" className={`flag ${qualityClass(holding)}`} label={qualitySummary(holding)} /><span className="subline">Source: {holding.quote_source || 'Unavailable'}</span><span className="subline">Market time: {holding.freshness.market_at ? displayUTC(holding.freshness.market_at) : 'Unavailable'}</span><details className="quality-details"><summary>Data details</summary><dl><div><dt>Freshness</dt><dd>{holding.freshness.status || 'Unavailable'}</dd></div><div><dt>Raw quality flags</dt><dd>{holding.data_quality.length ? holding.data_quality.join(', ') : 'None reported'}</dd></div></dl></details></TableCell>
                     <TableCell>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><Button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`} size="small">Open thesis</Button><Button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`} size="small">View reviews</Button></TableCell>
                     <TableCell>{holdingActions(holding)}</TableCell>
                 </TableRow>)}</TableBody>
               </Table>
-              {!visibleHoldings.length && <p className="empty">No holdings match this filter.</p>}
+              {!visibleHoldings.length && data.holdings.length === 0 && <Box className="empty empty-state"><Typography component="p">No holdings yet. Add your first holding to begin.</Typography></Box>}
+              {!visibleHoldings.length && data.holdings.length > 0 && <Box className="empty empty-state"><Typography component="p">No holdings match this filter.</Typography><Button type="button" onClick={() => setFilter('')}>Clear filter</Button></Box>}
             </TableContainer>
           </Paper>}
           </HoldingMutations>}

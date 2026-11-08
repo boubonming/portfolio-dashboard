@@ -209,9 +209,20 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .market-actions button:first-child { background: #164d43; font-weight: 700; }
 .market-refresh-status { border-top: 1px solid #41615d; margin-top: 1.25rem; padding-top: 1rem; }
 .market-refresh-status ul { line-height: 1.7; margin-bottom: 0; padding-left: 1.2rem; }
+.valuation-context { background: #172322; }
+.reporting-context { max-width: 34rem; overflow-wrap: anywhere; text-align: right; }
+.amount-display-help { flex-basis: 100%; font-size: .85rem; }
+.empty-state { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .75rem 1rem; justify-content: space-between; }
+.empty-state p { margin: 0; }
+.quality-details { font-size: .78rem; margin-top: .45rem; }
+.quality-details summary { color: #8be6d7; cursor: pointer; }
+.quality-details dl { display: grid; gap: .25rem; margin: .5rem 0 0; }
+.quality-details dt { color: #a9c1bd; }
+.quality-details dd { margin: 0; overflow-wrap: anywhere; }
 @media (max-width: 780px) {
   .allocation-visuals, .allocation-table-scroll { grid-template-columns: 1fr; }
   .coverage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .reporting-context { text-align: left; }
   .thesis-header { flex-direction: column; }
   .thesis-header > button { width: 100%; }
   .thesis-content-grid { grid-template-columns: 1fr; }
