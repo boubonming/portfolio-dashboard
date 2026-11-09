@@ -195,7 +195,7 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
         </div>
         <p className="muted" aria-label="Schedule source">Schedule source: {schedule.source} — {schedule.source === 'saved' ? 'Saved in the portfolio database.' : 'Using deployment bootstrap defaults until you save a portfolio setting.'} {schedule.source === 'environment' && 'Daily example: 0 5 * * * in Asia/Singapore.'}</p>
         <p className="muted" role="status" aria-live="polite" aria-label="Schedule runtime status">Schedule runtime status: {schedule.runtime_status}{schedule.effective ? ' (effective)' : ' (not effective)'}</p>
-        <p className="muted" aria-label="Schedule revision">Schedule revision: {schedule.revision} · ETag: {schedule.etag}</p>
+        <p className="muted schedule-revision" aria-label="Schedule revision">Schedule revision: {schedule.revision} · ETag: <span className="schedule-etag">{schedule.etag}</span></p>
         <button type="button" onClick={saveSchedule} disabled={scheduleSaving || schedule.degraded}>{scheduleSaving ? 'Saving schedule…' : 'Save schedule'}</button>
         {scheduleMessage && <p role="status" aria-live="polite">{scheduleMessage}</p>}
         {scheduleError && <p className="notice error" role="alert" aria-live="polite">{scheduleError} <button type="button" onClick={() => load()}>Reload</button></p>}

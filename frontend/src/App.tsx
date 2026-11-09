@@ -995,8 +995,8 @@ export default function App() {
     </TableSortLabel>
   )
 
-  const sortHeader = (label: string, key: SortKey) => (
-    <TableCell component="th" scope="col" sortDirection={sortKey === key ? (sortDirection === 'ascending' ? 'asc' : 'desc') : false} aria-sort={sortKey === key ? sortDirection : 'none'}>{sortButton(label, key)}</TableCell>
+  const sortHeader = (label: string, key: SortKey, className?: string) => (
+    <TableCell className={className} component="th" scope="col" sortDirection={sortKey === key ? (sortDirection === 'ascending' ? 'asc' : 'desc') : false} aria-sort={sortKey === key ? sortDirection : 'none'}>{sortButton(label, key)}</TableCell>
   )
 
   const reportingCurrency = data?.reporting_currency || currency
@@ -1010,17 +1010,19 @@ export default function App() {
     { value: 'overview', label: 'Overview' },
     { value: 'holdings', label: 'Holdings' },
     { value: 'activity', label: 'Activity' },
-    { value: 'reviews', label: 'Review', ariaLabel: 'Reviews' },
+    { value: 'reviews', label: 'Reviews', ariaLabel: 'Reviews' },
     { value: 'market', label: 'Market Data', ariaLabel: 'Market data' },
     { value: 'settings', label: 'Settings' },
   ]
+  const portfolioContentHeading = view === 'overview' ? 'Overview view' : data?.portfolio.name || `${navTabs.find((tab) => tab.value === view)?.label || 'Portfolio'} view`
 
   return (
     <Box component="main" className="shell" sx={{ maxWidth: 1800, mx: 'auto', px: { xs: 1.5, sm: 3, lg: 4 }, pb: 6, width: '100%' }}>
+      <Box component="a" className="skip-link" href="#portfolio-content">Skip to portfolio content</Box>
       <AppBar component="header" className="app-header" position="static" color="transparent">
-        <Toolbar variant="dense" disableGutters sx={{ gap: { xs: 1, sm: 2 }, flexWrap: { xs: 'wrap', md: 'nowrap' }, py: .5 }}>
-          <Box component="a" className="app-brand" href="#portfolio-content" aria-label="Portfolio Dashboard home" sx={{ color: 'text.primary', fontWeight: 800, textDecoration: 'none', whiteSpace: 'nowrap', mr: { md: 1 } }}>Portfolio Dashboard</Box>
-          <Box component="nav" className="view-nav" aria-label="Portfolio views" sx={{ flex: 1, minWidth: 0, order: { xs: 3, md: 0 }, width: { xs: '100%', md: 'auto' }, overflowX: 'auto' }}>
+        <Toolbar variant="dense" disableGutters sx={{ gap: { xs: 1, sm: 2 }, flexWrap: { xs: 'wrap', md: 'nowrap' }, py: .5, minWidth: 0 }}>
+          <Box component="a" className="app-brand" href="#portfolio-content" aria-label="Portfolio Dashboard home" sx={{ color: 'text.primary', fontWeight: 800, textDecoration: 'none', whiteSpace: { xs: 'normal', sm: 'nowrap' }, minWidth: 0, mr: { md: 1 } }}>Portfolio Dashboard</Box>
+          <Box component="nav" className="view-nav" aria-label="Portfolio views" sx={{ flex: { xs: '0 0 100%', md: 1 }, minWidth: 0, order: { xs: 3, md: 0 }, width: { xs: '100%', md: 'auto' }, overflowX: 'auto' }}>
             <Tabs value={view} onChange={(_event, nextView) => { if (nextView === 'reviews') setReviewsHoldingId(undefined); setView(nextView) }} selectionFollowsFocus variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile aria-label="Portfolio views" sx={{ minHeight: 40, '& .MuiTab-root': { minHeight: 40, minWidth: { xs: 92, sm: 108 }, px: { xs: 1.25, sm: 2 } } }}>
               {navTabs.map((tab) => <Tab key={tab.value} value={tab.value} label={tab.label} aria-label={tab.ariaLabel} aria-current={view === tab.value ? 'page' : undefined} />)}
             </Tabs>
@@ -1028,6 +1030,7 @@ export default function App() {
           <Button className="sign-out" type="button" onClick={logout} color="inherit" variant="outlined" size="small" sx={{ ml: 'auto', flexShrink: 0, whiteSpace: 'nowrap' }}>Sign out</Button>
         </Toolbar>
       </AppBar>
+      <Typography component="h1" id="portfolio-content" className="visually-hidden" tabIndex={-1}>{portfolioContentHeading}</Typography>
 
       {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} /> : <>
       {(view === 'overview' || view === 'holdings') && <>
@@ -1050,8 +1053,6 @@ export default function App() {
 
       {(state === 'ready' || state === 'loading' || state === 'error') && data && (
         <>
-          <Box id="portfolio-content" tabIndex={-1} />
-          {view !== 'overview' && <Typography component="h1" className="visually-hidden">{data.portfolio.name}</Typography>}
           {view === 'holdings' && <ValuationContext data={data} selectedCurrency={currency} />}
           {view === 'overview' && <Card component="section" className="overview" aria-labelledby="overview-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider' }}><CardContent sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 1fr' }, alignItems: 'center', p: { xs: 2, sm: 2.5 } }}>
             <Box><Typography component="span" className="eyebrow">Overview</Typography><Typography component="h2" id="overview-title" variant="h4" sx={{ mt: .5 }}>{data.portfolio.name}</Typography><Typography color="text.secondary">Reporting in {data.reporting_currency}</Typography></Box>
@@ -1073,19 +1074,40 @@ export default function App() {
               row?.focus()
             }, 0)
           }}>
-            {(holdingActions) => <Paper component="section" className="table-card holdings-surface" aria-labelledby="holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', overflow: 'hidden' }}>
+            {(holdingActions) => <Paper component="section" className="table-card holdings-surface" aria-labelledby="holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', minWidth: 0 }}>
             <Stack className="section-heading" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between', p: { xs: 2, sm: 2.5 } }}><Box><Typography component="span" className="eyebrow">Canonical active lots</Typography><Typography component="h2" id="holdings-title" variant="h5" sx={{ mt: .5, mb: 0 }}>Holdings</Typography></Box><Typography color="text.secondary">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</Typography></Stack>
             <span className="visually-hidden" aria-live="polite">{visibleHoldings.length} holding{visibleHoldings.length === 1 ? '' : 's'} shown.</span>
-            <TableContainer className="table-scroll" sx={{ maxWidth: '100%', overflowX: 'auto' }}>
-              <Table stickyHeader aria-label="Holdings" sx={{ minWidth: 1250 }}>
+            <TableContainer className="table-scroll horizontal-scroll-region holdings-table-scroll" tabIndex={0} role="region" aria-label="Holdings table horizontal scroll region" aria-describedby="holdings-table-scroll-help" onFocusCapture={(event) => {
+              const target = event.target as HTMLElement
+              if (!target.matches('button, input, select, textarea, [tabindex]') || target.closest('.holding-identity-cell')) return
+              const region = event.currentTarget as HTMLElement
+              const identity = region.querySelector<HTMLElement>('.holding-identity-cell')
+              const reveal = () => {
+                if (document.activeElement !== target) return
+                const regionRect = region.getBoundingClientRect()
+                const targetRect = target.getBoundingClientRect()
+                const leftBoundary = regionRect.left + (identity?.getBoundingClientRect().width || 0) + 6
+                const rightBoundary = regionRect.right - 6
+                if (targetRect.left < leftBoundary) region.scrollLeft -= leftBoundary - targetRect.left
+                else if (targetRect.right > rightBoundary) region.scrollLeft += targetRect.right - rightBoundary
+              }
+              reveal()
+              window.requestAnimationFrame(() => {
+                reveal()
+                window.requestAnimationFrame(reveal)
+              })
+              window.setTimeout(reveal, 0)
+            }} sx={{ maxWidth: '100%', overflowX: 'auto' }}>
+              <Typography component="p" id="holdings-table-scroll-help" className="visually-hidden">Use horizontal scrolling to view all Holdings columns. The sticky Instrument column identifies each lot while you scan.</Typography>
+              <Table className="holdings-table" stickyHeader aria-label="Holdings" sx={{ minWidth: 1250 }}>
                 <caption className="visually-hidden">Holdings</caption>
                 <TableHead><TableRow>
-                  {sortHeader('Instrument', 'symbol')}{sortHeader('Quantity', 'quantity')}{sortHeader('Currency', 'currency')}
+                  {sortHeader('Instrument', 'symbol', 'holding-identity-cell')}{sortHeader('Quantity', 'quantity')}{sortHeader('Currency', 'currency')}
                   <TableCell component="th" scope="col">Source unit cost</TableCell>{sortHeader('Cost basis', 'cost_basis')}{sortHeader('Latest price', 'latest_price')}{sortHeader('Latest market value', 'latest_value')}{sortHeader('Unrealised P/L', 'unrealised_pnl')}{sortHeader(`Reporting value (${reportingCurrency})`, 'reporting_value')}{sortHeader('Freshness', 'freshness')}
                   <TableCell component="th" scope="col">Broker / date</TableCell><TableCell component="th" scope="col"><span className="visually-hidden">Holding actions</span></TableCell>
                 </TableRow></TableHead>
                 <TableBody>{visibleHoldings.map((holding) => <TableRow key={holding.lot_id} hover tabIndex={-1} data-holding-lot-id={holding.lot_id}>
-                    <TableCell component="th" scope="row"><strong>{holding.symbol}</strong><span className="subline">{holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'} · lot {holding.lot_id.slice(-8)}</span></TableCell>
+                    <TableCell className="holding-identity-cell" component="th" scope="row"><strong>{holding.symbol}</strong><span className="subline">{holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'} · lot {holding.lot_id.slice(-8)}</span></TableCell>
                     <TableCell className="numeric">{holding.quantity}</TableCell><TableCell>{holding.currency}</TableCell><TableCell className="numeric">{formatMoneyForDisplay(holding.unit_cost, holding.currency, exactAmounts)}</TableCell><TableCell className="numeric">{formatMoneyForDisplay(holding.cost_basis, holding.currency, exactAmounts)}</TableCell><TableCell className="numeric">{latestPriceCell(holding, exactAmounts, snapshotCurrent)}</TableCell><TableCell className="numeric">{latestMarketValueCell(holding, exactAmounts)}</TableCell><TableCell className="numeric">{unrealisedPnLCell(holding, exactAmounts, snapshotCurrent)}</TableCell><TableCell className="numeric">{snapshotComplete ? formatMoneyForDisplay(holding.reporting_value, reportingCurrency, exactAmounts) : 'Withheld'}</TableCell><TableCell><Chip size="small" className={`flag ${qualityClass(holding)}`} label={qualitySummary(holding)} /><span className="subline">Source: {holding.quote_source || 'Unavailable'}</span><span className="subline">Market time: {holding.freshness.market_at ? displayUTC(holding.freshness.market_at) : 'Unavailable'}</span><details className="quality-details"><summary>Data details</summary><dl><div><dt>Freshness</dt><dd>{holding.freshness.status || 'Unavailable'}</dd></div><div><dt>Raw quality flags</dt><dd>{holding.data_quality.length ? holding.data_quality.join(', ') : 'None reported'}</dd></div></dl></details></TableCell>
                     <TableCell>{holding.broker || 'Missing'}<span className="subline">{holding.acquisition_date || 'Date missing'}</span><Button className="thesis-open-button" data-thesis-lot-id={holding.lot_id} type="button" onClick={(event) => { thesisReturnRef.current = event.currentTarget; thesisReturnLotIdRef.current = holding.lot_id; setThesisHolding(holding) }} aria-label={`Open thesis for ${holding.symbol} lot ${holding.lot_id}`} size="small">Open thesis</Button><Button className="thesis-open-button" data-reviews-lot-id={holding.lot_id} ref={reviewsReturnRef} type="button" onClick={(event) => { reviewsReturnRef.current = event.currentTarget; reviewsReturnLotIdRef.current = holding.lot_id; setReviewsHoldingId(holding.lot_id); setView('reviews') }} aria-label={`View reviews for ${holding.symbol} lot ${holding.lot_id}`} size="small">View reviews</Button></TableCell>
                     <TableCell>{holdingActions(holding)}</TableCell>
