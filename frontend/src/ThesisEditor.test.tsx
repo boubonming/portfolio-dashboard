@@ -114,6 +114,35 @@ describe('ThesisEditor response contracts', () => {
     await waitFor(() => expect(screen.getByText(/No revision history/i)).toBeTruthy())
   })
 
+  it('restores an interrupted history read to an explicit retry after protected exit', async () => {
+    let resolveHistory: ((value: Response) => void) | undefined
+    let resolveSave: ((value: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/history')) return new Promise<Response>((resolve) => { resolveHistory = resolve })
+      if (init?.method === 'PUT') return new Promise<Response>((resolve) => { resolveSave = resolve })
+      return response(thesis())
+    })
+    const onClose = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ThesisEditor portfolioId="portfolio-default" holding={holding} csrfToken="csrf" onClose={onClose} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Loading history…' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Pending draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(resolveSave).toBeTypeOf('function'))
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    expect(screen.getByRole('button', { name: 'Keep editing' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(screen.getByRole('button', { name: 'View revision history' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Loading history…' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/history'))).toHaveLength(2))
+    resolveHistory?.(await response({ items: [] }))
+    await waitFor(() => expect(screen.getByText(/No revision history/i)).toBeTruthy())
+  })
+
   it('focuses a new row and moves focus to a predictable target after removal', async () => {
     const fetchMock = vi.fn(() => response({ ...thesis(), revision: 1, summary: 'Ready' }))
     renderEditor(fetchMock)
@@ -205,6 +234,28 @@ describe('ThesisEditor response contracts', () => {
     expect(JSON.parse(String(requests[0]?.body))).toMatchObject({ summary: 'Unconfirmed draft', expected_revision: 1 })
   })
 
+  it('explains uncertain exit without claiming the server write was absent and keeps retry enabled', async () => {
+    const onClose = vi.fn()
+    let rejectSave: ((reason: unknown) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PUT') return new Promise<Response>((_resolve, reject) => { rejectSave = reject })
+      return response(thesis())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ThesisEditor portfolioId="portfolio-default" holding={holding} csrfToken="csrf" onClose={onClose} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Possibly committed' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    rejectSave?.(new Error('response unreadable'))
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Retry unchanged save' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    const exitAlert = screen.getByText(/This thesis write is not confirmed/i)
+    expect(exitAlert.textContent).toMatch(/not confirmed|may already be recorded/i)
+    expect(exitAlert.textContent).toMatch(/local recovery draft|cannot undo/i)
+    expect(screen.getByRole('button', { name: 'Discard changes and leave' })).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
   it('offers explicit keep-editing and discard choices for dirty close', async () => {
     const onClose = vi.fn()
     vi.stubGlobal('fetch', vi.fn(() => response(thesis())))
@@ -216,6 +267,7 @@ describe('ThesisEditor response contracts', () => {
     expect(screen.getByRole('button', { name: 'Discard changes and leave' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
     expect(screen.getByDisplayValue('Keep this draft')).toBeTruthy()
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: /Investment thesis/ })))
     expect(onClose).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
     fireEvent.click(screen.getByRole('button', { name: 'Discard changes and leave' }))

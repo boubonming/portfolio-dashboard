@@ -57,7 +57,8 @@ type Props = {
   onClose: () => void
   onUnauthorized: () => void
   returnFocusRef?: RefObject<HTMLButtonElement | null>
-  navigationRequest?: { target: string; token: number }
+  navigationRequest?: { target: string; token: number; sessionKey?: number }
+  sessionKey?: number
   onNavigationComplete?: (target: string) => void
 }
 
@@ -285,7 +286,7 @@ function ThesisContent({ thesis, headingId, headingLabel }: { thesis: Thesis | T
   </section>
 }
 
-export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose, onUnauthorized, returnFocusRef, navigationRequest, onNavigationComplete }: Props) {
+export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose, onUnauthorized, returnFocusRef, navigationRequest, sessionKey, onNavigationComplete }: Props) {
   const [draft, setDraft] = useState<ThesisDraft>(() => emptyDraft())
   const [expectedRevision, setExpectedRevision] = useState(0)
   const [hasThesis, setHasThesis] = useState(false)
@@ -294,7 +295,7 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
   const [saveError, setSaveError] = useState('')
   const [conflict, setConflict] = useState(false)
   const [uncertainSave, setUncertainSave] = useState(false)
-  const [exitPrompt, setExitPrompt] = useState<{ action: () => void; pendingSave: boolean } | null>(null)
+  const [exitPrompt, setExitPrompt] = useState<{ action: () => void; pendingSave: boolean; uncertain: boolean } | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const [historyState, setHistoryState] = useState<RequestState>('idle')
   const [history, setHistory] = useState<ThesisHistory | null>(null)
@@ -314,6 +315,7 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
   const headingRef = useRef<HTMLHeadingElement>(null)
   const statusRef = useRef<HTMLParagraphElement>(null)
   const conflictRef = useRef<HTMLParagraphElement>(null)
+  const exitPromptRef = useRef<HTMLDivElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
   const mountedRef = useRef(true)
   const endpoint = `/api/v1/portfolios/${encodeURIComponent(portfolioId)}/holdings/${encodeURIComponent(holding.lot_id)}/thesis`
@@ -329,6 +331,25 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
     currentControllerRef.current = null
     saveControllerRef.current = null
     historyControllerRef.current = null
+  }, [])
+
+  const abortSaveRequest = useCallback(() => {
+    saveGeneration.current += 1
+    saveControllerRef.current?.abort()
+    saveControllerRef.current = null
+  }, [])
+
+  const resetIndependentReadLanes = useCallback(() => {
+    currentGeneration.current += 1
+    historyGeneration.current += 1
+    currentControllerRef.current?.abort()
+    historyControllerRef.current?.abort()
+    currentControllerRef.current = null
+    historyControllerRef.current = null
+    // A read interrupted by a protected exit must be explicitly retryable;
+    // never leave its control stuck on Loading history… after Keep editing.
+    setHistoryState((current) => current === 'loading' ? 'idle' : current)
+    setHistoryError('')
   }, [])
 
   const handleUnauthorized = useCallback(() => {
@@ -390,27 +411,48 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
 
   useEffect(() => () => { returnFocusRef?.current?.focus() }, [returnFocusRef])
 
+  useEffect(() => {
+    if (!exitPrompt) return
+    exitPromptRef.current?.scrollIntoView?.({ block: 'nearest' })
+    exitPromptRef.current?.focus()
+  }, [exitPrompt])
+
   const dirty = loadState === 'ready' && baselineRef.current !== null && draftSignature(draft) !== baselineRef.current
   const requestExit = useCallback((action: () => void = onClose) => {
     const pendingSave = savingRef.current
+    resetIndependentReadLanes()
     if (pendingSave) {
-      abortRequest()
+      // A pending save may already have reached the server. Stop only its
+      // client lane; an independent history read must remain recoverable if
+      // the owner chooses Keep editing.
+      abortSaveRequest()
       savingRef.current = false
       setSaving(false)
       setUncertainSave(true)
       setSaveError('Thesis save not confirmed. Your draft is preserved. Retry the unchanged save before editing further.')
       setAnnouncement('Thesis save not confirmed. Retry the unchanged save before editing further.')
     }
-    if (dirty || pendingSave || uncertainSave) setExitPrompt({ action, pendingSave })
+    if (dirty || pendingSave || uncertainSave) setExitPrompt({ action, pendingSave, uncertain: pendingSave || uncertainSave })
     else action()
-  }, [abortRequest, dirty, onClose, uncertainSave])
+  }, [abortSaveRequest, dirty, onClose, resetIndependentReadLanes, uncertainSave])
 
   useEffect(() => {
     const request = navigationRequest
-    if (!request || processedNavigationTokenRef.current === request.token) return
+    if (!request || (request.sessionKey !== undefined && request.sessionKey !== sessionKey) || processedNavigationTokenRef.current === request.token) return
     processedNavigationTokenRef.current = request.token
     requestExit(() => onNavigationComplete?.(request.target))
-  }, [navigationRequest, onNavigationComplete, requestExit])
+  }, [navigationRequest, onNavigationComplete, requestExit, sessionKey])
+
+  const keepEditing = useCallback(() => {
+    setExitPrompt(null)
+    window.requestAnimationFrame(() => headingRef.current?.focus())
+  }, [])
+
+  const discardAndLeave = useCallback(() => {
+    const action = exitPrompt?.action
+    setExitPrompt(null)
+    action?.()
+  }, [exitPrompt])
 
   const updateDraft = <K extends keyof ThesisDraft>(field: K, value: ThesisDraft[K]) => {
     if (uncertainSave) return
@@ -534,9 +576,13 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
       <div><span className="eyebrow">Lot detail</span><h2 id="thesis-title" ref={headingRef} tabIndex={-1}>Investment thesis · {holding.symbol}</h2><p className="muted">{holding.name || holding.description || holding.symbol} · lot {holding.lot_id} · {holding.currency}</p><dl className="thesis-lot-context"><div><dt>Quantity</dt><dd>{holding.quantity}</dd></div><div><dt>Cost basis</dt><dd>{holding.cost_basis || 'Unavailable'}</dd></div><div><dt>Latest price</dt><dd>{holding.latest_price || 'Unavailable'}</dd></div></dl></div>
       <button type="button" onClick={() => requestExit()}>Close thesis</button>
     </div>
-    {exitPrompt && <div className="notice warning thesis-exit-prompt" role="alert" aria-live="assertive">
-      <p>{exitPrompt.pendingSave ? 'A thesis save is still in progress. Leaving will not cancel or undo a write that may already be recorded.' : 'You have unsaved thesis changes.'}</p>
-      <div className="thesis-form-actions"><button type="button" onClick={() => setExitPrompt(null)}>Keep editing</button><button type="button" onClick={() => { const action = exitPrompt.action; setExitPrompt(null); action() }}>Discard changes and leave</button></div>
+    {exitPrompt && <div ref={exitPromptRef} className="notice warning thesis-exit-prompt" role="alert" aria-live="assertive" tabIndex={-1}>
+      <p>{exitPrompt.uncertain
+        ? 'This thesis write is not confirmed and may already be recorded. Leaving discards only this local recovery draft; it cannot undo a server revision.'
+        : exitPrompt.pendingSave
+          ? 'A thesis save is still in progress. Leaving will not cancel or undo a write that may already be recorded.'
+          : 'You have unsaved thesis changes. Leaving discards this local draft.'}</p>
+      <div className="thesis-form-actions"><button type="button" onClick={keepEditing}>Keep editing</button><button type="button" onClick={discardAndLeave}>Discard changes and leave</button></div>
     </div>}
     <p ref={statusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}>{announcement}</p>
     {loadState === 'loading' && <p className="notice" role="status">Loading thesis…</p>}
@@ -557,7 +603,7 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
         <SourcesEditor sources={draft.sources} onChange={(sources) => updateDraft('sources', sources)} />
         </fieldset>
         {saveError && <p ref={conflict ? conflictRef : undefined} className="notice error" role="alert" tabIndex={-1}>{saveError}{conflict ? <button type="button" onClick={reloadLatest}>Reload latest revision</button> : <button type="button" onClick={() => formRef.current?.requestSubmit()} disabled={saving}>Retry save</button>}</p>}
-        <div className="thesis-form-actions"><button type="submit" disabled={saving || uncertainSave || Boolean(allocationError)} aria-busy={saving}>{saving ? 'Saving thesis…' : uncertainSave ? 'Retry unchanged save' : 'Save thesis'}</button><button type="button" onClick={() => requestExit()}>Cancel</button></div>
+        <div className="thesis-form-actions"><button type="submit" disabled={saving || (!uncertainSave && Boolean(allocationError))} aria-busy={saving}>{saving ? 'Saving thesis…' : uncertainSave ? 'Retry unchanged save' : 'Save thesis'}</button><button type="button" onClick={() => requestExit()}>Cancel</button></div>
       </form>
       <section className="thesis-history" aria-labelledby="thesis-history-title"><div className="section-heading"><h3 id="thesis-history-title">Revision history</h3><button type="button" onClick={loadHistory} disabled={historyState === 'loading'}>{historyState === 'loading' ? 'Loading history…' : history ? 'Refresh history' : 'View revision history'}</button></div>
         {historyState === 'error' && <p className="notice error" role="alert">{historyError}<br /><button type="button" onClick={loadHistory}>Try again</button></p>}

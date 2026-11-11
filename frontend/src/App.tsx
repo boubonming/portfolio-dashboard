@@ -544,7 +544,7 @@ export default function App() {
   const [refreshAnnouncement, setRefreshAnnouncement] = useState('')
   const [authError, setAuthError] = useState('')
   const [memoryBoundaryNotice, setMemoryBoundaryNotice] = useState('')
-  const [thesisNavigationRequest, setThesisNavigationRequest] = useState<{ target: View; token: number } | undefined>(undefined)
+  const [thesisNavigationRequest, setThesisNavigationRequest] = useState<{ target: View; token: number; sessionKey: number } | undefined>(undefined)
   const thesisNavigationTokenRef = useRef(0)
   const csrfToken = useRef<string | undefined>(undefined)
   const [filter, setFilter] = useState('')
@@ -597,6 +597,8 @@ export default function App() {
     feedbackAttemptsRef.current.clear()
     activityLoadingMoreRef.current = false
     activityItemsRef.current = []
+    thesisNavigationTokenRef.current += 1
+    setThesisNavigationRequest(undefined)
     setData(null); setOverviewETag(undefined); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setRefreshError(''); setRefreshAnnouncement(''); setRefreshState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
@@ -965,6 +967,7 @@ export default function App() {
     if (!['overview', 'holdings', 'market', 'activity', 'reviews', 'settings'].includes(target)) return
     setThesisNavigationRequest(undefined)
     setThesisHolding(null)
+    if (target === 'reviews') setReviewsHoldingId(undefined)
     setView(target as View)
   }, [])
 
@@ -1044,7 +1047,7 @@ export default function App() {
           <Box component="nav" className="view-nav" aria-label="Portfolio views" sx={{ flex: { xs: '0 0 100%', md: 1 }, minWidth: 0, order: { xs: 3, md: 0 }, width: { xs: '100%', md: 'auto' }, overflowX: 'auto' }}>
             <Tabs value={view} onChange={(_event, nextView: View) => {
               if (thesisHolding) {
-                setThesisNavigationRequest({ target: nextView, token: ++thesisNavigationTokenRef.current })
+                setThesisNavigationRequest({ target: nextView, token: ++thesisNavigationTokenRef.current, sessionKey: authGeneration.current })
                 return
               }
               if (nextView === 'reviews') setReviewsHoldingId(undefined)
@@ -1058,7 +1061,7 @@ export default function App() {
       </AppBar>
       <Typography component="h1" id="portfolio-content" className="visually-hidden" tabIndex={-1}>{portfolioContentHeading}</Typography>
 
-      {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} navigationRequest={thesisNavigationRequest} onNavigationComplete={completeThesisNavigation} /> : <>
+      {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} navigationRequest={thesisNavigationRequest} sessionKey={authGeneration.current} onNavigationComplete={completeThesisNavigation} /> : <>
       {(view === 'overview' || view === 'holdings') && <>
       {view === 'holdings' && <Paper component="section" className="toolbar" aria-label="Portfolio controls" variant="outlined" sx={{ mt: 3, p: { xs: 1.5, sm: 2 }, borderColor: 'divider' }}>
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} useFlexGap sx={{ flexWrap: 'wrap', alignItems: { xs: 'stretch', md: 'center' } }}>
