@@ -30,7 +30,7 @@ type ReviewProps = {
   csrfToken?: string
   holdingId?: string
   onUnauthorized: () => void
-  onBackToOverview?: () => void
+  onBackToHoldings?: () => void
   feedbackAttempts?: FeedbackAttemptStore
 }
 
@@ -313,7 +313,7 @@ function SnapshotBadge({ review, snapshot }: { review: Review; snapshot: Overvie
   return <p className="snapshot-badge">Historical snapshot; current identity could not be confirmed.</p>
 }
 
-export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, holdingId, onUnauthorized, onBackToOverview, feedbackAttempts }: ReviewProps) {
+export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, holdingId, onUnauthorized, onBackToHoldings, feedbackAttempts }: ReviewProps) {
   const [page, setPage] = useState<ReviewPage | null>(null)
   const [state, setState] = useState<ReviewState>('loading')
   const [error, setError] = useState('')
@@ -394,7 +394,7 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
   const closeDetail = () => { detailGeneration.current += 1; detailController.current?.abort(); detailController.current = null; setSelectedId(null); setDetail(null); window.setTimeout(() => { if (selectedButtonRef.current) Array.from(document.querySelectorAll<HTMLButtonElement>('[data-review-id]')).find((button) => button.dataset.reviewId === selectedButtonRef.current)?.focus() }, 0) }
   const renderedItems = page?.items || []
   return <section className="reviews-card" aria-labelledby="reviews-title">
-    <div className="section-heading"><div><span className="eyebrow">Immutable advisory analysis</span><h2 id="reviews-title">Reviews</h2></div><div className="review-actions">{holdingId && <span className="filter-chip">Filtered to exact lot {holdingId}</span>}{onBackToOverview && <button type="button" onClick={onBackToOverview}>Back to overview</button>}</div></div>
+    <div className="section-heading"><div><span className="eyebrow">Immutable advisory analysis</span><h2 id="reviews-title">Reviews</h2></div><div className="review-actions">{holdingId && <span className="filter-chip">Filtered to exact lot {holdingId}</span>}{onBackToHoldings && <button type="button" onClick={onBackToHoldings}>Back to holdings</button>}</div></div>
     <p ref={listStatusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}>{listAnnouncement}</p>
     {state === 'loading' && <p role="status" aria-live="polite">Loading reviews…</p>}
     {state === 'error' && <p className="notice error" role="alert">Unable to load reviews: {error} <button type="button" onClick={() => load(undefined, false)}>Try again</button></p>}

@@ -57,6 +57,9 @@ type Props = {
   onClose: () => void
   onUnauthorized: () => void
   returnFocusRef?: RefObject<HTMLButtonElement | null>
+  navigationRequest?: { target: string; token: number; sessionKey?: number }
+  sessionKey?: number
+  onNavigationComplete?: (target: string) => void
 }
 
 const thesisKeys = new Set(['id', 'portfolio_id', 'holding_id', 'instrument_id', 'summary', 'intended_holding_period', 'allocation_limit', 'reasons_to_hold', 'risks', 'reasons_to_sell', 'conditions_to_change', 'sources', 'revision', 'revision_id', 'updated_at'])
@@ -65,6 +68,10 @@ const sourceKeys = new Set(['label', 'url', 'publication_date'])
 const allocationPattern = /^(?:0|[1-9][0-9]{0,2})(?:\.[0-9]{1,2})?$/
 
 const emptyDraft = (): ThesisDraft => ({ summary: '', intended_holding_period: '', allocation_limit: '', reasons_to_hold: [], risks: [], reasons_to_sell: [], conditions_to_change: [], sources: [] })
+
+function draftSignature(draft: ThesisDraft): string {
+  return JSON.stringify(draft)
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -279,7 +286,7 @@ function ThesisContent({ thesis, headingId, headingLabel }: { thesis: Thesis | T
   </section>
 }
 
-export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose, onUnauthorized, returnFocusRef }: Props) {
+export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose, onUnauthorized, returnFocusRef, navigationRequest, sessionKey, onNavigationComplete }: Props) {
   const [draft, setDraft] = useState<ThesisDraft>(() => emptyDraft())
   const [expectedRevision, setExpectedRevision] = useState(0)
   const [hasThesis, setHasThesis] = useState(false)
@@ -287,6 +294,8 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
   const [loadError, setLoadError] = useState('')
   const [saveError, setSaveError] = useState('')
   const [conflict, setConflict] = useState(false)
+  const [uncertainSave, setUncertainSave] = useState(false)
+  const [exitPrompt, setExitPrompt] = useState<{ action: () => void; pendingSave: boolean; uncertain: boolean } | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const [historyState, setHistoryState] = useState<RequestState>('idle')
   const [history, setHistory] = useState<ThesisHistory | null>(null)
@@ -299,10 +308,14 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
   const saveControllerRef = useRef<AbortController | null>(null)
   const historyControllerRef = useRef<AbortController | null>(null)
   const identityRef = useRef<ThesisIdentity | undefined>(undefined)
+  const baselineRef = useRef<string | null>(null)
+  const saveAttemptRef = useRef<{ body: string; expectedRevision: number } | null>(null)
+  const processedNavigationTokenRef = useRef<number | null>(null)
   const savingRef = useRef(false)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const statusRef = useRef<HTMLParagraphElement>(null)
   const conflictRef = useRef<HTMLParagraphElement>(null)
+  const exitPromptRef = useRef<HTMLDivElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
   const mountedRef = useRef(true)
   const endpoint = `/api/v1/portfolios/${encodeURIComponent(portfolioId)}/holdings/${encodeURIComponent(holding.lot_id)}/thesis`
@@ -318,6 +331,25 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
     currentControllerRef.current = null
     saveControllerRef.current = null
     historyControllerRef.current = null
+  }, [])
+
+  const abortSaveRequest = useCallback(() => {
+    saveGeneration.current += 1
+    saveControllerRef.current?.abort()
+    saveControllerRef.current = null
+  }, [])
+
+  const resetIndependentReadLanes = useCallback(() => {
+    currentGeneration.current += 1
+    historyGeneration.current += 1
+    currentControllerRef.current?.abort()
+    historyControllerRef.current?.abort()
+    currentControllerRef.current = null
+    historyControllerRef.current = null
+    // A read interrupted by a protected exit must be explicitly retryable;
+    // never leave its control stuck on Loading history… after Keep editing.
+    setHistoryState((current) => current === 'loading' ? 'idle' : current)
+    setHistoryError('')
   }, [])
 
   const handleUnauthorized = useCallback(() => {
@@ -344,10 +376,16 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
         if (controller.signal.aborted || generation !== currentGeneration.current || !mountedRef.current) return
         if (nextThesis === null) {
           identityRef.current = undefined
-          setHasThesis(false); setExpectedRevision(0); setDraft(emptyDraft()); setLoadState('ready'); setAnnouncement('Thesis editor ready for a new thesis.')
+          const nextDraft = emptyDraft()
+          baselineRef.current = draftSignature(nextDraft)
+          saveAttemptRef.current = null
+          setUncertainSave(false); setHasThesis(false); setExpectedRevision(0); setDraft(nextDraft); setLoadState('ready'); setAnnouncement('Thesis editor ready for a new thesis.')
         } else {
           identityRef.current = { id: nextThesis.id, instrumentId: nextThesis.instrument_id }
-          setHasThesis(true); setExpectedRevision(nextThesis.revision); setDraft(draftFromThesis(nextThesis)); setLoadState('ready'); setAnnouncement(`Loaded thesis revision ${nextThesis.revision}.`)
+          const nextDraft = draftFromThesis(nextThesis)
+          baselineRef.current = draftSignature(nextDraft)
+          saveAttemptRef.current = null
+          setUncertainSave(false); setHasThesis(true); setExpectedRevision(nextThesis.revision); setDraft(nextDraft); setLoadState('ready'); setAnnouncement(`Loaded thesis revision ${nextThesis.revision}.`)
         }
         setConflict(false)
       })
@@ -373,19 +411,68 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
 
   useEffect(() => () => { returnFocusRef?.current?.focus() }, [returnFocusRef])
 
-  const updateDraft = <K extends keyof ThesisDraft>(field: K, value: ThesisDraft[K]) => setDraft((current) => ({ ...current, [field]: value }))
+  useEffect(() => {
+    if (!exitPrompt) return
+    exitPromptRef.current?.scrollIntoView?.({ block: 'nearest' })
+    exitPromptRef.current?.focus()
+  }, [exitPrompt])
+
+  const dirty = loadState === 'ready' && baselineRef.current !== null && draftSignature(draft) !== baselineRef.current
+  const requestExit = useCallback((action: () => void = onClose) => {
+    const pendingSave = savingRef.current
+    resetIndependentReadLanes()
+    if (pendingSave) {
+      // A pending save may already have reached the server. Stop only its
+      // client lane; an independent history read must remain recoverable if
+      // the owner chooses Keep editing.
+      abortSaveRequest()
+      savingRef.current = false
+      setSaving(false)
+      setUncertainSave(true)
+      setSaveError('Thesis save not confirmed. Your draft is preserved. Retry the unchanged save before editing further.')
+      setAnnouncement('Thesis save not confirmed. Retry the unchanged save before editing further.')
+    }
+    if (dirty || pendingSave || uncertainSave) setExitPrompt({ action, pendingSave, uncertain: pendingSave || uncertainSave })
+    else action()
+  }, [abortSaveRequest, dirty, onClose, resetIndependentReadLanes, uncertainSave])
+
+  useEffect(() => {
+    const request = navigationRequest
+    if (!request || (request.sessionKey !== undefined && request.sessionKey !== sessionKey) || processedNavigationTokenRef.current === request.token) return
+    processedNavigationTokenRef.current = request.token
+    requestExit(() => onNavigationComplete?.(request.target))
+  }, [navigationRequest, onNavigationComplete, requestExit, sessionKey])
+
+  const keepEditing = useCallback(() => {
+    setExitPrompt(null)
+    window.requestAnimationFrame(() => headingRef.current?.focus())
+  }, [])
+
+  const discardAndLeave = useCallback(() => {
+    const action = exitPrompt?.action
+    setExitPrompt(null)
+    action?.()
+  }, [exitPrompt])
+
+  const updateDraft = <K extends keyof ThesisDraft>(field: K, value: ThesisDraft[K]) => {
+    if (uncertainSave) return
+    setDraft((current) => ({ ...current, [field]: value }))
+  }
 
   const allocationError = draft.allocation_limit !== '' && !validAllocation(draft.allocation_limit) ? 'Enter a percentage from 0 to 100 with at most two decimal places.' : ''
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (savingRef.current || loadState !== 'ready' || allocationError) return
-    try {
-      validateDraft(draft)
-    } catch (reason) {
-      setSaveError(reason instanceof Error ? reason.message : 'The thesis draft is invalid.')
-      setAnnouncement('The thesis was not saved. Your draft is preserved.')
-      return
+    const priorAttempt = uncertainSave ? saveAttemptRef.current : null
+    if (!priorAttempt) {
+      try {
+        validateDraft(draft)
+      } catch (reason) {
+        setSaveError(reason instanceof Error ? reason.message : 'The thesis draft is invalid.')
+        setAnnouncement('The thesis was not saved. Your draft is preserved.')
+        return
+      }
     }
     savingRef.current = true
     setSaving(true); setSaveError(''); setConflict(false); setAnnouncement('Saving thesis…')
@@ -393,7 +480,7 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
     saveControllerRef.current?.abort()
     saveControllerRef.current = controller
     const generation = ++saveGeneration.current
-    const payload = {
+    const payload = priorAttempt ? null : {
       summary: draft.summary,
       intended_holding_period: draft.intended_holding_period,
       allocation_limit: draft.allocation_limit === '' ? null : draft.allocation_limit,
@@ -404,19 +491,39 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
       sources: draft.sources.map((source) => ({ ...source, publication_date: source.publication_date || null })),
       expected_revision: expectedRevision,
     }
+    const body = priorAttempt?.body || JSON.stringify(payload)
+    const attempt = priorAttempt || { body, expectedRevision }
+    saveAttemptRef.current = attempt
     try {
-      const response = await apiFetch(endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), csrfToken, signal: controller.signal })
-      if (response.status === 409) { if (generation === saveGeneration.current && mountedRef.current) { setConflict(true); setSaveError('A newer revision exists. Your unsaved changes were preserved. Reload the latest revision only if you choose to replace this draft.'); setAnnouncement('Save conflict. Unsaved changes preserved.') }; return }
+      const response = await apiFetch(endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, csrfToken, signal: controller.signal })
+      if (response.status === 409) {
+        saveAttemptRef.current = null
+        if (generation === saveGeneration.current && mountedRef.current) { setUncertainSave(false); setConflict(true); setSaveError('A newer revision exists. Your unsaved changes were preserved. Reload the latest revision only if you choose to replace this draft.'); setAnnouncement('Save conflict. Unsaved changes preserved.') }
+        return
+      }
       if (!response.ok) throw new APIError(response.status)
       const canonical = validateThesis(await response.json(), false, { ...scope, identity: identityRef.current }) as Thesis
       if (generation !== saveGeneration.current || !mountedRef.current) return
       identityRef.current = { id: canonical.id, instrumentId: canonical.instrument_id }
-      setHasThesis(true); setExpectedRevision(canonical.revision); setDraft(draftFromThesis(canonical)); setSaveError(''); setConflict(false); setAnnouncement(`Thesis saved as revision ${canonical.revision}.`)
+      const canonicalDraft = draftFromThesis(canonical)
+      baselineRef.current = draftSignature(canonicalDraft)
+      saveAttemptRef.current = null
+      setUncertainSave(false); setHasThesis(true); setExpectedRevision(canonical.revision); setDraft(canonicalDraft); setSaveError(''); setConflict(false); setAnnouncement(`Thesis saved as revision ${canonical.revision}.`)
     } catch (reason) {
       if (controller.signal.aborted || generation !== saveGeneration.current || !mountedRef.current) return
       if (reason instanceof APIError && reason.status === 401) { handleUnauthorized(); return }
-      setSaveError(requestMessage(reason, 'save the thesis'))
-      setAnnouncement('The thesis was not saved. Your draft is preserved.')
+      const definitive = reason instanceof APIError && reason.status >= 400 && reason.status < 500 && reason.status !== 408 && reason.status !== 429
+      if (definitive) {
+        saveAttemptRef.current = null
+        setUncertainSave(false)
+        setSaveError(requestMessage(reason, 'save the thesis'))
+        setAnnouncement('The thesis was not saved. Your draft is preserved.')
+      } else {
+        setUncertainSave(true)
+        const detail = reason instanceof Error && reason.message ? ` (${reason.message})` : ''
+        setSaveError(`Thesis save not confirmed. Your draft is preserved. Retry the unchanged save before editing further.${detail}`)
+        setAnnouncement('Thesis save not confirmed. Retry the unchanged save before editing further.')
+      }
     } finally {
       if (generation === saveGeneration.current && mountedRef.current) { savingRef.current = false; setSaving(false); if (saveControllerRef.current === controller) saveControllerRef.current = null }
     }
@@ -467,8 +574,16 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
   return <section className="thesis-surface" aria-labelledby="thesis-title">
     <div className="thesis-header">
       <div><span className="eyebrow">Lot detail</span><h2 id="thesis-title" ref={headingRef} tabIndex={-1}>Investment thesis · {holding.symbol}</h2><p className="muted">{holding.name || holding.description || holding.symbol} · lot {holding.lot_id} · {holding.currency}</p><dl className="thesis-lot-context"><div><dt>Quantity</dt><dd>{holding.quantity}</dd></div><div><dt>Cost basis</dt><dd>{holding.cost_basis || 'Unavailable'}</dd></div><div><dt>Latest price</dt><dd>{holding.latest_price || 'Unavailable'}</dd></div></dl></div>
-      <button type="button" onClick={onClose}>Close thesis</button>
+      <button type="button" onClick={() => requestExit()}>Close thesis</button>
     </div>
+    {exitPrompt && <div ref={exitPromptRef} className="notice warning thesis-exit-prompt" role="alert" aria-live="assertive" tabIndex={-1}>
+      <p>{exitPrompt.uncertain
+        ? 'This thesis write is not confirmed and may already be recorded. Leaving discards only this local recovery draft; it cannot undo a server revision.'
+        : exitPrompt.pendingSave
+          ? 'A thesis save is still in progress. Leaving will not cancel or undo a write that may already be recorded.'
+          : 'You have unsaved thesis changes. Leaving discards this local draft.'}</p>
+      <div className="thesis-form-actions"><button type="button" onClick={keepEditing}>Keep editing</button><button type="button" onClick={discardAndLeave}>Discard changes and leave</button></div>
+    </div>}
     <p ref={statusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}>{announcement}</p>
     {loadState === 'loading' && <p className="notice" role="status">Loading thesis…</p>}
     {loadState === 'error' && <div className="notice error" role="alert"><p>{loadError}</p><button type="button" onClick={() => loadCurrent(false)}>Try again</button></div>}
@@ -476,6 +591,7 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
       {!hasThesis && <p className="notice" role="status">No thesis has been reviewed for this lot yet. Create one below.</p>}
       <form ref={formRef} className="thesis-form" onSubmit={save} aria-describedby="thesis-form-help">
         <p id="thesis-form-help" className="muted">Revision expected on save: {expectedRevision}. Empty list fields remain empty arrays.</p>
+        <fieldset disabled={saving || uncertainSave}>
         <label htmlFor="thesis-summary">Summary</label><textarea id="thesis-summary" value={draft.summary} onChange={(event) => updateDraft('summary', event.target.value)} required maxLength={4000} />
         <label htmlFor="thesis-period">Intended holding period</label><input id="thesis-period" value={draft.intended_holding_period} onChange={(event) => updateDraft('intended_holding_period', event.target.value)} required maxLength={256} />
         <label htmlFor="thesis-allocation-limit">Optional allocation limit (%)</label><input id="thesis-allocation-limit" inputMode="decimal" type="text" value={draft.allocation_limit} onChange={(event) => updateDraft('allocation_limit', event.target.value)} aria-describedby={allocationError ? 'allocation-limit-error' : undefined} />
@@ -485,8 +601,9 @@ export default function ThesisEditor({ portfolioId, holding, csrfToken, onClose,
         <ListEditor label="Reasons to sell" values={draft.reasons_to_sell} onChange={(values) => updateDraft('reasons_to_sell', values)} />
         <ListEditor label="Conditions to change" values={draft.conditions_to_change} onChange={(values) => updateDraft('conditions_to_change', values)} />
         <SourcesEditor sources={draft.sources} onChange={(sources) => updateDraft('sources', sources)} />
-        {saveError && <p ref={conflict ? conflictRef : undefined} className="notice error" role="alert" tabIndex={-1}>{saveError}{conflict ? <button type="button" onClick={reloadLatest}>Reload latest revision</button> : <button type="button" onClick={() => formRef.current?.requestSubmit()}>Retry save</button>}</p>}
-        <div className="thesis-form-actions"><button type="submit" disabled={saving || Boolean(allocationError)} aria-busy={saving}>{saving ? 'Saving thesis…' : 'Save thesis'}</button><button type="button" onClick={onClose}>Cancel</button></div>
+        </fieldset>
+        {saveError && <p ref={conflict ? conflictRef : undefined} className="notice error" role="alert" tabIndex={-1}>{saveError}{conflict ? <button type="button" onClick={reloadLatest}>Reload latest revision</button> : <button type="button" onClick={() => formRef.current?.requestSubmit()} disabled={saving}>Retry save</button>}</p>}
+        <div className="thesis-form-actions"><button type="submit" disabled={saving || (!uncertainSave && Boolean(allocationError))} aria-busy={saving}>{saving ? 'Saving thesis…' : uncertainSave ? 'Retry unchanged save' : 'Save thesis'}</button><button type="button" onClick={() => requestExit()}>Cancel</button></div>
       </form>
       <section className="thesis-history" aria-labelledby="thesis-history-title"><div className="section-heading"><h3 id="thesis-history-title">Revision history</h3><button type="button" onClick={loadHistory} disabled={historyState === 'loading'}>{historyState === 'loading' ? 'Loading history…' : history ? 'Refresh history' : 'View revision history'}</button></div>
         {historyState === 'error' && <p className="notice error" role="alert">{historyError}<br /><button type="button" onClick={loadHistory}>Try again</button></p>}

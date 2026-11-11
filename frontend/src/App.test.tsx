@@ -409,9 +409,60 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByText('Filtered to exact lot lot-c')).toBeTruthy())
     const filteredCall = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)
     expect(String(filteredCall?.[0])).toContain('holding_id=lot-c')
-    fireEvent.click(screen.getByRole('button', { name: 'Back to overview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Back to holdings' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View reviews for SAME lot lot-c' }))
+  })
+
+  it('clears an old review lot filter when clean thesis navigation opens global Reviews', async () => {
+    const filteredReview = { ...appReview, scope: { type: 'holding' as const, holding_ids: ['lot-a'], instrument_ids: ['instrument-a'] } }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/reviews')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [filteredReview], has_more: false }) } as Response)
+      if (url.includes('/thesis')) return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View reviews for AAA lot lot-a' }))
+    await waitFor(() => expect(screen.getByText('Filtered to exact lot lot-a')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open thesis for AAA lot lot-a' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Investment thesis/ })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Reviews' })).toBeTruthy())
+    expect(screen.queryByText(/Filtered to exact lot/)).toBeNull()
+    const globalCall = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)
+    expect(String(globalCall?.[0])).not.toContain('holding_id=')
+  })
+
+  it('does not replay a pending thesis tab exit after sign-out and session retry', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) return Promise.resolve(authenticatedSession)
+      if (url.includes('/api/v1/auth/logout')) return Promise.resolve({ ok: false, status: 503, json: async () => ({}) } as Response)
+      if (url.includes('/api/v1/auth/login')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ authenticated: true, csrf_token: 'fixture-token-2', expires_at: expiresAt }) } as Response)
+      if (url.includes('/thesis')) return Promise.resolve({ ok: true, status: 200, json: async () => appThesis() } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Open thesis for AAA lot lot-a' }))
+    await waitFor(() => expect(screen.getByDisplayValue('Summary lot-a')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Draft before sign-out' } })
+    fireEvent.click(screen.getByRole('tab', { name: 'Activity' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Keep editing' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry session check' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Open thesis for AAA lot lot-a' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Investment thesis/ })).toBeTruthy())
+    expect(screen.getByRole('heading', { name: /Investment thesis/ })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Activity' })).toBeNull()
   })
 
   it('shows a loading state while the typed API request is pending', () => {
@@ -2667,6 +2718,195 @@ describe('Portfolio Dashboard', () => {
       })).toHaveLength(1)
     } finally {
       if (authorityLoss === 'expiry') vi.useRealTimers()
+    }
+  })
+
+  it('offers a generic session-check retry without reading private data before authority', async () => {
+    let sessionChecks = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) {
+        sessionChecks += 1
+        return sessionChecks === 1 ? Promise.reject(new Error('network details must stay private')) : Promise.resolve(authenticatedSession)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Could not check your session\. Try again\./i))
+    expect(screen.getByRole('alert').textContent).not.toMatch(/network details must stay private/i)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry session check' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/portfolios/'))).toBe(true)
+  })
+
+  it('keeps Settings and Reviews recoverable when the initial portfolio read fails', async () => {
+    let overviewCalls = 0
+    const fetchMock = authenticatedFetch((input) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        return overviewCalls === 1 ? Promise.resolve({ ok: false, status: 500, json: async () => ({}) } as Response) : Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+      }
+      if (url.includes('/reviews')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [], has_more: false }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
+    expect(screen.getByRole('heading', { name: 'Unable to load portfolio' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Retry portfolio read' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    expect(screen.getByRole('heading', { name: 'Unable to load portfolio' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry portfolio read' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Reviews' })).toBeTruthy())
+    expect(fetchMock.mock.calls.some(([, init]) => ['POST', 'PUT', 'DELETE'].includes(String(init?.method || '').toUpperCase()))).toBe(false)
+  })
+
+  it.each([['clean', false], ['dirty', true]] as const)('keeps thesis tab selection and content aligned on %s navigation', async (_label, dirty) => {
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.includes('/thesis') && init?.method !== 'PUT') return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Open thesis for AAA lot lot-a' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Investment thesis/ })).toBeTruthy())
+    if (dirty) fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Protected navigation draft' } })
+    fireEvent.click(screen.getByRole('tab', { name: 'Activity' }))
+    if (!dirty) {
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Activity' })).toBeTruthy())
+      expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true')
+      expect(screen.queryByRole('heading', { name: /Investment thesis/ })).toBeNull()
+      return
+    }
+    expect(screen.getByRole('button', { name: 'Keep editing' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /Investment thesis/ })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Holdings' }).getAttribute('aria-selected')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(screen.getByDisplayValue('Protected navigation draft')).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'Activity' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Discard changes and leave' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Activity' })).toBeTruthy())
+    expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.queryByDisplayValue('Protected navigation draft')).toBeNull()
+  })
+
+  it('keeps pending thesis save and history recovery independent through full-App Keep editing', async () => {
+    const historyResolvers: Array<(value: Response) => void> = []
+    const saveResolvers: Array<(value: Response) => void> = []
+    const historySignals: AbortSignal[] = []
+    const saveSignals: AbortSignal[] = []
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/history')) {
+        historySignals.push(init?.signal as AbortSignal)
+        return new Promise<Response>((resolve) => { historyResolvers.push(resolve) })
+      }
+      if (url.endsWith('/holdings/lot-a/thesis') && init?.method === 'PUT') {
+        saveSignals.push(init.signal as AbortSignal)
+        return new Promise<Response>((resolve) => { saveResolvers.push(resolve) })
+      }
+      if (url.endsWith('/holdings/lot-a/thesis')) return Promise.resolve({ ok: true, status: 200, json: async () => appThesis() } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Open thesis for AAA lot lot-a' }))
+    await waitFor(() => expect(screen.getByDisplayValue('Summary lot-a')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(historyResolvers).toHaveLength(1))
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Pending full-App draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(saveResolvers).toHaveLength(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(historySignals[0]?.aborted).toBe(true)
+    expect(saveSignals[0]?.aborted).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(historyResolvers).toHaveLength(2))
+    historyResolvers[1]!({ ok: true, status: 200, json: async () => ({ items: [{ ...appThesis('lot-a', { revision: 2, revision_id: 'replacement-history', summary: 'Replacement history' }), created_at: '2026-01-03T12:00:00.000000000Z' }] }) } as Response)
+    await waitFor(() => expect(screen.getByText('Replacement history')).toBeTruthy())
+    historyResolvers[0]!({ ok: true, status: 200, json: async () => ({ items: [] }) } as Response)
+    saveResolvers[0]!({ ok: true, status: 200, json: async () => appThesis('lot-a', { revision: 2, revision_id: 'late-revision', summary: 'Late stale save' }) } as Response)
+    await flushEffects()
+    expect(screen.getByDisplayValue('Pending full-App draft')).toBeTruthy()
+    expect(screen.getByText('Replacement history')).toBeTruthy()
+    expect(screen.queryByText('Late stale save')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Loading history…' })).toBeNull()
+  })
+
+  it('recovers a confirmed thesis save with a history GET without replaying PUT', async () => {
+    let putCalls = 0
+    let historyCalls = 0
+    const fetchMock = authenticatedFetch((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/history')) {
+        historyCalls += 1
+        return historyCalls === 1 ? Promise.resolve({ ok: false, status: 503, json: async () => ({}) } as Response) : Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) } as Response)
+      }
+      if (url.endsWith('/holdings/lot-a/thesis') && init?.method === 'PUT') {
+        putCalls += 1
+        return Promise.resolve({ ok: true, status: 200, json: async () => appThesis('lot-a', { revision: 2, revision_id: 'saved-revision', summary: 'Confirmed full-App save' }) } as Response)
+      }
+      if (url.endsWith('/holdings/lot-a/thesis')) return Promise.resolve({ ok: true, status: 200, json: async () => appThesis() } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Open thesis for AAA lot lot-a' }))
+    await waitFor(() => expect(screen.getByDisplayValue('Summary lot-a')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Confirmed full-App save' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByText(/Thesis saved as revision 2/i)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy())
+    expect(putCalls).toBe(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(screen.getByText(/No revision history/)).toBeTruthy())
+    expect(putCalls).toBe(1)
+    expect(historyCalls).toBe(2)
+  })
+
+  it.each(['pending', 'malformed'] as const)('keeps %s initial portfolio reads recoverable on Settings and Reviews', async (mode) => {
+    for (const destination of ['Settings', 'Reviews'] as const) {
+      cleanup()
+      let overviewCalls = 0
+      let resolveInitial: ((value: Response) => void) | undefined
+      const fetchMock = authenticatedFetch((input) => {
+        const url = String(input)
+        if (url.includes('/overview')) {
+          overviewCalls += 1
+          if (overviewCalls === 1 && mode === 'pending') return new Promise<Response>((resolve) => { resolveInitial = resolve })
+          if (overviewCalls === 1) return Promise.resolve({ ok: true, status: 200, json: async () => ({ malformed: true }) } as Response)
+          return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+        }
+        if (url.includes('/reviews')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [], has_more: false }) } as Response)
+        return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      render(<App />)
+      if (mode === 'pending') {
+        await waitFor(() => expect(screen.getByRole('heading', { name: 'Loading portfolio' })).toBeTruthy())
+        fireEvent.click(screen.getByRole('tab', { name: destination }))
+        expect(screen.getByRole('heading', { name: `${destination} view` })).toBeTruthy()
+        expect(screen.getByRole('heading', { name: 'Loading portfolio' })).toBeTruthy()
+        resolveInitial!({ ok: false, status: 500, json: async () => ({}) } as Response)
+      } else {
+        await waitFor(() => expect(screen.getByRole('heading', { name: 'Unable to load portfolio' })).toBeTruthy())
+        fireEvent.click(screen.getByRole('tab', { name: destination }))
+      }
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Unable to load portfolio' })).toBeTruthy())
+      expect(screen.getByRole('heading', { name: `${destination} view` })).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: /Retry portfolio read|Try again/ }))
+      await waitFor(() => expect(screen.getByRole('heading', { name: destination })).toBeTruthy())
+      expect(screen.getByRole('tab', { name: destination }).getAttribute('aria-selected')).toBe('true')
+      expect(fetchMock.mock.calls.some(([, init]) => ['POST', 'PUT', 'DELETE'].includes(String(init?.method || '').toUpperCase()))).toBe(false)
     }
   })
 })

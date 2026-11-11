@@ -114,6 +114,35 @@ describe('ThesisEditor response contracts', () => {
     await waitFor(() => expect(screen.getByText(/No revision history/i)).toBeTruthy())
   })
 
+  it('restores an interrupted history read to an explicit retry after protected exit', async () => {
+    let resolveHistory: ((value: Response) => void) | undefined
+    let resolveSave: ((value: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/history')) return new Promise<Response>((resolve) => { resolveHistory = resolve })
+      if (init?.method === 'PUT') return new Promise<Response>((resolve) => { resolveSave = resolve })
+      return response(thesis())
+    })
+    const onClose = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ThesisEditor portfolioId="portfolio-default" holding={holding} csrfToken="csrf" onClose={onClose} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Loading history…' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Pending draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(resolveSave).toBeTypeOf('function'))
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    expect(screen.getByRole('button', { name: 'Keep editing' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(screen.getByRole('button', { name: 'View revision history' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Loading history…' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/history'))).toHaveLength(2))
+    resolveHistory?.(await response({ items: [] }))
+    await waitFor(() => expect(screen.getByText(/No revision history/i)).toBeTruthy())
+  })
+
   it('focuses a new row and moves focus to a predictable target after removal', async () => {
     const fetchMock = vi.fn(() => response({ ...thesis(), revision: 1, summary: 'Ready' }))
     renderEditor(fetchMock)
@@ -180,6 +209,188 @@ describe('ThesisEditor response contracts', () => {
     expect(screen.getByDisplayValue('Network draft')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Retry save' }))
     await waitFor(() => expect(screen.getByDisplayValue('Saved after retry')).toBeTruthy())
+  })
+
+  it('replays an isolated committed thesis save without duplicating history', async () => {
+    const requests: RequestInit[] = []
+    const baseline = thesis()
+    const committed = thesis({ revision: 2, revision_id: 'revision-retry', summary: 'Recovered canonical', updated_at: '2026-01-03T12:00:00.000000000Z' })
+    const historyItems: Array<Thesis & { created_at: string }> = []
+    let firstBody = ''
+    let putAttempts = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/history')) return response({ items: historyItems })
+      if (init?.method === 'PUT') {
+        requests.push(init)
+        putAttempts += 1
+        const body = String(init.body)
+        if (putAttempts === 1) {
+          firstBody = body
+          historyItems.push({ ...baseline, created_at: '2026-01-02T12:00:00.000000000Z' })
+          historyItems.push({ ...committed, created_at: '2026-01-03T12:00:00.000000000Z' })
+          return Promise.reject(new Error('response unreadable after commit'))
+        }
+        expect(body).toBe(firstBody)
+        return response(committed)
+      }
+      return response(baseline)
+    })
+    renderEditor(fetchMock)
+    await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Unconfirmed draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/save not confirmed.*unchanged save/i))
+    expect(historyItems).toHaveLength(2)
+    expect((screen.getByRole('button', { name: 'Retry unchanged save' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry unchanged save' }))
+    await waitFor(() => expect(screen.getByDisplayValue('Recovered canonical')).toBeTruthy())
+    expect(requests).toHaveLength(2)
+    expect(requests[1]?.body).toBe(requests[0]?.body)
+    expect(JSON.parse(String(requests[0]?.body))).toMatchObject({ summary: 'Unconfirmed draft', expected_revision: 1 })
+    expect(new Headers(requests[0]?.headers as HeadersInit).get('X-CSRF-Token')).toBe('csrf')
+    expect(new Headers(requests[1]?.headers as HeadersInit).get('X-CSRF-Token')).toBe('csrf')
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Revision 2' })).toBeTruthy())
+    expect(screen.getAllByRole('heading', { name: 'Revision 2' })).toHaveLength(1)
+    expect(historyItems.map((item) => item.revision)).toEqual([1, 2])
+  })
+
+  it('explains uncertain exit without claiming the server write was absent and keeps retry enabled', async () => {
+    const onClose = vi.fn()
+    let rejectSave: ((reason: unknown) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PUT') return new Promise<Response>((_resolve, reject) => { rejectSave = reject })
+      return response(thesis())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ThesisEditor portfolioId="portfolio-default" holding={holding} csrfToken="csrf" onClose={onClose} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Possibly committed' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    rejectSave?.(new Error('response unreadable'))
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Retry unchanged save' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    const exitAlert = screen.getByText(/This thesis write is not confirmed/i)
+    expect(exitAlert.textContent).toMatch(/not confirmed|may already be recorded/i)
+    expect(exitAlert.textContent).toMatch(/local recovery draft|cannot undo/i)
+    expect(screen.getByRole('button', { name: 'Discard changes and leave' })).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('offers explicit keep-editing and discard choices for dirty close', async () => {
+    const onClose = vi.fn()
+    vi.stubGlobal('fetch', vi.fn(() => response(thesis())))
+    render(<ThesisEditor portfolioId="portfolio-default" holding={holding} csrfToken="csrf" onClose={onClose} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Keep this draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    expect(screen.getByRole('button', { name: 'Keep editing' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Discard changes and leave' })).toBeTruthy()
+    const keepEditing = screen.getByRole('button', { name: 'Keep editing' })
+    keepEditing.focus()
+    expect(document.activeElement).toBe(keepEditing)
+    fireEvent.click(keepEditing)
+    expect(screen.getByDisplayValue('Keep this draft')).toBeTruthy()
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: /Investment thesis/ })))
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Discard changes and leave' }))
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('aborts old history and save lanes when a replacement lot wins', async () => {
+    const lotB: Holding = { ...holding, lot_id: 'lot-b', symbol: 'BBB', name: 'BBB Fund' }
+    const historyResolvers: Array<(value: Response) => void> = []
+    const saveResolvers: Array<(value: Response) => void> = []
+    const currentResolvers: Array<(value: Response) => void> = []
+    const currentSignals: AbortSignal[] = []
+    const historySignals: AbortSignal[] = []
+    const saveSignals: AbortSignal[] = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/history')) {
+        historySignals.push(init?.signal as AbortSignal)
+        return new Promise<Response>((resolve) => { historyResolvers.push(resolve) })
+      }
+      if (init?.method === 'PUT') {
+        saveSignals.push(init.signal as AbortSignal)
+        return new Promise<Response>((resolve) => { saveResolvers.push(resolve) })
+      }
+      currentSignals.push(init?.signal as AbortSignal)
+      return new Promise<Response>((resolve) => { currentResolvers.push(resolve) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(<ThesisEditor portfolioId="portfolio-default" holding={holding} csrfToken="csrf" onClose={vi.fn()} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(currentResolvers).toHaveLength(1))
+    currentResolvers[0]!({ ok: true, status: 200, json: async () => thesis() } as Response)
+    await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(historyResolvers).toHaveLength(1))
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Old lot draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(saveResolvers).toHaveLength(1))
+
+    view.unmount()
+    render(<ThesisEditor portfolioId="portfolio-default" holding={lotB} csrfToken="csrf" onClose={vi.fn()} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(currentResolvers).toHaveLength(2))
+    expect(historyResolvers[0]).toBeTypeOf('function')
+    expect(saveResolvers[0]).toBeTypeOf('function')
+    expect(currentSignals[0]!.aborted).toBe(true)
+    expect(historySignals[0]!.aborted).toBe(true)
+    expect(saveSignals[0]!.aborted).toBe(true)
+    expect(currentResolvers).toHaveLength(2)
+    expect(historyResolvers).toHaveLength(1)
+    expect(saveResolvers).toHaveLength(1)
+
+    // The replacement must win before any old lane is allowed to settle.
+    currentResolvers[1]!({ ok: true, status: 200, json: async () => thesis({ holding_id: 'lot-b', instrument_id: 'instrument-b', id: 'thesis-b', summary: 'Replacement lot thesis' }) } as Response)
+    await waitFor(() => expect(screen.getByDisplayValue('Replacement lot thesis')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Replacement saved draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(saveResolvers).toHaveLength(2))
+    saveResolvers[1]!({ ok: true, status: 200, json: async () => thesis({ holding_id: 'lot-b', instrument_id: 'instrument-b', id: 'thesis-b', revision: 2, revision_id: 'revision-b-2', summary: 'Replacement canonical' }) } as Response)
+    await waitFor(() => expect(screen.getByDisplayValue('Replacement canonical')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(historyResolvers).toHaveLength(2))
+    historyResolvers[1]!({ ok: true, status: 200, json: async () => ({ items: [{ ...thesis({ holding_id: 'lot-b', instrument_id: 'instrument-b', id: 'thesis-b', revision: 2, revision_id: 'history-b-2', summary: 'Replacement history' }), created_at: '2026-01-03T12:00:00.000000000Z' }] }) } as Response)
+    await waitFor(() => expect(screen.getByText('Replacement history')).toBeTruthy())
+
+    // Only now settle the original lot's stale lanes; none may change the
+    // replacement's current document, saved draft, or history selection.
+    historyResolvers[0]!({ ok: true, status: 200, json: async () => ({ items: [{ ...thesis(), created_at: thesis().updated_at }] }) } as Response)
+    saveResolvers[0]!({ ok: true, status: 200, json: async () => thesis({ summary: 'Stale old save', holding_id: 'lot-a' }) } as Response)
+    await waitFor(() => expect(screen.getByText('Replacement history')).toBeTruthy())
+    expect(screen.queryByDisplayValue('Stale old save')).toBeNull()
+    expect(screen.getByRole('heading', { name: /Investment thesis · BBB/i })).toBeTruthy()
+  })
+
+  it('lets a replacement current read win before the stale original read settles', async () => {
+    const lotB: Holding = { ...holding, lot_id: 'lot-b', symbol: 'BBB', name: 'BBB Fund' }
+    const currentResolvers: Array<(value: Response) => void> = []
+    const currentSignals: AbortSignal[] = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/holdings/lot-a/thesis') || url.endsWith('/holdings/lot-b/thesis')) {
+        currentSignals.push(init?.signal as AbortSignal)
+        return new Promise<Response>((resolve) => { currentResolvers.push(resolve) })
+      }
+      return response(thesis())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(<ThesisEditor portfolioId="portfolio-default" holding={holding} csrfToken="csrf" onClose={vi.fn()} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(currentResolvers).toHaveLength(1))
+    view.rerender(<ThesisEditor portfolioId="portfolio-default" holding={lotB} csrfToken="csrf" onClose={vi.fn()} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(currentResolvers).toHaveLength(2))
+    expect(currentResolvers[0]).toBeTypeOf('function')
+    expect(currentResolvers[1]).toBeTypeOf('function')
+    expect(currentSignals[0]?.aborted).toBe(true)
+    currentResolvers[1]!({ ok: true, status: 200, json: async () => thesis({ holding_id: 'lot-b', instrument_id: 'instrument-b', id: 'thesis-b', summary: 'Replacement current' }) } as Response)
+    await waitFor(() => expect(screen.getByDisplayValue('Replacement current')).toBeTruthy())
+    currentResolvers[0]!({ ok: true, status: 200, json: async () => thesis({ summary: 'Stale original current' }) } as Response)
+    await waitFor(() => expect(screen.getByDisplayValue('Replacement current')).toBeTruthy())
+    expect(screen.queryByDisplayValue('Stale original current')).toBeNull()
+    expect(screen.getByRole('heading', { name: /Investment thesis · BBB/i })).toBeTruthy()
   })
 
   it.each([
