@@ -334,9 +334,8 @@ describe('ThesisEditor response contracts', () => {
     view.unmount()
     render(<ThesisEditor portfolioId="portfolio-default" holding={lotB} csrfToken="csrf" onClose={vi.fn()} onUnauthorized={vi.fn()} />)
     await waitFor(() => expect(currentResolvers).toHaveLength(2))
-    expect(currentSignals[0]).toBeTruthy()
-    expect(historySignals[0]).toBeTruthy()
-    expect(saveSignals[0]).toBeTruthy()
+    expect(historyResolvers[0]).toBeTypeOf('function')
+    expect(saveResolvers[0]).toBeTypeOf('function')
     expect(currentSignals[0]!.aborted).toBe(true)
     expect(historySignals[0]!.aborted).toBe(true)
     expect(saveSignals[0]!.aborted).toBe(true)
@@ -344,13 +343,53 @@ describe('ThesisEditor response contracts', () => {
     expect(historyResolvers).toHaveLength(1)
     expect(saveResolvers).toHaveLength(1)
 
-    historyResolvers[0]!({ ok: true, status: 200, json: async () => ({ items: [{ ...thesis(), created_at: thesis().updated_at }] }) } as Response)
-    saveResolvers[0]!({ ok: true, status: 200, json: async () => thesis({ summary: 'Stale old save', holding_id: 'lot-a' }) } as Response)
-    currentResolvers[0]!({ ok: true, status: 200, json: async () => thesis({ summary: 'Stale old current' }) } as Response)
+    // The replacement must win before any old lane is allowed to settle.
     currentResolvers[1]!({ ok: true, status: 200, json: async () => thesis({ holding_id: 'lot-b', instrument_id: 'instrument-b', id: 'thesis-b', summary: 'Replacement lot thesis' }) } as Response)
     await waitFor(() => expect(screen.getByDisplayValue('Replacement lot thesis')).toBeTruthy())
-    expect(screen.queryByDisplayValue('Stale old current')).toBeNull()
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Replacement saved draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(saveResolvers).toHaveLength(2))
+    saveResolvers[1]!({ ok: true, status: 200, json: async () => thesis({ holding_id: 'lot-b', instrument_id: 'instrument-b', id: 'thesis-b', revision: 2, revision_id: 'revision-b-2', summary: 'Replacement canonical' }) } as Response)
+    await waitFor(() => expect(screen.getByDisplayValue('Replacement canonical')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View revision history' }))
+    await waitFor(() => expect(historyResolvers).toHaveLength(2))
+    historyResolvers[1]!({ ok: true, status: 200, json: async () => ({ items: [{ ...thesis({ holding_id: 'lot-b', instrument_id: 'instrument-b', id: 'thesis-b', revision: 2, revision_id: 'history-b-2', summary: 'Replacement history' }), created_at: '2026-01-03T12:00:00.000000000Z' }] }) } as Response)
+    await waitFor(() => expect(screen.getByText('Replacement history')).toBeTruthy())
+
+    // Only now settle the original lot's stale lanes; none may change the
+    // replacement's current document, saved draft, or history selection.
+    historyResolvers[0]!({ ok: true, status: 200, json: async () => ({ items: [{ ...thesis(), created_at: thesis().updated_at }] }) } as Response)
+    saveResolvers[0]!({ ok: true, status: 200, json: async () => thesis({ summary: 'Stale old save', holding_id: 'lot-a' }) } as Response)
+    await waitFor(() => expect(screen.getByText('Replacement history')).toBeTruthy())
     expect(screen.queryByDisplayValue('Stale old save')).toBeNull()
+    expect(screen.getByRole('heading', { name: /Investment thesis · BBB/i })).toBeTruthy()
+  })
+
+  it('lets a replacement current read win before the stale original read settles', async () => {
+    const lotB: Holding = { ...holding, lot_id: 'lot-b', symbol: 'BBB', name: 'BBB Fund' }
+    const currentResolvers: Array<(value: Response) => void> = []
+    const currentSignals: AbortSignal[] = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/holdings/lot-a/thesis') || url.endsWith('/holdings/lot-b/thesis')) {
+        currentSignals.push(init?.signal as AbortSignal)
+        return new Promise<Response>((resolve) => { currentResolvers.push(resolve) })
+      }
+      return response(thesis())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(<ThesisEditor portfolioId="portfolio-default" holding={holding} csrfToken="csrf" onClose={vi.fn()} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(currentResolvers).toHaveLength(1))
+    view.rerender(<ThesisEditor portfolioId="portfolio-default" holding={lotB} csrfToken="csrf" onClose={vi.fn()} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(currentResolvers).toHaveLength(2))
+    expect(currentResolvers[0]).toBeTypeOf('function')
+    expect(currentResolvers[1]).toBeTypeOf('function')
+    expect(currentSignals[0]?.aborted).toBe(true)
+    currentResolvers[1]!({ ok: true, status: 200, json: async () => thesis({ holding_id: 'lot-b', instrument_id: 'instrument-b', id: 'thesis-b', summary: 'Replacement current' }) } as Response)
+    await waitFor(() => expect(screen.getByDisplayValue('Replacement current')).toBeTruthy())
+    currentResolvers[0]!({ ok: true, status: 200, json: async () => thesis({ summary: 'Stale original current' }) } as Response)
+    await waitFor(() => expect(screen.getByDisplayValue('Replacement current')).toBeTruthy())
+    expect(screen.queryByDisplayValue('Stale original current')).toBeNull()
     expect(screen.getByRole('heading', { name: /Investment thesis · BBB/i })).toBeTruthy()
   })
 

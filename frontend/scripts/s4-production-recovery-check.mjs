@@ -56,7 +56,10 @@ async function keyPress(key, { ctrl = false, shift = false } = {}) {
   const virtualKeyCodes = { Enter: 13, Tab: 9, ArrowRight: 39, a: 65 }
   const params = { key, code: key === 'a' ? 'KeyA' : key, modifiers }
   if (virtualKeyCodes[key]) Object.assign(params, { windowsVirtualKeyCode: virtualKeyCodes[key], nativeVirtualKeyCode: virtualKeyCodes[key] })
-  await command('Input.dispatchKeyEvent', { type: 'keyDown', ...params })
+  // Chromium needs the native character payload for Enter to synthesize the
+  // browser's default button activation (keydown/up alone is not enough).
+  const character = key === 'Enter' ? '\r' : undefined
+  await command('Input.dispatchKeyEvent', { type: 'keyDown', ...params, ...(character ? { text: character, unmodifiedText: character } : {}) })
   await command('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
   await settle()
 }
@@ -65,11 +68,11 @@ async function activateButton(label) {
   assert.equal(found, true, `Button not found: ${label}`)
   await keyPress('Enter')
 }
-async function activateTab(label) {
+async function activateTab(label, { expectSelected = true } = {}) {
   const found = await evaluate(`(() => { const node = [...document.querySelectorAll('[role="tab"]')].find((candidate) => (candidate.textContent || '').trim() === ${JSON.stringify(label)} || candidate.getAttribute('aria-label') === ${JSON.stringify(label)}); node?.focus(); return Boolean(node); })()`)
   assert.equal(found, true, `Tab not found: ${label}`)
   await keyPress('Enter')
-  await waitFor(`Boolean([...document.querySelectorAll('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true' && ((node.textContent || '').trim() === ${JSON.stringify(label)} || node.getAttribute('aria-label') === ${JSON.stringify(label)})))`)
+  if (expectSelected) await waitFor(`Boolean([...document.querySelectorAll('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true' && ((node.textContent || '').trim() === ${JSON.stringify(label)} || node.getAttribute('aria-label') === ${JSON.stringify(label)})))`)
 }
 async function typeSummary(value) {
   await evaluate('document.querySelector("#thesis-summary")?.focus(); true')
@@ -92,6 +95,20 @@ async function openThesis() {
   await waitFor('Boolean(document.querySelector("#thesis-title"))')
   await waitFor('Boolean(document.querySelector("#thesis-summary"))')
 }
+async function assertDecisionFocus() {
+  await waitFor('Boolean(document.activeElement?.matches(".thesis-exit-prompt"))')
+  const first = await evaluate('document.activeElement?.className')
+  assert.equal(first, 'notice warning thesis-exit-prompt')
+  await keyPress('Tab')
+  assert.equal(await evaluate('document.activeElement?.textContent?.trim()'), 'Keep editing')
+  await keyPress('Tab')
+  assert.equal(await evaluate('document.activeElement?.textContent?.trim()'), 'Discard changes and leave')
+}
+async function leaveDirtyVia(label) {
+  await activateButton(label)
+  await waitFor('Boolean(document.querySelector(".thesis-exit-prompt"))')
+  await assertDecisionFocus()
+}
 async function assertSelected(label) {
   const result = await evaluate(`(() => { const selected = [...document.querySelectorAll('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true'); return { selected: selected?.textContent?.trim(), heading: document.querySelector('h1')?.textContent?.trim() }; })()`)
   assert.equal(result.selected, label, `Selected tab mismatch: ${JSON.stringify(result)}`)
@@ -106,15 +123,23 @@ async function runWidth(width) {
   await reload(width)
   await openThesis()
   await typeSummary('Keyboard protected draft')
-  await activateTab('Activity')
+  await leaveDirtyVia('Close thesis')
   await waitFor('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Keep editing"))')
   const prompt = await evaluate('(() => { const node = document.querySelector(".thesis-exit-prompt"); const rect = node?.getBoundingClientRect(); return { visible: Boolean(node), top: rect?.top, bottom: rect?.bottom, focused: document.activeElement?.textContent?.trim() }; })()')
   assert.equal(prompt.visible, true)
-  assert.ok(prompt.top >= 0 && prompt.bottom <= innerHeight, `Dirty prompt is not visible: ${JSON.stringify(prompt)}`)
+  assert.ok(prompt.top >= 0 && prompt.bottom <= (await evaluate('window.innerHeight')), `Dirty prompt is not visible: ${JSON.stringify(prompt)}`)
   await activateButton('Keep editing')
   await waitFor('document.activeElement?.id === "thesis-title"')
   assert.equal(await evaluate('document.querySelector("#thesis-summary")?.value'), 'Keyboard protected draft')
-  await activateTab('Activity')
+  await typeSummary('Cancel protected draft')
+  await leaveDirtyVia('Cancel')
+  await activateButton('Keep editing')
+  await waitFor('document.activeElement?.id === "thesis-title"')
+  assert.equal(await evaluate('document.querySelector("#thesis-summary")?.value'), 'Cancel protected draft')
+  await typeSummary('Tab protected draft')
+  await activateTab('Activity', { expectSelected: false })
+  await waitFor('Boolean(document.querySelector(".thesis-exit-prompt"))')
+  await assertDecisionFocus()
   await activateButton('Discard changes and leave')
   await waitFor('Boolean(document.querySelector("h2")?.textContent?.includes("Activity"))')
   await assertSelected('Activity')
@@ -155,7 +180,9 @@ async function runWidth(width) {
   await evaluate('window.__s4.configure({ failLogoutOnce: true }); true')
   await openThesis()
   await typeSummary('Draft before authority loss')
-  await activateTab('Activity')
+  await activateTab('Activity', { expectSelected: false })
+  await waitFor('Boolean(document.querySelector(".thesis-exit-prompt"))')
+  await assertDecisionFocus()
   await activateButton('Keep editing')
   await activateButton('Sign out')
   await waitFor('Boolean(document.querySelector("#username"))')
