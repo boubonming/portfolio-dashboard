@@ -182,6 +182,46 @@ describe('ThesisEditor response contracts', () => {
     await waitFor(() => expect(screen.getByDisplayValue('Saved after retry')).toBeTruthy())
   })
 
+  it('reports an unconfirmed save and retries the identical document and expected revision', async () => {
+    const requests: RequestInit[] = []
+    let putAttempts = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        requests.push(init)
+        putAttempts += 1
+        return putAttempts === 1 ? Promise.reject(new Error('response unreadable')) : response(thesis({ revision: 2, revision_id: 'revision-retry', summary: 'Recovered canonical' }))
+      }
+      return response(thesis())
+    })
+    renderEditor(fetchMock)
+    await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Unconfirmed draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save thesis' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/save not confirmed.*unchanged save/i))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry save' }))
+    await waitFor(() => expect(screen.getByDisplayValue('Recovered canonical')).toBeTruthy())
+    expect(requests).toHaveLength(2)
+    expect(requests[1]?.body).toBe(requests[0]?.body)
+    expect(JSON.parse(String(requests[0]?.body))).toMatchObject({ summary: 'Unconfirmed draft', expected_revision: 1 })
+  })
+
+  it('offers explicit keep-editing and discard choices for dirty close', async () => {
+    const onClose = vi.fn()
+    vi.stubGlobal('fetch', vi.fn(() => response(thesis())))
+    render(<ThesisEditor portfolioId="portfolio-default" holding={holding} csrfToken="csrf" onClose={onClose} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByDisplayValue('Existing summary')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Summary'), { target: { value: 'Keep this draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    expect(screen.getByRole('button', { name: 'Keep editing' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Discard changes and leave' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(screen.getByDisplayValue('Keep this draft')).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Close thesis' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Discard changes and leave' }))
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
   it.each([
     ['network', () => Promise.reject(new Error('current network failure'))],
     ['forbidden', () => response({}, 403)],

@@ -143,6 +143,7 @@ export type ActivityPage = {
 
 type SortKey = 'symbol' | 'quantity' | 'currency' | 'cost_basis' | 'latest_price' | 'latest_value' | 'unrealised_pnl' | 'reporting_value' | 'freshness'
 type SortDirection = 'ascending' | 'descending'
+type View = 'overview' | 'holdings' | 'market' | 'activity' | 'reviews' | 'settings'
 
 function incrementDecimalDigits(value: string) {
   const digits = value.split('')
@@ -477,7 +478,7 @@ function validateActivityPage(value: unknown): ActivityPage {
   return page
 }
 
-function Login({ onLogin, externalError = '', memoryBoundaryNotice = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; externalError?: string; memoryBoundaryNotice?: string }) {
+function Login({ onLogin, onRetrySessionCheck, externalError = '', memoryBoundaryNotice = '' }: { onLogin: (username: string, password: string) => Promise<string | null>; onRetrySessionCheck: () => void; externalError?: string; memoryBoundaryNotice?: string }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [state, setState] = useState<'idle' | 'submitting'>('idle')
@@ -512,7 +513,7 @@ function Login({ onLogin, externalError = '', memoryBoundaryNotice = '' }: { onL
         {memoryBoundaryNotice && <Box className="notice warning" role="status" sx={{ mt: 1 }}>{memoryBoundaryNotice}</Box>}
         <TextField inputRef={usernameRef} id="username" name="username" label="Username" slotProps={{ htmlInput: { 'aria-label': 'Username' } }} autoComplete="username" autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required fullWidth />
         <TextField id="password" name="password" type="password" label="Password" slotProps={{ htmlInput: { 'aria-label': 'Password' } }} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required fullWidth />
-        {(error || externalError) && <Box className="notice error" role="alert" sx={{ mt: 1 }}>{error || externalError}</Box>}
+        {(error || externalError) && <Box className="notice error" role="alert" sx={{ mt: 1 }}>{error || externalError}{externalError && <><br /><Button type="button" onClick={onRetrySessionCheck} size="small">Retry session check</Button></>}</Box>}
         <Button type="submit" variant="contained" disabled={state === 'submitting'} sx={{ mt: 1 }}>{state === 'submitting' ? 'Signing in…' : 'Sign in'}</Button>
       </CardContent>
     </Card>
@@ -521,7 +522,7 @@ function Login({ onLogin, externalError = '', memoryBoundaryNotice = '' }: { onL
 
 export default function App() {
   const [currency, setCurrency] = useState('MYR')
-  const [view, setView] = useState<'overview' | 'holdings' | 'market' | 'activity' | 'reviews' | 'settings'>('holdings')
+  const [view, setView] = useState<View>('holdings')
   const [reviewsHoldingId, setReviewsHoldingId] = useState<string | undefined>(undefined)
   const [data, setData] = useState<PortfolioOverview | null>(null)
   const [overviewETag, setOverviewETag] = useState<string | undefined>(undefined)
@@ -543,6 +544,8 @@ export default function App() {
   const [refreshAnnouncement, setRefreshAnnouncement] = useState('')
   const [authError, setAuthError] = useState('')
   const [memoryBoundaryNotice, setMemoryBoundaryNotice] = useState('')
+  const [thesisNavigationRequest, setThesisNavigationRequest] = useState<{ target: View; token: number } | undefined>(undefined)
+  const thesisNavigationTokenRef = useRef(0)
   const csrfToken = useRef<string | undefined>(undefined)
   const [filter, setFilter] = useState('')
   const [exactAmounts, setExactAmounts] = useState(false)
@@ -841,7 +844,10 @@ export default function App() {
     }
   }, [authState, loadActivity, view])
 
-  useEffect(() => {
+  const checkSession = useCallback(() => {
+    authControllerRef.current?.abort()
+    setAuthError('')
+    setAuthState('checking')
     const generation = ++authGeneration.current
     const controller = new AbortController()
     authControllerRef.current = controller
@@ -860,12 +866,16 @@ export default function App() {
       .catch((reason: unknown) => {
         if (controller.signal.aborted || generation !== authGeneration.current) return
         if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
-        setAuthError(`Unable to load portfolio: ${reason instanceof Error ? reason.message : 'Unable to check your session'}`)
+        setAuthError('Could not check your session. Try again.')
         setAuthState('login')
       })
+  }, [clearPrivateState, scheduleExpiry])
+
+  useEffect(() => {
+    checkSession()
     return () => {
-      controller.abort()
-      authControllerRef.current?.abort()
+      const controller = authControllerRef.current
+      controller?.abort()
       authControllerRef.current = null
       authGeneration.current += 1
       loadGeneration.current += 1
@@ -876,7 +886,7 @@ export default function App() {
       activityControllerRef.current = null
       if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     }
-  }, [clearPrivateState, scheduleExpiry])
+  }, [checkSession])
 
   useEffect(() => {
     if (authState !== 'authenticated') return
@@ -941,6 +951,7 @@ export default function App() {
   }, [clearPrivateState])
 
   const closeThesis = useCallback(() => {
+    setThesisNavigationRequest(undefined)
     setThesisHolding(null)
     window.setTimeout(() => {
       const target = Array.from(document.querySelectorAll<HTMLButtonElement>('.thesis-open-button'))
@@ -950,13 +961,21 @@ export default function App() {
     }, 0)
   }, [])
 
+  const completeThesisNavigation = useCallback((target: string) => {
+    if (!['overview', 'holdings', 'market', 'activity', 'reviews', 'settings'].includes(target)) return
+    setThesisNavigationRequest(undefined)
+    setThesisHolding(null)
+    setView(target as View)
+  }, [])
+
   const closeReviews = useCallback(() => {
     setReviewsHoldingId(undefined)
     setView('holdings')
     window.setTimeout(() => {
       const lotId = reviewsReturnLotIdRef.current
-      const target = lotId ? Array.from(document.querySelectorAll<HTMLButtonElement>('[data-reviews-lot-id]')).find((button) => button.dataset.reviewsLotId === lotId) : null
-      ;(target || reviewsReturnRef.current)?.focus()
+      const target = lotId ? Array.from(document.querySelectorAll<HTMLButtonElement>('[data-reviews-lot-id]')).find((button) => button.dataset.reviewsLotId === lotId && button.isConnected) : null
+      const fallback = document.getElementById('holdings-title') || document.getElementById('portfolio-content')
+      ;(target || fallback)?.focus()
     }, 0)
   }, [])
 
@@ -1003,7 +1022,7 @@ export default function App() {
   const snapshotComplete = Boolean(data?.snapshot.complete && data.snapshot.state === 'complete')
   const snapshotCurrent = data?.snapshot.state !== 'stale'
 
-  if (authState === 'login') return <Login onLogin={signIn} externalError={authError} memoryBoundaryNotice={memoryBoundaryNotice} />
+  if (authState === 'login') return <Login onLogin={signIn} onRetrySessionCheck={checkSession} externalError={authError} memoryBoundaryNotice={memoryBoundaryNotice} />
   if (authState === 'checking') return <Box component="main" className="shell" aria-busy="true"><Paper className="notice" role="status" aria-live="polite" sx={{ mt: 3, p: 3 }}><Typography component="h1" variant="h4">Checking your session…</Typography><Typography>Loading portfolio securely.</Typography></Paper></Box>
 
   const navTabs: Array<{ value: typeof view; label: string; ariaLabel?: string }> = [
@@ -1023,7 +1042,14 @@ export default function App() {
         <Toolbar variant="dense" disableGutters sx={{ gap: { xs: 1, sm: 2 }, flexWrap: { xs: 'wrap', md: 'nowrap' }, py: .5, minWidth: 0 }}>
           <Box component="a" className="app-brand" href="#portfolio-content" aria-label="Portfolio Dashboard home" sx={{ color: 'text.primary', fontWeight: 800, textDecoration: 'none', whiteSpace: { xs: 'normal', sm: 'nowrap' }, minWidth: 0, mr: { md: 1 } }}>Portfolio Dashboard</Box>
           <Box component="nav" className="view-nav" aria-label="Portfolio views" sx={{ flex: { xs: '0 0 100%', md: 1 }, minWidth: 0, order: { xs: 3, md: 0 }, width: { xs: '100%', md: 'auto' }, overflowX: 'auto' }}>
-            <Tabs value={view} onChange={(_event, nextView) => { if (nextView === 'reviews') setReviewsHoldingId(undefined); setView(nextView) }} selectionFollowsFocus variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile aria-label="Portfolio views" sx={{ minHeight: 40, '& .MuiTab-root': { minHeight: 40, minWidth: { xs: 92, sm: 108 }, px: { xs: 1.25, sm: 2 } } }}>
+            <Tabs value={view} onChange={(_event, nextView: View) => {
+              if (thesisHolding) {
+                setThesisNavigationRequest({ target: nextView, token: ++thesisNavigationTokenRef.current })
+                return
+              }
+              if (nextView === 'reviews') setReviewsHoldingId(undefined)
+              setView(nextView)
+            }} selectionFollowsFocus variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile aria-label="Portfolio views" sx={{ minHeight: 40, '& .MuiTab-root': { minHeight: 40, minWidth: { xs: 92, sm: 108 }, px: { xs: 1.25, sm: 2 } } }}>
               {navTabs.map((tab) => <Tab key={tab.value} value={tab.value} label={tab.label} aria-label={tab.ariaLabel} aria-current={view === tab.value ? 'page' : undefined} />)}
             </Tabs>
           </Box>
@@ -1032,7 +1058,7 @@ export default function App() {
       </AppBar>
       <Typography component="h1" id="portfolio-content" className="visually-hidden" tabIndex={-1}>{portfolioContentHeading}</Typography>
 
-      {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} /> : <>
+      {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} navigationRequest={thesisNavigationRequest} onNavigationComplete={completeThesisNavigation} /> : <>
       {(view === 'overview' || view === 'holdings') && <>
       {view === 'holdings' && <Paper component="section" className="toolbar" aria-label="Portfolio controls" variant="outlined" sx={{ mt: 3, p: { xs: 1.5, sm: 2 }, borderColor: 'divider' }}>
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} useFlexGap sx={{ flexWrap: 'wrap', alignItems: { xs: 'stretch', md: 'center' } }}>
@@ -1075,7 +1101,7 @@ export default function App() {
             }, 0)
           }}>
             {(holdingActions) => <Paper component="section" className="table-card holdings-surface" aria-labelledby="holdings-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider', minWidth: 0 }}>
-            <Stack className="section-heading" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between', p: { xs: 2, sm: 2.5 } }}><Box><Typography component="span" className="eyebrow">Canonical active lots</Typography><Typography component="h2" id="holdings-title" variant="h5" sx={{ mt: .5, mb: 0 }}>Holdings</Typography></Box><Typography color="text.secondary">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</Typography></Stack>
+            <Stack className="section-heading" direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between', p: { xs: 2, sm: 2.5 } }}><Box><Typography component="span" className="eyebrow">Canonical active lots</Typography><Typography component="h2" id="holdings-title" tabIndex={-1} variant="h5" sx={{ mt: .5, mb: 0 }}>Holdings</Typography></Box><Typography color="text.secondary">{visibleHoldings.length} shown · {new Set(data.holdings.map((holding) => holding.symbol)).size} symbols</Typography></Stack>
             <span className="visually-hidden" aria-live="polite">{visibleHoldings.length} holding{visibleHoldings.length === 1 ? '' : 's'} shown.</span>
             <TableContainer className="table-scroll horizontal-scroll-region holdings-table-scroll" tabIndex={0} role="region" aria-label="Holdings table horizontal scroll region" aria-describedby="holdings-table-scroll-help" onFocusCapture={(event) => {
               const target = event.target as HTMLElement
@@ -1122,9 +1148,14 @@ export default function App() {
       )}
       </>}
       {view === 'activity' && <ActivityView page={activity} state={activityState} error={activityError} loadingMore={activityLoadingMore} appendError={activityAppendError} announcement={activityAnnouncement} loadMoreRef={activityLoadMoreRef} statusRef={activityStatusRef} onLoadMore={(keyboardActivated) => loadActivity(activity?.next_cursor, true, keyboardActivated)} onRetry={() => activityAppendError ? loadActivity(activity?.next_cursor, true) : loadActivity(undefined, false)} />}
+      {(view === 'settings' || view === 'reviews') && !data && <Paper className={`notice ${state === 'error' ? 'error' : ''}`} role={state === 'error' ? 'alert' : 'status'} aria-live="polite" sx={{ mt: 3, p: 3 }}>
+        <Typography component="h2" variant="h5">{state === 'error' ? 'Unable to load portfolio' : 'Loading portfolio'}</Typography>
+        <Typography>{state === 'error' ? 'Settings and Reviews need the authenticated portfolio read before they can open.' : 'Reading the portfolio before opening this view…'}</Typography>
+        {state === 'error' && <Button type="button" onClick={() => load()}>Retry portfolio read</Button>}
+      </Paper>}
       {view === 'market' && <MarketDataPanel portfolioID={data?.portfolio.id || activityPortfolioID} reportingCurrency={currency} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} />}
       {view === 'settings' && data && <Box component="section" className="settings-page" aria-labelledby="settings-title" sx={{ mt: 3 }}><Typography component="h1" id="settings-title" variant="h4" sx={{ mb: 2 }}>Settings</Typography><SettingsPanel portfolioID={data.portfolio.id} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} onReload={() => load()} /></Box>}
-      {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} feedbackAttempts={feedbackAttemptsRef.current} onUnauthorized={handleThesisUnauthorized} onBackToOverview={closeReviews} />}
+      {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} feedbackAttempts={feedbackAttemptsRef.current} onUnauthorized={handleThesisUnauthorized} onBackToHoldings={closeReviews} />}
       </>}
     </Box>
   )

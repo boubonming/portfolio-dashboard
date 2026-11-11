@@ -409,7 +409,7 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByText('Filtered to exact lot lot-c')).toBeTruthy())
     const filteredCall = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)
     expect(String(filteredCall?.[0])).toContain('holding_id=lot-c')
-    fireEvent.click(screen.getByRole('button', { name: 'Back to overview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Back to holdings' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View reviews for SAME lot lot-c' }))
   })
@@ -2668,5 +2668,48 @@ describe('Portfolio Dashboard', () => {
     } finally {
       if (authorityLoss === 'expiry') vi.useRealTimers()
     }
+  })
+
+  it('offers a generic session-check retry without reading private data before authority', async () => {
+    let sessionChecks = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/v1/auth/session')) {
+        sessionChecks += 1
+        return sessionChecks === 1 ? Promise.reject(new Error('network details must stay private')) : Promise.resolve(authenticatedSession)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Could not check your session\. Try again\./i))
+    expect(screen.getByRole('alert').textContent).not.toMatch(/network details must stay private/i)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry session check' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/portfolios/'))).toBe(true)
+  })
+
+  it('keeps Settings and Reviews recoverable when the initial portfolio read fails', async () => {
+    let overviewCalls = 0
+    const fetchMock = authenticatedFetch((input) => {
+      const url = String(input)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        return overviewCalls === 1 ? Promise.resolve({ ok: false, status: 500, json: async () => ({}) } as Response) : Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+      }
+      if (url.includes('/reviews')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [], has_more: false }) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
+    expect(screen.getByRole('heading', { name: 'Unable to load portfolio' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Retry portfolio read' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    expect(screen.getByRole('heading', { name: 'Unable to load portfolio' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry portfolio read' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Reviews' })).toBeTruthy())
+    expect(fetchMock.mock.calls.some(([, init]) => ['POST', 'PUT', 'DELETE'].includes(String(init?.method || '').toUpperCase()))).toBe(false)
   })
 })
