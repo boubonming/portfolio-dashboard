@@ -12,6 +12,7 @@
     nextSchedule: null,
     conflictOnce: false,
     uncertainOnce: false,
+    degradedOnce: false,
     putCalls: [],
     getCalls: 0,
   }
@@ -19,7 +20,7 @@
   window.__s5 = {
     state,
     reset() {
-      state.schedule = saved(); state.getError = false; state.nextSchedule = null; state.conflictOnce = false; state.uncertainOnce = false
+      state.schedule = saved(); state.getError = false; state.nextSchedule = null; state.conflictOnce = false; state.uncertainOnce = false; state.degradedOnce = false
       state.putCalls.length = 0; state.getCalls = 0
     },
     configure(options = {}) { Object.assign(state, options) },
@@ -44,6 +45,10 @@
         if (state.uncertainOnce) {
           state.uncertainOnce = false
           return Promise.reject(new TypeError('synthetic response lost'))
+        }
+        if (state.degradedOnce) {
+          state.degradedOnce = false
+          return Promise.resolve(response({ error: 'schedule_runtime_degraded' }, 503))
         }
         const request = JSON.parse(body)
         state.schedule = saved({

@@ -299,7 +299,99 @@ describe('SettingsPanel', () => {
     await user.click(screen.getByRole('button', { name: 'Save schedule' }))
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/runtime recovery is unresolved/i))
     expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Status: Active/i)
+    expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/Inactive — recovery required/i)
     degradedFailure.rendered.unmount()
+  })
+
+  it('does not present the last read as current after degraded save, and restores authority only after a healthy reload', async () => {
+    const user = userEvent.setup()
+    let scheduleReads = 0
+    const healthy = environmentSchedule({ etag: scheduleEtag('f') })
+    const degraded = environmentSchedule({ degraded: true, effective: false, runtime_status: 'degraded', etag: scheduleEtag('e') })
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) {
+        if (init?.method === 'PUT') return json({ error: 'runtime degraded' }, 503)
+        scheduleReads += 1
+        if (scheduleReads === 1) return json(healthy)
+        if (scheduleReads === 2) return json({ error: 'unavailable' }, 503)
+        if (scheduleReads === 3) return json(degraded)
+        return json(healthy)
+      }
+      return json(setup())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Status: Active/i))
+    expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/Inactive — recovery required/i)
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Unable to load|inactive/i))
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Status: Active/i)
+
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Inactive — recovery required/i))
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Status: Active/i)
+
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/Active/i))
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('clears a prior conflict lock when the authority scope is replaced', async () => {
+    const user = userEvent.setup()
+    let portfolio = 'portfolio-a'
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) {
+        if (init?.method === 'PUT') return json({ error: 'stale' }, 412)
+        reads += 1
+        return json(environmentSchedule({ portfolio_id: portfolio, etag: scheduleEtag(portfolio === 'portfolio-a' ? 'a' : 'b'), timezone: portfolio === 'portfolio-a' ? 'Asia/Singapore' : 'Etc/UTC' }))
+      }
+      return json({ ...setup(), portfolio_id: portfolio })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const rendered = render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload saved settings' })).toBeTruthy())
+    expect(reads).toBe(2)
+
+    portfolio = 'portfolio-b'
+    rendered.rerender(<SettingsPanel portfolioID="portfolio-b" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect((screen.getByLabelText('Schedule timezone') as HTMLInputElement).value).toBe('Etc/UTC'))
+    expect(screen.queryByRole('button', { name: 'Reload saved settings' })).toBeNull()
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('binds recovery authority to the replacement portfolio scope', async () => {
+    const user = userEvent.setup()
+    let portfolio = 'portfolio-a'
+    let put = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) {
+        if (init?.method === 'PUT') { put = true; return json({ error: 'runtime degraded' }, 503) }
+        return json(environmentSchedule({ portfolio_id: portfolio, timezone: portfolio === 'portfolio-a' ? 'Asia/Singapore' : 'Etc/UTC', etag: scheduleEtag(portfolio === 'portfolio-a' ? 'a' : 'b') }))
+      }
+      return json({ ...setup(), portfolio_id: portfolio })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const rendered = render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(put).toBe(true))
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+
+    portfolio = 'portfolio-b'
+    rendered.rerender(<SettingsPanel portfolioID="portfolio-b" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect((screen.getByLabelText('Schedule timezone') as HTMLInputElement).value).toBe('Etc/UTC'))
+    expect(screen.queryByRole('button', { name: 'Reload schedule' })).toBeNull()
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, request]) => request?.method === 'PUT')).toHaveLength(2))
   })
 
   it.each([

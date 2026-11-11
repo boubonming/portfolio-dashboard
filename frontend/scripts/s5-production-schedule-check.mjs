@@ -92,6 +92,14 @@ async function editInput(label, value) {
   await command('Input.insertText', { text: value })
   await settle()
 }
+async function nativeTabToButton(label, maxTabs = 40) {
+  await evaluate('document.body.setAttribute("tabindex", "-1"); document.body.focus(); true')
+  for (let index = 0; index < maxTabs; index += 1) {
+    await keyPress('Tab')
+    if (await evaluate(`document.activeElement?.textContent?.trim() === ${JSON.stringify(label)}`)) return
+  }
+  throw new Error(`Native Tab did not reach ${label}`)
+}
 async function scheduleState() {
   return evaluate(`(() => ({
     summary: document.querySelector('[aria-label="Schedule summary"]')?.textContent || '',
@@ -133,6 +141,19 @@ async function runWidth(width, detailed) {
   state = await assertNoRootOverflow(`${width}px Active`)
   assert.match(state.status, /Active/)
   assert.equal(state.puts, 1, 'Rapid activation must issue one PUT')
+
+  await editInput('Schedule timezone', 'America/Los_Angeles')
+  await evaluate('window.__s5.configure({ degradedOnce: true }); true')
+  await activateButton('Save schedule')
+  await waitFor('document.querySelector("[role=alert]")?.textContent?.includes("save result is not confirmed")')
+  state = await assertNoRootOverflow(`${width}px uncertain degraded save`)
+  assert.match(state.status, /Inactive — recovery required/)
+  assert.doesNotMatch(state.status, /effective: yes/)
+  assert.equal(await evaluate('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Save schedule" && node.disabled))'), true, 'Unconfirmed runtime must disable Save')
+  await nativeTabToButton('Reload schedule')
+  await keyPress('Enter')
+  await waitFor('document.querySelector("[aria-label=\\"Schedule runtime status\\"]")?.textContent?.includes("Active")')
+  assert.equal((await scheduleState()).puts, 2, 'Reconciliation must not auto-PUT')
 
   await reload(width, `${appURL.replace(/\/$/, '')}/?s5degraded=1`)
   await openSettings()

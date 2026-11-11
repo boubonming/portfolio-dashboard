@@ -180,9 +180,31 @@ const cronFieldNames: Record<number, Record<string, number>> = {
   4: { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 },
 }
 
+// robfig/cron parses numeric fields with strconv.Atoi on the amd64 server.
+// Keep the browser decoder's integer contract bounded to the same signed range
+// instead of letting Number round an overflowing step back into a valid value.
+const MAX_CRON_INTEGER = 9223372036854775807n
+
+function cronInteger(value: string): bigint | null {
+  if (!/^\+?\d+$/.test(value)) return null
+  const digits = value.startsWith('+') ? value.slice(1) : value
+  try {
+    const parsed = BigInt(digits)
+    return parsed <= MAX_CRON_INTEGER ? parsed : null
+  } catch {
+    return null
+  }
+}
+
 function cronValue(value: string, min: number, max: number, names?: Record<string, number>): number | null {
-  const numeric = /^\d+$/.test(value) ? Number(value) : names?.[value.toLowerCase()]
-  return numeric !== undefined && numeric >= min && numeric <= max ? numeric : null
+  const integer = cronInteger(value)
+  if (integer !== null) {
+    const minimum = BigInt(min)
+    const maximum = BigInt(max)
+    return integer >= minimum && integer <= maximum ? Number(integer) : null
+  }
+  const named = names?.[value.toLowerCase()]
+  return named !== undefined ? named : null
 }
 
 function validCronField(field: string, min: number, max: number, names?: Record<string, number>): boolean {
@@ -190,7 +212,10 @@ function validCronField(field: string, min: number, max: number, names?: Record<
     const segments = part.split('/')
     if (segments.length > 2) return false
     const [base, step] = segments
-    if (step !== undefined && (!/^\d+$/.test(step) || Number(step) < 1)) return false
+    if (step !== undefined) {
+      const stepValue = cronInteger(step)
+      if (stepValue === null || stepValue < 1n) return false
+    }
     if (base === '*' || base === '?') return true
     const range = base.split('-')
     if (range.length > 2) return false
@@ -207,7 +232,7 @@ function strictCron(value: unknown, field: string, label: string, enabled: boole
   }
   const fields = value.split(/\s+/)
   const bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]] as const
-  if (fields.length !== 5 || fields.some((part) => part === '' || !/^[A-Za-z0-9*/?,\-]+$/.test(part)) || fields.some((part, index) => !validCronField(part, bounds[index][0], bounds[index][1], cronFieldNames[index]))) throw new APIError(200, `Invalid ${label} response: ${field}.`)
+  if (fields.length !== 5 || fields.some((part) => part === '' || !/^[A-Za-z0-9+*/?,\-]+$/.test(part)) || fields.some((part, index) => !validCronField(part, bounds[index][0], bounds[index][1], cronFieldNames[index]))) throw new APIError(200, `Invalid ${label} response: ${field}.`)
   return value
 }
 

@@ -76,6 +76,16 @@ describe('typed API helper', () => {
     await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/cron/i)
   })
 
+  it('matches the authoritative cron integer parser for signed zero and overflowing steps', async () => {
+    const base = { portfolio_id: 'portfolio-a', enabled: true, cron: '+0 5 * * *', timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: `"${'e'.repeat(64)}"`, effective: true, degraded: false, runtime_status: 'active' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => base } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).resolves.toMatchObject({ cron: '+0 5 * * *' })
+
+    const overflowingStep = { ...base, cron: '*/999999999999999999999999 5 * * *' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => overflowingStep } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/cron/i)
+  })
+
   it('accepts an empty mapping array in a market-data setup response', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({
       portfolio_id: 'portfolio-a', etag: '"setup-1"', providers: [{ name: 'coingecko', configured: true, public: true }],
