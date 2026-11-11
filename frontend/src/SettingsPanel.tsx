@@ -42,14 +42,19 @@ function scheduleTimeFromCron(cron: string): string {
   return `${String(Number(hour)).padStart(2, '0')}:${String(Number(minute)).padStart(2, '0')}`
 }
 
-function scheduleStatusLabel(schedule: MarketRefreshSchedule, runtimeRecoveryRequired = false): string {
+function scheduleStatusLabel(schedule: MarketRefreshSchedule, runtimeRecoveryRequired = false, runtimeUnconfirmed = false): string {
+  if (runtimeUnconfirmed) return 'Unconfirmed — reload required'
   if (runtimeRecoveryRequired || schedule.degraded || schedule.runtime_status === 'degraded') return 'Inactive — recovery required'
   if (schedule.runtime_status === 'disabled' || !schedule.enabled) return 'Disabled'
   if (!schedule.effective) return 'Inactive — recovery required'
   return 'Active'
 }
 
-function scheduleSummary(schedule: MarketRefreshSchedule): string {
+function scheduleSummary(schedule: MarketRefreshSchedule, runtimeUnconfirmed = false): string {
+  if (runtimeUnconfirmed) {
+    const lastRead = !schedule.enabled || schedule.runtime_status === 'disabled' ? 'Off' : schedulePresetFromCron(schedule.cron) === 'custom' ? `Custom cron ${schedule.cron}` : `${schedulePresetFromCron(schedule.cron) === 'daily' ? 'Daily' : 'Weekdays'} at ${scheduleTimeFromCron(schedule.cron)}`
+    return `Runtime unconfirmed — reload required (last-read ${lastRead} in ${schedule.timezone})`
+  }
   if (!schedule.enabled || schedule.runtime_status === 'disabled') return 'Off — choose a schedule before enabling'
   const preset = schedulePresetFromCron(schedule.cron)
   if (preset === 'custom') return `Custom cron ${schedule.cron} in ${schedule.timezone}`
@@ -75,6 +80,7 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
   // The last read remains useful for draft recovery, but is not current runtime
   // truth after an uncertain/degraded write until a healthy GET reconciles it.
   const [runtimeRecoveryRequired, setRuntimeRecoveryRequired] = useState(false)
+  const [runtimeUnconfirmed, setRuntimeUnconfirmed] = useState(false)
   const controllerRef = useRef<AbortController | null>(null)
   const mutationRef = useRef<AbortController | null>(null)
   const scheduleSavingRef = useRef(false)
@@ -132,6 +138,7 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
       setSchedule(next)
       setSchedulePending(false)
       setRuntimeRecoveryRequired(false)
+      setRuntimeUnconfirmed(false)
       if (!options.preserveDraft || options.adopt) applyCanonicalSchedule(next)
       if (options.adopt) {
         setConflictPending(false)
@@ -143,7 +150,10 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
       if (controller.signal.aborted || generation !== generationRef.current) return
       setSchedulePending(false)
       if (reason instanceof APIError && reason.status === 401) { expireSession(); return }
-      setScheduleError(reason instanceof APIError && reason.status === 503 ? recoveryMessage : reason instanceof Error ? reason.message : 'Unable to load the refresh schedule')
+      const readError = reason instanceof APIError && reason.status === 503
+        ? runtimeUnconfirmed ? 'Unable to reload schedule. Runtime remains unconfirmed; reload schedule again to reconcile.' : recoveryMessage
+        : reason instanceof Error ? reason.message : 'Unable to load the refresh schedule'
+      setScheduleError(readError)
     })
   }
 
@@ -153,6 +163,7 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
     setConflictPending(false)
     setReconciliationRequired(false)
     setRuntimeRecoveryRequired(false)
+    setRuntimeUnconfirmed(false)
     setScheduleError('')
     setScheduleMessage('')
     load()
@@ -239,8 +250,10 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
         focusError('Schedule was not accepted. Check the cron expression, timezone and currency. Your edits are kept.')
       } else {
         setReconciliationRequired(true)
-        setRuntimeRecoveryRequired(true)
-        focusError(reason instanceof APIError && reason.status === 503 ? `${recoveryMessage} The save result is not confirmed.` : 'Schedule save not confirmed. Reload schedule to check the saved setting before saving again.')
+        const knownDegraded = reason instanceof APIError && reason.status === 503
+        setRuntimeRecoveryRequired(knownDegraded)
+        setRuntimeUnconfirmed(!knownDegraded)
+        focusError(knownDegraded ? `${recoveryMessage} The save result is not confirmed.` : 'Schedule save not confirmed. Runtime is unconfirmed; reload schedule to reconcile before saving again.')
       }
     } finally {
       if (generation === generationRef.current) {
@@ -260,20 +273,20 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
       {!schedule && !schedulePending && scheduleError && <p ref={scheduleErrorRef} tabIndex={-1} className="notice error" role="alert" aria-live="assertive">{scheduleError} <button type="button" onClick={() => load('')}>Reload schedule</button></p>}
       {schedule && <>
         {schedulePending && <p role="status" aria-live="polite">Reloading schedule…</p>}
-        {(schedule.degraded || reconciliationRequired || conflictPending || runtimeRecoveryRequired || scheduleError) && <p ref={scheduleErrorRef} tabIndex={-1} className="notice error" role="alert" aria-live="assertive">{scheduleError || (schedule.degraded || runtimeRecoveryRequired ? `${scheduleStatusLabel(schedule, runtimeRecoveryRequired)}: ${recoveryMessage}` : '')} {conflictPending && <button type="button" onClick={() => load('', { preserveDraft: true, adopt: true })}>Reload saved settings</button>} {!conflictPending && (schedule.degraded || reconciliationRequired || runtimeRecoveryRequired) && <button type="button" onClick={retryRead}>Reload schedule</button>} </p>}
-        <p className="schedule-summary" role="status" aria-live="polite" aria-label="Schedule summary"><strong>{scheduleSummary(schedule)}</strong> · Status: {scheduleStatusLabel(schedule, runtimeRecoveryRequired)}. {schedule.reporting_currency ? `Reporting currency: ${schedule.reporting_currency}.` : 'Reporting currency: Portfolio default (blank; not the Holdings selector).'}</p>
+        {(schedule.degraded || reconciliationRequired || conflictPending || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleError) && <p ref={scheduleErrorRef} tabIndex={-1} className="notice error" role="alert" aria-live="assertive">{scheduleError || (schedule.degraded || runtimeRecoveryRequired ? `${scheduleStatusLabel(schedule, runtimeRecoveryRequired)}: ${recoveryMessage}` : runtimeUnconfirmed ? 'Runtime is unconfirmed after the save attempt; reload schedule to reconcile before relying on these settings.' : '')} {conflictPending && <button type="button" onClick={() => load('', { preserveDraft: true, adopt: true })}>Reload saved settings</button>} {!conflictPending && (schedule.degraded || reconciliationRequired || runtimeRecoveryRequired || runtimeUnconfirmed) && <button type="button" onClick={retryRead}>Reload schedule</button>} </p>}
+        <p className="schedule-summary" role="status" aria-live="polite" aria-label="Schedule summary"><strong>{scheduleSummary(schedule, runtimeUnconfirmed)}</strong> · Status: {scheduleStatusLabel(schedule, runtimeRecoveryRequired, runtimeUnconfirmed)}. {schedule.reporting_currency ? `Reporting currency: ${schedule.reporting_currency}.` : 'Reporting currency: Portfolio default (blank; not the Holdings selector).'}</p>
         {!schedule.enabled && schedulePreset === 'daily' && scheduleTime === DEFAULT_SCHEDULE_TIME && <p className="muted">Unsaved Daily template: 05:00 in {scheduleTimezone}. It is not the saved schedule until you enable and save it.</p>}
-        <label><input type="checkbox" checked={scheduleEnabled} disabled={schedule.degraded || runtimeRecoveryRequired || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => setScheduleEnabled(event.target.checked)} aria-describedby={schedule.degraded || runtimeRecoveryRequired ? 'market-refresh-schedule-status' : undefined} /> Enable scheduled refreshes</label>
+        <label><input type="checkbox" checked={scheduleEnabled} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => setScheduleEnabled(event.target.checked)} aria-describedby={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed ? 'market-refresh-schedule-status' : undefined} /> Enable scheduled refreshes</label>
         <div className="schedule-grid">
-          <label>Preset<select aria-label="Preset" value={schedulePreset} disabled={schedule.degraded || runtimeRecoveryRequired || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => changeSchedulePreset(event.target.value as SchedulePreset)}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="custom">Custom cron</option></select></label>
-          {schedulePreset !== 'custom' ? <label>Local time<input ref={timeRef} aria-label="Schedule local time" type="time" value={scheduleTime} disabled={schedule.degraded || runtimeRecoveryRequired || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => changeScheduleTime(event.target.value)} /></label> : <label>Five-field cron<input ref={cronRef} aria-label="Custom five-field cron" value={scheduleCron} disabled={schedule.degraded || runtimeRecoveryRequired || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => setScheduleCron(event.target.value)} placeholder="0 5 * * *" /></label>}
-          <label>IANA timezone<input ref={timezoneRef} aria-label="Schedule timezone" value={scheduleTimezone} disabled={schedule.degraded || runtimeRecoveryRequired || scheduleSaving || conflictPending || reconciliationRequired} maxLength={64} onChange={(event) => setScheduleTimezone(event.target.value)} /></label>
-          <label>Reporting currency (optional)<input ref={currencyRef} aria-label="Reporting currency" value={scheduleCurrency} disabled={schedule.degraded || runtimeRecoveryRequired || scheduleSaving || conflictPending || reconciliationRequired} maxLength={3} onChange={(event) => setScheduleCurrency(event.target.value.toUpperCase())} placeholder="Use portfolio default" /></label>
+          <label>Preset<select aria-label="Preset" value={schedulePreset} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => changeSchedulePreset(event.target.value as SchedulePreset)}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="custom">Custom cron</option></select></label>
+          {schedulePreset !== 'custom' ? <label>Local time<input ref={timeRef} aria-label="Schedule local time" type="time" value={scheduleTime} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => changeScheduleTime(event.target.value)} /></label> : <label>Five-field cron<input ref={cronRef} aria-label="Custom five-field cron" value={scheduleCron} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => setScheduleCron(event.target.value)} placeholder="0 5 * * *" /></label>}
+          <label>IANA timezone<input ref={timezoneRef} aria-label="Schedule timezone" value={scheduleTimezone} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} maxLength={64} onChange={(event) => setScheduleTimezone(event.target.value)} /></label>
+          <label>Reporting currency (optional)<input ref={currencyRef} aria-label="Reporting currency" value={scheduleCurrency} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} maxLength={3} onChange={(event) => setScheduleCurrency(event.target.value.toUpperCase())} placeholder="Use portfolio default" /></label>
         </div>
         <p className="muted" aria-label="Schedule source">Schedule source: {schedule.source === 'saved' ? 'Saved in portfolio (saved).' : 'Deployment defaults (environment).'} {schedule.source === 'environment' && 'The fallback is not saved until you choose Save schedule.'}</p>
-        <p id="market-refresh-schedule-status" className="muted" role="status" aria-live="polite" aria-label="Schedule runtime status">Schedule runtime status: {scheduleStatusLabel(schedule, runtimeRecoveryRequired)} (technical runtime: {runtimeRecoveryRequired ? 'unconfirmed' : schedule.runtime_status}; effective: {runtimeRecoveryRequired ? 'unconfirmed' : schedule.effective ? 'yes' : 'no'}).</p>
+        <p id="market-refresh-schedule-status" className="muted" role="status" aria-live="polite" aria-label="Schedule runtime status">Schedule runtime status: {scheduleStatusLabel(schedule, runtimeRecoveryRequired, runtimeUnconfirmed)} (technical runtime: {runtimeRecoveryRequired || runtimeUnconfirmed ? 'unconfirmed' : schedule.runtime_status}; effective: {runtimeRecoveryRequired || runtimeUnconfirmed ? 'unconfirmed' : schedule.effective ? 'yes' : 'no'}).</p>
         <details><summary>Technical details</summary><p className="muted schedule-revision" aria-label="Schedule revision">Schedule revision: {schedule.revision} · ETag: <span className="schedule-etag">{schedule.etag}</span></p></details>
-        <button type="button" onClick={saveSchedule} disabled={scheduleSaving || schedule.degraded || runtimeRecoveryRequired || conflictPending || reconciliationRequired} aria-describedby={schedule.degraded || runtimeRecoveryRequired || conflictPending || reconciliationRequired ? 'market-refresh-schedule-status' : undefined}>{scheduleSaving ? 'Saving schedule…' : 'Save schedule'}</button>
+        <button type="button" onClick={saveSchedule} disabled={scheduleSaving || schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || conflictPending || reconciliationRequired} aria-describedby={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || conflictPending || reconciliationRequired ? 'market-refresh-schedule-status' : undefined}>{scheduleSaving ? 'Saving schedule…' : 'Save schedule'}</button>
         {scheduleMessage && <p role="status" aria-live="polite">{scheduleMessage}</p>}
       </>}
     </section>

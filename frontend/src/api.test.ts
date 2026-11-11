@@ -86,6 +86,12 @@ describe('typed API helper', () => {
     await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/cron/i)
   })
 
+  it.each(['0 5 * constructor *', '0 5 * * constructor'])('rejects inherited cron names accepted by neither the Go parser nor the wire contract: %s', async (cron) => {
+    const invalid = { portfolio_id: 'portfolio-a', enabled: true, cron, timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: '"' + 'f'.repeat(64) + '"', effective: true, degraded: false, runtime_status: 'active' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => invalid } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/cron/i)
+  })
+
   it('accepts an empty mapping array in a market-data setup response', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => ({
       portfolio_id: 'portfolio-a', etag: '"setup-1"', providers: [{ name: 'coingecko', configured: true, public: true }],

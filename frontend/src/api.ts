@@ -203,7 +203,8 @@ function cronValue(value: string, min: number, max: number, names?: Record<strin
     const maximum = BigInt(max)
     return integer >= minimum && integer <= maximum ? Number(integer) : null
   }
-  const named = names?.[value.toLowerCase()]
+  const name = value.toLowerCase()
+  const named = names !== undefined && Object.prototype.hasOwnProperty.call(names, name) ? names[name] : undefined
   return named !== undefined ? named : null
 }
 

@@ -100,6 +100,15 @@ async function nativeTabToButton(label, maxTabs = 40) {
   }
   throw new Error(`Native Tab did not reach ${label}`)
 }
+async function focusNativeButton(label) {
+  await nativeTabToButton(label)
+  const geometry = await evaluate(`(() => { const node = document.activeElement; const rect = node?.getBoundingClientRect(); const style = node ? getComputedStyle(node) : null; return { label: node?.textContent?.trim(), visible: Boolean(rect && rect.width > 0 && rect.height > 0), inViewport: Boolean(rect && rect.left >= 0 && rect.right <= innerWidth + 1 && rect.top >= 0 && rect.bottom <= innerHeight + 1), focusVisible: style?.outlineStyle !== 'none' || style?.boxShadow !== 'none' }; })()`)
+  assert.equal(geometry.label, label, `Native Tab focused the wrong recovery control: ${JSON.stringify(geometry)}`)
+  assert.equal(geometry.visible, true, `Recovery control is not visible at the active width: ${JSON.stringify(geometry)}`)
+  assert.equal(geometry.inViewport, true, `Recovery control is outside the viewport: ${JSON.stringify(geometry)}`)
+  assert.equal(geometry.focusVisible, true, `Recovery control has no visible focus indication: ${JSON.stringify(geometry)}`)
+  return geometry
+}
 async function scheduleState() {
   return evaluate(`(() => ({
     summary: document.querySelector('[aria-label="Schedule summary"]')?.textContent || '',
@@ -150,7 +159,7 @@ async function runWidth(width, detailed) {
   assert.match(state.status, /Inactive — recovery required/)
   assert.doesNotMatch(state.status, /effective: yes/)
   assert.equal(await evaluate('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Save schedule" && node.disabled))'), true, 'Unconfirmed runtime must disable Save')
-  await nativeTabToButton('Reload schedule')
+  await focusNativeButton('Reload schedule')
   await keyPress('Enter')
   await waitFor('document.querySelector("[aria-label=\\"Schedule runtime status\\"]")?.textContent?.includes("Active")')
   assert.equal((await scheduleState()).puts, 2, 'Reconciliation must not auto-PUT')
@@ -162,11 +171,10 @@ async function runWidth(width, detailed) {
   assert.match(state.status, /Inactive — recovery required/)
   assert.equal(await evaluate('Boolean(document.querySelector("button[disabled]"))'), true, 'Degraded state must disable controls')
 
-  if (!detailed) return { width, off: true, active: true, degraded: true, overflow: state.width }
-
   const custom = await evaluate(`({ ...window.__s5.state.schedule, enabled: true, cron: '*/30 5 * * *', timezone: 'Etc/UTC', reporting_currency: 'SGD', revision: 2, updated_at: '2026-01-03T12:00:00.000000000Z', source: 'saved', etag: '"${'c'.repeat(64)}"', effective: true, degraded: false, runtime_status: 'active' })`)
   await evaluate(`window.__s5.configure({ getError: false, nextSchedule: ${JSON.stringify(custom)} }); true`)
-  await activateButton('Reload schedule')
+  await focusNativeButton('Reload schedule')
+  await keyPress('Enter')
   await waitFor('document.querySelector("[aria-label=\\"Schedule summary\\"]")?.textContent?.includes("Custom cron */30 5 * * *")')
   assert.equal(await evaluate('document.querySelector("[aria-label=\\"Custom five-field cron\\"]")?.value'), '*/30 5 * * *')
 
@@ -176,7 +184,8 @@ async function runWidth(width, detailed) {
   await waitFor('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Reload saved settings"))')
   assert.equal(await evaluate('window.__s5.state.putCalls.length'), 1)
   assert.equal(await evaluate('document.querySelector("[aria-label=\\"Schedule timezone\\"]")?.value'), 'America/New_York')
-  await activateButton('Reload saved settings')
+  await focusNativeButton('Reload saved settings')
+  await keyPress('Enter')
   await waitFor('document.querySelector("[aria-label=\\"Schedule timezone\\"]")?.value === "Etc/UTC"')
   assert.equal(await evaluate('window.__s5.state.putCalls.length'), 1, 'Conflict adoption must not auto-PUT')
 
@@ -185,7 +194,8 @@ async function runWidth(width, detailed) {
   await activateButton('Save schedule')
   await waitFor('document.querySelector("[role=alert]")?.textContent?.includes("save not confirmed")')
   assert.equal(await evaluate('window.__s5.state.putCalls.length'), 2)
-  await activateButton('Reload schedule')
+  await focusNativeButton('Reload schedule')
+  await keyPress('Enter')
   await waitFor('document.querySelector("[aria-label=\\"Schedule timezone\\"]")?.value === "Etc/UTC"')
   assert.equal(await evaluate('window.__s5.state.putCalls.length'), 2, 'Uncertain save recovery must be GET-only')
 
@@ -194,13 +204,13 @@ async function runWidth(width, detailed) {
   await waitFor('Boolean(document.querySelector("[role=alert]"))')
   state = await scheduleState()
   assert.equal(state.loading, false, 'Completed GET failure must not remain Loading')
-  assert.equal(await evaluate('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Reload schedule"))'), true)
-  return { width, off: true, active: true, custom: true, conflict: true, uncertain: true, error: true, overflow: state.width }
+  await focusNativeButton('Reload schedule')
+  return { width, off: true, active: true, custom: true, conflict: true, uncertain: true, error: true, nativeRecovery: true, overflow: state.width }
 }
 
 await command('Page.enable')
 await command('Runtime.enable')
 await command('Page.addScriptToEvaluateOnNewDocument', { source: fixture })
-const results = [await runWidth(1280, true), await runWidth(320, false)]
+const results = [await runWidth(1280, true), await runWidth(320, true)]
 console.log(JSON.stringify({ results, keyboardOnly: true, syntheticFixture: true, noPrivateStorage: await evaluate('localStorage.length === 0 && sessionStorage.length === 0') }, null, 2))
 socket.close()
