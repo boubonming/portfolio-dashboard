@@ -3,15 +3,20 @@ import { APIError, getMarketRefreshSchedule, saveMarketRefreshSchedule, type Mar
 
 export type SchedulePreset = 'daily' | 'weekdays' | 'custom'
 
+const DEFAULT_SCHEDULE_TIME = '05:00'
+const DEFAULT_SCHEDULE_CRON = '0 5 * * *'
+
 export function scheduleCronForPreset(preset: Exclude<SchedulePreset, 'custom'>, time: string): string {
   const [hour, minute] = time.split(':')
   return preset === 'daily' ? `${Number(minute)} ${Number(hour)} * * *` : `${Number(minute)} ${Number(hour)} * * 1-5`
 }
 
+/** Only canonical, single minute/hour fields are represented by a preset. */
 export function schedulePresetFromCron(cron: string): SchedulePreset {
   const fields = cron.trim().split(/\s+/)
-  if (fields.length === 5 && fields[2] === '*' && fields[3] === '*' && fields[4] === '*') return 'daily'
-  if (fields.length === 5 && fields[2] === '*' && fields[3] === '*' && fields[4] === '1-5') return 'weekdays'
+  const simpleTime = fields.length === 5 && /^\d+$/.test(fields[0]) && /^\d+$/.test(fields[1]) && Number(fields[0]) <= 59 && Number(fields[1]) <= 23 && fields[2] === '*' && fields[3] === '*'
+  if (simpleTime && fields[4] === '*') return 'daily'
+  if (simpleTime && fields[4] === '1-5') return 'weekdays'
   return 'custom'
 }
 
@@ -26,17 +31,56 @@ type SettingsPanelProps = {
   onReload: () => void
 }
 
+type LoadOptions = {
+  preserveDraft?: boolean
+  adopt?: boolean
+  retainError?: boolean
+}
+
+function scheduleTimeFromCron(cron: string): string {
+  const [minute, hour] = cron.trim().split(/\s+/)
+  return `${String(Number(hour)).padStart(2, '0')}:${String(Number(minute)).padStart(2, '0')}`
+}
+
+function scheduleStatusLabel(schedule: MarketRefreshSchedule, runtimeRecoveryRequired = false, runtimeUnconfirmed = false): string {
+  if (runtimeUnconfirmed) return 'Unconfirmed — reload required'
+  if (runtimeRecoveryRequired || schedule.degraded || schedule.runtime_status === 'degraded') return 'Inactive — recovery required'
+  if (schedule.runtime_status === 'disabled' || !schedule.enabled) return 'Disabled'
+  if (!schedule.effective) return 'Inactive — recovery required'
+  return 'Active'
+}
+
+function scheduleSummary(schedule: MarketRefreshSchedule, runtimeUnconfirmed = false): string {
+  if (runtimeUnconfirmed) {
+    const lastRead = !schedule.enabled || schedule.runtime_status === 'disabled' ? 'Off' : schedulePresetFromCron(schedule.cron) === 'custom' ? `Custom cron ${schedule.cron}` : `${schedulePresetFromCron(schedule.cron) === 'daily' ? 'Daily' : 'Weekdays'} at ${scheduleTimeFromCron(schedule.cron)}`
+    return `Runtime unconfirmed — reload required (last-read ${lastRead} in ${schedule.timezone})`
+  }
+  if (!schedule.enabled || schedule.runtime_status === 'disabled') return 'Off — choose a schedule before enabling'
+  const preset = schedulePresetFromCron(schedule.cron)
+  if (preset === 'custom') return `Custom cron ${schedule.cron} in ${schedule.timezone}`
+  return `${preset === 'daily' ? 'Daily' : 'Weekdays'} at ${scheduleTimeFromCron(schedule.cron)} in ${schedule.timezone}`
+}
+
+const recoveryMessage = 'Automatic refresh is inactive while runtime recovery is unresolved. Reload schedule, or retry or reconcile with the deployment owner before relying on these settings.'
+
 export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, onReload }: SettingsPanelProps) {
   const [schedule, setSchedule] = useState<MarketRefreshSchedule | null>(null)
+  const [schedulePending, setSchedulePending] = useState(true)
   const [schedulePreset, setSchedulePreset] = useState<SchedulePreset>('daily')
-  const [scheduleTime, setScheduleTime] = useState('05:00')
-  const [scheduleCron, setScheduleCron] = useState('0 5 * * *')
+  const [scheduleTime, setScheduleTime] = useState(DEFAULT_SCHEDULE_TIME)
+  const [scheduleCron, setScheduleCron] = useState(DEFAULT_SCHEDULE_CRON)
   const [scheduleEnabled, setScheduleEnabled] = useState(false)
   const [scheduleTimezone, setScheduleTimezone] = useState('Asia/Singapore')
   const [scheduleCurrency, setScheduleCurrency] = useState('')
   const [scheduleSaving, setScheduleSaving] = useState(false)
   const [scheduleMessage, setScheduleMessage] = useState('')
   const [scheduleError, setScheduleError] = useState('')
+  const [conflictPending, setConflictPending] = useState(false)
+  const [reconciliationRequired, setReconciliationRequired] = useState(false)
+  // The last read remains useful for draft recovery, but is not current runtime
+  // truth after an uncertain/degraded write until a healthy GET reconciles it.
+  const [runtimeRecoveryRequired, setRuntimeRecoveryRequired] = useState(false)
+  const [runtimeUnconfirmed, setRuntimeUnconfirmed] = useState(false)
   const controllerRef = useRef<AbortController | null>(null)
   const mutationRef = useRef<AbortController | null>(null)
   const scheduleSavingRef = useRef(false)
@@ -44,6 +88,11 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
   const scopeRef = useRef(portfolioID)
   const unauthorizedRef = useRef(onUnauthorized)
   const reloadRef = useRef(onReload)
+  const scheduleErrorRef = useRef<HTMLParagraphElement | null>(null)
+  const timeRef = useRef<HTMLInputElement | null>(null)
+  const cronRef = useRef<HTMLInputElement | null>(null)
+  const timezoneRef = useRef<HTMLInputElement | null>(null)
+  const currencyRef = useRef<HTMLInputElement | null>(null)
   scopeRef.current = portfolioID
   unauthorizedRef.current = onUnauthorized
   reloadRef.current = onReload
@@ -59,7 +108,18 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
     unauthorizedRef.current()
   }
 
-  const load = (initialScheduleError = '') => {
+  const applyCanonicalSchedule = (next: MarketRefreshSchedule) => {
+    const preset = next.enabled ? schedulePresetFromCron(next.cron) : 'daily'
+    setScheduleEnabled(next.enabled)
+    setScheduleCron(next.enabled ? next.cron : DEFAULT_SCHEDULE_CRON)
+    setSchedulePreset(preset)
+    setScheduleTimezone(next.timezone)
+    setScheduleCurrency(next.reporting_currency)
+    if (next.enabled && preset !== 'custom') setScheduleTime(scheduleTimeFromCron(next.cron))
+    else if (!next.enabled) setScheduleTime(DEFAULT_SCHEDULE_TIME)
+  }
+
+  const load = (initialScheduleError = '', options: LoadOptions = {}) => {
     const generation = ++generationRef.current
     controllerRef.current?.abort()
     mutationRef.current?.abort()
@@ -69,33 +129,43 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
     setScheduleSaving(false)
     const controller = new AbortController()
     controllerRef.current = controller
-    setSchedule(null)
+    if (!options.preserveDraft) setSchedule(null)
+    setSchedulePending(true)
     setScheduleError(initialScheduleError)
     setScheduleMessage('')
     getMarketRefreshSchedule(portfolioID, controller.signal).then((next) => {
       if (controller.signal.aborted || generation !== generationRef.current || next.portfolio_id !== scopeRef.current) return
-      const preset = schedulePresetFromCron(next.cron)
-      const fields = next.cron.trim().split(/\s+/)
       setSchedule(next)
-      setScheduleEnabled(next.enabled)
-      setScheduleCron(next.cron)
-      setSchedulePreset(preset)
-      setScheduleTimezone(next.timezone)
-      setScheduleCurrency(next.reporting_currency)
-      if (preset !== 'custom' && fields.length === 5) setScheduleTime(`${fields[1].padStart(2, '0')}:${fields[0].padStart(2, '0')}`)
-      setScheduleError('')
+      setSchedulePending(false)
+      setRuntimeRecoveryRequired(false)
+      setRuntimeUnconfirmed(false)
+      if (!options.preserveDraft || options.adopt) applyCanonicalSchedule(next)
+      if (options.adopt) {
+        setConflictPending(false)
+        setReconciliationRequired(false)
+        setScheduleMessage('Saved schedule reloaded; the canonical settings are now adopted.')
+      }
+      if (!options.retainError) setScheduleError(next.degraded ? `${scheduleStatusLabel(next)}: ${recoveryMessage}` : '')
     }).catch((reason: unknown) => {
       if (controller.signal.aborted || generation !== generationRef.current) return
+      setSchedulePending(false)
       if (reason instanceof APIError && reason.status === 401) { expireSession(); return }
-      if (reason instanceof APIError && reason.status === 503) {
-        setScheduleError('Automatic refresh is inactive because runtime recovery is unresolved. Retry or reconcile the schedule with the operator before relying on it.')
-        return
-      }
-      setScheduleError(reason instanceof Error ? reason.message : 'Unable to load the refresh schedule')
+      const readError = reason instanceof APIError && reason.status === 503
+        ? runtimeUnconfirmed ? 'Unable to reload schedule. Runtime remains unconfirmed; reload schedule again to reconcile.' : recoveryMessage
+        : reason instanceof Error ? reason.message : 'Unable to load the refresh schedule'
+      setScheduleError(readError)
     })
   }
 
   useEffect(() => {
+    // A portfolio replacement is a new authority boundary. Do not carry a
+    // conflict/reconciliation lock or an old runtime uncertainty into it.
+    setConflictPending(false)
+    setReconciliationRequired(false)
+    setRuntimeRecoveryRequired(false)
+    setRuntimeUnconfirmed(false)
+    setScheduleError('')
+    setScheduleMessage('')
     load()
     return () => {
       generationRef.current += 1
@@ -106,6 +176,13 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
       mutationRef.current = null
     }
   }, [portfolioID])
+
+  const focusError = (message: string, field?: React.RefObject<HTMLInputElement | null>) => {
+    setScheduleError(message)
+    setScheduleMessage('')
+    if (field) field.current?.focus()
+    else setTimeout(() => scheduleErrorRef.current?.focus(), 0)
+  }
 
   const changeSchedulePreset = (preset: SchedulePreset) => {
     setSchedulePreset(preset)
@@ -118,25 +195,25 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
   }
 
   const saveSchedule = async () => {
-    if (!schedule || scheduleSavingRef.current) return
+    if (!schedule || scheduleSavingRef.current || conflictPending || reconciliationRequired) return
     if (schedule.degraded) {
-      setScheduleError('Automatic refresh is inactive while runtime recovery is unresolved. Retry or reconcile the schedule before saving settings.')
+      focusError(recoveryMessage)
       return
     }
     if (!validScheduleTime(scheduleTime) && schedulePreset !== 'custom') {
-      setScheduleError('Enter a local time between 00:00 and 23:59.')
+      focusError('Enter a local time between 00:00 and 23:59.', timeRef)
       return
     }
     if (!/^[A-Za-z][A-Za-z0-9_+./-]{0,63}$/.test(scheduleTimezone)) {
-      setScheduleError('Enter a valid bounded IANA timezone.')
+      focusError('Enter a valid IANA timezone, such as Asia/Singapore.', timezoneRef)
       return
     }
     if (scheduleCurrency !== '' && !/^[A-Z]{3}$/.test(scheduleCurrency)) {
-      setScheduleError('Reporting currency must be blank or three uppercase letters.')
+      focusError('Reporting currency must be blank or three uppercase letters.', currencyRef)
       return
     }
     if (scheduleEnabled && (scheduleCron.trim() === '' || scheduleCron.trim().split(/\s+/).length !== 5)) {
-      setScheduleError('Enabled schedules require a standard five-field cron expression.')
+      focusError('Enter a standard five-field cron expression.', cronRef)
       return
     }
     const generation = generationRef.current
@@ -150,8 +227,11 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
       const next = await saveMarketRefreshSchedule(portfolioID, { enabled: scheduleEnabled, cron: scheduleEnabled ? scheduleCron : '', timezone: scheduleTimezone, reporting_currency: scheduleCurrency }, schedule.etag, csrfToken, controller.signal)
       if (controller.signal.aborted || generation !== generationRef.current || scopeRef.current !== portfolioID) return
       setSchedule(next)
+      applyCanonicalSchedule(next)
+      setConflictPending(false)
+      setReconciliationRequired(false)
       setScheduleMessage('Schedule saved.')
-      setScheduleError('')
+      setScheduleError(next.degraded ? recoveryMessage : '')
     } catch (reason) {
       if (controller.signal.aborted || generation !== generationRef.current) return
       if (reason instanceof APIError && reason.status === 401) {
@@ -159,16 +239,21 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
         return
       }
       if (reason instanceof APIError && reason.status === 412) {
-        const staleMessage = 'This schedule changed in another window. Reloading the latest settings before saving again.'
-        setScheduleError(staleMessage)
-        setScheduleMessage('')
+        const staleMessage = 'Settings changed elsewhere. Your edits were not saved. Reload saved settings and review before saving again.'
+        setConflictPending(true)
+        setReconciliationRequired(false)
+        focusError(staleMessage)
         reloadRef.current()
-        load(staleMessage)
-      } else if (reason instanceof APIError && reason.status === 503) {
-        setScheduleError('Automatic refresh is inactive because runtime recovery is unresolved. Retry or reconcile the schedule with the operator before saving.')
-        setScheduleMessage('')
+        // Read the latest canonical value, but deliberately retain the local draft.
+        load(staleMessage, { preserveDraft: true, retainError: true })
+      } else if (reason instanceof APIError && reason.status === 400) {
+        focusError('Schedule was not accepted. Check the cron expression, timezone and currency. Your edits are kept.')
       } else {
-        setScheduleError(reason instanceof Error ? reason.message : 'Unable to save the schedule')
+        setReconciliationRequired(true)
+        const knownDegraded = reason instanceof APIError && reason.status === 503
+        setRuntimeRecoveryRequired(knownDegraded)
+        setRuntimeUnconfirmed(!knownDegraded)
+        focusError(knownDegraded ? `${recoveryMessage} The save result is not confirmed.` : 'Schedule save not confirmed. Runtime is unconfirmed; reload schedule to reconcile before saving again.')
       }
     } finally {
       if (generation === generationRef.current) {
@@ -179,26 +264,30 @@ export default function SettingsPanel({ portfolioID, csrfToken, onUnauthorized, 
     }
   }
 
+  const retryRead = () => load('', { preserveDraft: Boolean(schedule), adopt: true })
+
   return <section className="settings-surface" aria-labelledby="market-refresh-schedule-title">
     <section className="schedule-card" aria-labelledby="market-refresh-schedule-title">
       <div className="section-heading"><div><span className="eyebrow">Durable automation</span><h2 id="market-refresh-schedule-title">Market refresh schedule</h2></div><span className="muted">Portfolio: {portfolioID}</span></div>
-      {!schedule && <p role="status" aria-live="polite">Loading schedule…</p>}
-      {!schedule && scheduleError && <p className="notice error" role="alert" aria-live="assertive">{scheduleError} <button type="button" onClick={() => load()}>Reload</button></p>}
+      {schedulePending && !schedule && <p role="status" aria-live="polite">Loading schedule…</p>}
+      {!schedule && !schedulePending && scheduleError && <p ref={scheduleErrorRef} tabIndex={-1} className="notice error" role="alert" aria-live="assertive">{scheduleError} <button type="button" onClick={() => load('')}>Reload schedule</button></p>}
       {schedule && <>
-        {schedule.degraded && <p id="market-refresh-schedule-status" className="notice error" role="alert" aria-live="assertive">Automatic refresh is inactive: the scheduler is degraded. Retry or reconcile the schedule with the operator before relying on these settings.</p>}
-        <label><input type="checkbox" checked={scheduleEnabled} disabled={schedule.degraded || scheduleSaving} onChange={(event) => setScheduleEnabled(event.target.checked)} aria-describedby={schedule.degraded ? 'market-refresh-schedule-status' : undefined} /> Enable scheduled refreshes</label>
+        {schedulePending && <p role="status" aria-live="polite">Reloading schedule…</p>}
+        {(schedule.degraded || reconciliationRequired || conflictPending || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleError) && <p ref={scheduleErrorRef} tabIndex={-1} className="notice error" role="alert" aria-live="assertive">{scheduleError || (schedule.degraded || runtimeRecoveryRequired ? `${scheduleStatusLabel(schedule, runtimeRecoveryRequired)}: ${recoveryMessage}` : runtimeUnconfirmed ? 'Runtime is unconfirmed after the save attempt; reload schedule to reconcile before relying on these settings.' : '')} {conflictPending && <button type="button" onClick={() => load('', { preserveDraft: true, adopt: true })}>Reload saved settings</button>} {!conflictPending && (schedule.degraded || reconciliationRequired || runtimeRecoveryRequired || runtimeUnconfirmed) && <button type="button" onClick={retryRead}>Reload schedule</button>} </p>}
+        <p className="schedule-summary" role="status" aria-live="polite" aria-label="Schedule summary"><strong>{scheduleSummary(schedule, runtimeUnconfirmed)}</strong> · Status: {scheduleStatusLabel(schedule, runtimeRecoveryRequired, runtimeUnconfirmed)}. {schedule.reporting_currency ? `Reporting currency: ${schedule.reporting_currency}.` : 'Reporting currency: Portfolio default (blank; not the Holdings selector).'}</p>
+        {!schedule.enabled && schedulePreset === 'daily' && scheduleTime === DEFAULT_SCHEDULE_TIME && <p className="muted">Unsaved Daily template: 05:00 in {scheduleTimezone}. It is not the saved schedule until you enable and save it.</p>}
+        <label><input type="checkbox" checked={scheduleEnabled} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => setScheduleEnabled(event.target.checked)} aria-describedby={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed ? 'market-refresh-schedule-status' : undefined} /> Enable scheduled refreshes</label>
         <div className="schedule-grid">
-          <label>Preset<select value={schedulePreset} disabled={schedule.degraded || scheduleSaving} onChange={(event) => changeSchedulePreset(event.target.value as SchedulePreset)}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="custom">Custom cron</option></select></label>
-          {schedulePreset !== 'custom' ? <label>Local time<input aria-label="Schedule local time" type="time" value={scheduleTime} disabled={schedule.degraded || scheduleSaving} onChange={(event) => changeScheduleTime(event.target.value)} /></label> : <label>Five-field cron<input aria-label="Custom five-field cron" value={scheduleCron} disabled={schedule.degraded || scheduleSaving} onChange={(event) => setScheduleCron(event.target.value)} placeholder="0 5 * * *" /></label>}
-          <label>IANA timezone<input aria-label="Schedule timezone" value={scheduleTimezone} disabled={schedule.degraded || scheduleSaving} maxLength={64} onChange={(event) => setScheduleTimezone(event.target.value)} /></label>
-          <label>Reporting currency (optional)<input aria-label="Reporting currency" value={scheduleCurrency} disabled={schedule.degraded || scheduleSaving} maxLength={3} onChange={(event) => setScheduleCurrency(event.target.value.toUpperCase())} placeholder="Inherit" /></label>
+          <label>Preset<select aria-label="Preset" value={schedulePreset} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => changeSchedulePreset(event.target.value as SchedulePreset)}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="custom">Custom cron</option></select></label>
+          {schedulePreset !== 'custom' ? <label>Local time<input ref={timeRef} aria-label="Schedule local time" type="time" value={scheduleTime} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => changeScheduleTime(event.target.value)} /></label> : <label>Five-field cron<input ref={cronRef} aria-label="Custom five-field cron" value={scheduleCron} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} onChange={(event) => setScheduleCron(event.target.value)} placeholder="0 5 * * *" /></label>}
+          <label>IANA timezone<input ref={timezoneRef} aria-label="Schedule timezone" value={scheduleTimezone} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} maxLength={64} onChange={(event) => setScheduleTimezone(event.target.value)} /></label>
+          <label>Reporting currency (optional)<input ref={currencyRef} aria-label="Reporting currency" value={scheduleCurrency} disabled={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || scheduleSaving || conflictPending || reconciliationRequired} maxLength={3} onChange={(event) => setScheduleCurrency(event.target.value.toUpperCase())} placeholder="Use portfolio default" /></label>
         </div>
-        <p className="muted" aria-label="Schedule source">Schedule source: {schedule.source} — {schedule.source === 'saved' ? 'Saved in the portfolio database.' : 'Using deployment bootstrap defaults until you save a portfolio setting.'} {schedule.source === 'environment' && 'Daily example: 0 5 * * * in Asia/Singapore.'}</p>
-        <p className="muted" role="status" aria-live="polite" aria-label="Schedule runtime status">Schedule runtime status: {schedule.runtime_status}{schedule.effective ? ' (effective)' : ' (not effective)'}</p>
-        <p className="muted schedule-revision" aria-label="Schedule revision">Schedule revision: {schedule.revision} · ETag: <span className="schedule-etag">{schedule.etag}</span></p>
-        <button type="button" onClick={saveSchedule} disabled={scheduleSaving || schedule.degraded}>{scheduleSaving ? 'Saving schedule…' : 'Save schedule'}</button>
+        <p className="muted" aria-label="Schedule source">Schedule source: {schedule.source === 'saved' ? 'Saved in portfolio (saved).' : 'Deployment defaults (environment).'} {schedule.source === 'environment' && 'The fallback is not saved until you choose Save schedule.'}</p>
+        <p id="market-refresh-schedule-status" className="muted" role="status" aria-live="polite" aria-label="Schedule runtime status">Schedule runtime status: {scheduleStatusLabel(schedule, runtimeRecoveryRequired, runtimeUnconfirmed)} (technical runtime: {runtimeRecoveryRequired || runtimeUnconfirmed ? 'unconfirmed' : schedule.runtime_status}; effective: {runtimeRecoveryRequired || runtimeUnconfirmed ? 'unconfirmed' : schedule.effective ? 'yes' : 'no'}).</p>
+        <details><summary>Technical details</summary><p className="muted schedule-revision" aria-label="Schedule revision">Schedule revision: {schedule.revision} · ETag: <span className="schedule-etag">{schedule.etag}</span></p></details>
+        <button type="button" onClick={saveSchedule} disabled={scheduleSaving || schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || conflictPending || reconciliationRequired} aria-describedby={schedule.degraded || runtimeRecoveryRequired || runtimeUnconfirmed || conflictPending || reconciliationRequired ? 'market-refresh-schedule-status' : undefined}>{scheduleSaving ? 'Saving schedule…' : 'Save schedule'}</button>
         {scheduleMessage && <p role="status" aria-live="polite">{scheduleMessage}</p>}
-        {scheduleError && <p className="notice error" role="alert" aria-live="polite">{scheduleError} <button type="button" onClick={() => load()}>Reload</button></p>}
       </>}
     </section>
   </section>

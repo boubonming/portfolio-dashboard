@@ -57,11 +57,18 @@ describe('SettingsPanel', () => {
     expect(scheduleCronForPreset('weekdays', '23:59')).toBe('59 23 * * 1-5')
     expect(schedulePresetFromCron('7 5 * * *')).toBe('daily')
     expect(schedulePresetFromCron('59 23 * * 1-5')).toBe('weekdays')
+    expect(schedulePresetFromCron('07  005 * * *')).toBe('daily')
     expect(schedulePresetFromCron('0 5 1 * *')).toBe('custom')
     expect(validScheduleTime('00:00')).toBe(true)
     expect(validScheduleTime('23:59')).toBe(true)
     expect(validScheduleTime('24:00')).toBe(false)
     expect(validScheduleTime('5:07')).toBe(false)
+  })
+  it('normalizes zero-padded simple cron fields when rendering the local time control', async () => {
+    renderRoutedSchedule({ schedule: environmentSchedule({ cron: '07  005 * * *' }) })
+    await waitFor(() => expect(screen.getByLabelText('Schedule local time')).toBeTruthy())
+    expect((screen.getByLabelText('Schedule local time') as HTMLInputElement).value).toBe('05:07')
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).toMatch(/Daily at 05:07/)
   })
   it.each([
     ['enabled environment', environmentSchedule(), true, 'environment', 'active'],
@@ -110,16 +117,116 @@ describe('SettingsPanel', () => {
     await user.type(time, '23:59')
     await user.click(screen.getByRole('button', { name: 'Save schedule' }))
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(2))
-    expect(JSON.parse(String((fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')[1] as [RequestInfo | URL, RequestInit])[1].body))).toEqual({ enabled: true, cron: '59 23 * * 1-5', timezone: 'Asia/Singapore', reporting_currency: 'USD' })
+    expect(JSON.parse(String((fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')[1] as [RequestInfo | URL, RequestInit])[1].body))).toEqual({ enabled: true, cron: '59 23 * * 1-5', timezone: 'Asia/Singapore', reporting_currency: '' })
 
     await user.selectOptions(preset, 'custom')
     const cron = screen.getByRole('textbox', { name: 'Custom five-field cron' })
-    expect((cron as HTMLInputElement).value).toBe('59 23 * * 1-5')
+    expect((cron as HTMLInputElement).value).toBe('0 5 * * *')
     await user.clear(cron)
     await user.type(cron, '0 4 * * 0')
     await user.click(screen.getByRole('button', { name: 'Save schedule' }))
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')).toHaveLength(3))
-    expect(JSON.parse(String((fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')[2] as [RequestInfo | URL, RequestInit])[1].body))).toEqual({ enabled: true, cron: '0 4 * * 0', timezone: 'Asia/Singapore', reporting_currency: 'USD' })
+    expect(JSON.parse(String((fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')[2] as [RequestInfo | URL, RequestInit])[1].body))).toEqual({ enabled: true, cron: '0 4 * * 0', timezone: 'Asia/Singapore', reporting_currency: '' })
+  })
+
+  it('keeps complex valid cron expressions Custom and preserves an explicit template for saved Off schedules', async () => {
+    expect(schedulePresetFromCron('*/30 5 * * *')).toBe('custom')
+    expect(schedulePresetFromCron('0 5,17 * * *')).toBe('custom')
+    expect(schedulePresetFromCron('0 5 1-15 * *')).toBe('custom')
+    expect(schedulePresetFromCron('0 5 * * 7')).toBe('custom')
+    expect(schedulePresetFromCron('60 5 * * *')).toBe('custom')
+
+    const { fetchMock } = renderRoutedSchedule({ schedule: savedSchedule({ enabled: false, cron: '', effective: false, runtime_status: 'disabled' }) })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Preset' })).toBeTruthy())
+    expect((screen.getByRole('combobox', { name: 'Preset' }) as HTMLSelectElement).value).toBe('daily')
+    expect((screen.getByLabelText('Schedule local time') as HTMLInputElement).value).toBe('05:00')
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).toMatch(/Off/i)
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).toMatch(/choose a schedule before enabling/i)
+    expect(screen.getByText(/unsaved Daily template/i)).toBeTruthy()
+    expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/Disabled/i)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('checkbox', { name: /enable scheduled refreshes/i }))
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).toMatch(/Active/i))
+    const put = fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/schedule') && init?.method === 'PUT')
+    expect(JSON.parse(String((put[0] as [RequestInfo | URL, RequestInit])[1].body))).toMatchObject({ enabled: true, cron: '0 5 * * *' })
+  })
+
+  it('stops Loading after a completed read failure and always offers Reload schedule', async () => {
+    const failed = renderRoutedSchedule({ scheduleGet: json({ error: 'unavailable' }, 503) })
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Reload schedule/i))
+    expect(screen.queryByText('Loading schedule…')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Reload schedule' })).toBeTruthy()
+    failed.rendered.unmount()
+
+    renderRoutedSchedule({ schedule: environmentSchedule({ degraded: true, effective: false, runtime_status: 'degraded' }) })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload schedule' })).toBeTruthy())
+    expect(screen.getByRole('alert').textContent).toMatch(/Inactive — recovery required/i)
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('retains an unsaved draft after 412 until explicit Reload saved settings adoption', async () => {
+    const user = userEvent.setup()
+    const latest = savedSchedule({ revision: 8, etag: scheduleEtag('e'), cron: '7 5 * * *' })
+    let gets = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) return init?.method === 'PUT' ? json({ error: 'stale' }, 412) : (gets++ === 0 ? json(environmentSchedule()) : json(latest))
+      return json(setup())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    const time = screen.getByLabelText('Schedule local time')
+    await user.clear(time)
+    await user.type(time, '06:07')
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload saved settings' })).toBeTruthy())
+    expect((screen.getByLabelText('Schedule local time') as HTMLInputElement).value).toBe('06:07')
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(fetchMock.mock.calls.filter(([, request]) => request?.method === 'PUT')).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: 'Reload saved settings' }))
+    await waitFor(() => expect((screen.getByLabelText('Schedule local time') as HTMLInputElement).value).toBe('05:07'))
+    expect(fetchMock.mock.calls.filter(([, request]) => request?.method === 'PUT')).toHaveLength(1)
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('requires GET reconciliation after an uncertain PUT and synchronizes the canonical returned form', async () => {
+    const user = userEvent.setup()
+    const put = deferred<Response>()
+    const reconciled = savedSchedule({ revision: 4, etag: scheduleEtag('4'), cron: '*/30 5 * * *', timezone: 'Etc/UTC', reporting_currency: 'SGD' })
+    let getCount = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) {
+        if (init?.method === 'PUT') return put.promise
+        getCount += 1
+        return getCount === 1 ? json(environmentSchedule()) : json(reconciled)
+      }
+      return json(setup())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    put.reject(new TypeError('network lost'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload schedule' })).toBeTruthy())
+    expect(screen.getByRole('alert').textContent).toMatch(/save not confirmed/i)
+    expect(fetchMock.mock.calls.filter(([, request]) => request?.method === 'PUT')).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect((screen.getByLabelText('Schedule timezone') as HTMLInputElement).value).toBe('Etc/UTC'))
+    expect((screen.getByRole('combobox', { name: 'Preset' }) as HTMLSelectElement).value).toBe('custom')
+    expect((screen.getByRole('textbox', { name: 'Custom five-field cron' }) as HTMLInputElement).value).toBe('*/30 5 * * *')
+    expect((screen.getByLabelText('Reporting currency') as HTMLInputElement).value).toBe('SGD')
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('keeps generic server validation errors editable and focuses the form alert', async () => {
+    const user = userEvent.setup()
+    const { fetchMock } = renderRoutedSchedule({ putResponse: json({ error: 'invalid_schedule' }, 400) })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/cron expression, timezone and currency/i))
+    expect(document.activeElement).toBe(screen.getByRole('alert'))
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('saves through the rendered button with exact request metadata and displays the returned revision and ETag', async () => {
@@ -181,7 +288,7 @@ describe('SettingsPanel', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
     await user.click(screen.getByRole('button', { name: 'Save schedule' }))
     await waitFor(() => expect(onReload).toHaveBeenCalledOnce())
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/changed in another window/i))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Settings changed elsewhere/i))
     latestGet.resolve(await json(latest))
     await waitFor(() => expect(screen.getByLabelText('Schedule revision').textContent).toContain('Schedule revision: 8'))
     expect(screen.getByLabelText('Schedule revision').textContent).toContain('ETag: ' + scheduleEtag('e'))
@@ -191,8 +298,227 @@ describe('SettingsPanel', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
     await user.click(screen.getByRole('button', { name: 'Save schedule' }))
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/runtime recovery is unresolved/i))
-    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Status: Active/i)
+    expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/Inactive — recovery required/i)
     degradedFailure.rendered.unmount()
+  })
+
+  it('does not present the last read as current after degraded save, and restores authority only after a healthy reload', async () => {
+    const user = userEvent.setup()
+    let scheduleReads = 0
+    const healthy = environmentSchedule({ etag: scheduleEtag('f') })
+    const degraded = environmentSchedule({ degraded: true, effective: false, runtime_status: 'degraded', etag: scheduleEtag('e') })
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) {
+        if (init?.method === 'PUT') return json({ error: 'runtime degraded' }, 503)
+        scheduleReads += 1
+        if (scheduleReads === 1) return json(healthy)
+        if (scheduleReads === 2) return json({ error: 'unavailable' }, 503)
+        if (scheduleReads === 3) return json(degraded)
+        return json(healthy)
+      }
+      return json(setup())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Status: Active/i))
+    expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/Inactive — recovery required/i)
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Unable to load|inactive/i))
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Status: Active/i)
+
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Inactive — recovery required/i))
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Status: Active/i)
+
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/Active/i))
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it.each(['0 5 * constructor *', '0 5 * * constructor'])('fails closed in the rendered panel for inherited cron names: %s', async (cron) => {
+    renderRoutedSchedule({ schedule: environmentSchedule({ cron }) })
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Invalid market refresh schedule response/i))
+    expect(screen.queryByRole('button', { name: 'Save schedule' })).toBeNull()
+    expect(screen.queryByRole('status', { name: 'Schedule summary' })).toBeNull()
+  })
+
+  it('keeps unknown PUT outcomes unconfirmed through failed and degraded reads until a healthy GET', async () => {
+    const user = userEvent.setup()
+    let scheduleReads = 0
+    const healthy = environmentSchedule({ etag: scheduleEtag('f') })
+    const degraded = environmentSchedule({ degraded: true, effective: false, runtime_status: 'degraded', etag: scheduleEtag('e') })
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) {
+        if (init?.method === 'PUT') return Promise.reject(new TypeError('network lost'))
+        scheduleReads += 1
+        if (scheduleReads === 1) return json(healthy)
+        if (scheduleReads === 2) return json({ error: 'unavailable' }, 503)
+        if (scheduleReads === 3) return json(degraded)
+        return json(healthy)
+      }
+      return json(setup())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/save not confirmed/i))
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).toMatch(/unconfirmed/i)
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Active|Inactive|Disabled/)
+    expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/unconfirmed/i)
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Unable to reload schedule|Unable to load/i))
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).toMatch(/unconfirmed/i)
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Inactive — recovery required/i))
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).toMatch(/Inactive — recovery required/i)
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/Active/))
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(fetchMock.mock.calls.filter(([, request]) => request?.method === 'PUT')).toHaveLength(1)
+  })
+
+  it('keeps a malformed successful PUT unconfirmed instead of inventing a runtime state', async () => {
+    const user = userEvent.setup()
+    let reads = 0
+    const healthy = environmentSchedule({ etag: scheduleEtag('f') })
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) {
+        if (init?.method === 'PUT') return json({ portfolio_id: 'portfolio-a', unexpected: true })
+        reads += 1
+        return json(healthy)
+      }
+      return json(setup())
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Runtime is unconfirmed/i))
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).toMatch(/unconfirmed/i)
+    expect(screen.getByRole('status', { name: 'Schedule summary' }).textContent).not.toMatch(/Active|Inactive|Disabled/)
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(screen.getByLabelText('Schedule runtime status').textContent).toMatch(/Active/))
+    expect(fetchMock.mock.calls.filter(([, request]) => request?.method === 'PUT')).toHaveLength(1)
+    expect(reads).toBe(2)
+  })
+
+  it('clears a prior conflict lock when the authority scope is replaced', async () => {
+    const user = userEvent.setup()
+    let portfolio = 'portfolio-a'
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) {
+        if (init?.method === 'PUT') return json({ error: 'stale' }, 412)
+        reads += 1
+        return json(environmentSchedule({ portfolio_id: portfolio, etag: scheduleEtag(portfolio === 'portfolio-a' ? 'a' : 'b'), timezone: portfolio === 'portfolio-a' ? 'Asia/Singapore' : 'Etc/UTC' }))
+      }
+      return json({ ...setup(), portfolio_id: portfolio })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const rendered = render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload saved settings' })).toBeTruthy())
+    expect(reads).toBe(2)
+
+    portfolio = 'portfolio-b'
+    rendered.rerender(<SettingsPanel portfolioID="portfolio-b" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect((screen.getByLabelText('Schedule timezone') as HTMLInputElement).value).toBe('Etc/UTC'))
+    expect(screen.queryByRole('button', { name: 'Reload saved settings' })).toBeNull()
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('binds recovery authority to the replacement portfolio scope', async () => {
+    const user = userEvent.setup()
+    let portfolio = 'portfolio-a'
+    let put = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/schedule')) {
+        if (init?.method === 'PUT') { put = true; return json({ error: 'runtime degraded' }, 503) }
+        return json(environmentSchedule({ portfolio_id: portfolio, timezone: portfolio === 'portfolio-a' ? 'Asia/Singapore' : 'Etc/UTC', etag: scheduleEtag(portfolio === 'portfolio-a' ? 'a' : 'b') }))
+      }
+      return json({ ...setup(), portfolio_id: portfolio })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const rendered = render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(put).toBe(true))
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(true)
+
+    portfolio = 'portfolio-b'
+    rendered.rerender(<SettingsPanel portfolioID="portfolio-b" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect((screen.getByLabelText('Schedule timezone') as HTMLInputElement).value).toBe('Etc/UTC'))
+    expect(screen.queryByRole('button', { name: 'Reload schedule' })).toBeNull()
+    expect((screen.getByRole('button', { name: 'Save schedule' }) as HTMLButtonElement).disabled).toBe(false)
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, request]) => request?.method === 'PUT')).toHaveLength(2))
+  })
+
+  it('aborts an old recovery read before replacing scope and saves only replacement path/body/authority', async () => {
+    const user = userEvent.setup()
+    let portfolio = 'portfolio-a'
+    let aReads = 0
+    let putCount = 0
+    const oldRecovery = deferred<Response>()
+    const replacementRead = deferred<Response>()
+    const oldSchedule = environmentSchedule({ portfolio_id: 'portfolio-a', etag: scheduleEtag('a') })
+    const replacementSchedule = environmentSchedule({ portfolio_id: 'portfolio-b', etag: scheduleEtag('b'), timezone: 'Etc/UTC' })
+    const scheduleCalls: Array<[RequestInfo | URL, RequestInit]> = []
+    const putCalls: Array<[RequestInfo | URL, RequestInit]> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/schedule')) {
+        scheduleCalls.push([input, init || {}])
+        if (init?.method === 'PUT') {
+          putCalls.push([input, init || {}])
+          if (putCount++ === 0) return json({ error: 'runtime degraded' }, 503)
+          return json(savedSchedule({ portfolio_id: 'portfolio-b', timezone: 'Etc/UTC', etag: scheduleEtag('c') }))
+        }
+        if (portfolio === 'portfolio-a') return aReads++ === 0 ? json(oldSchedule) : oldRecovery.promise
+        return replacementRead.promise
+      }
+      return json({ ...setup(), portfolio_id: portfolio })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const rendered = render(<SettingsPanel portfolioID="portfolio-a" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save schedule' })).toBeTruthy())
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/runtime recovery is unresolved/i))
+    await user.click(screen.getByRole('button', { name: 'Reload schedule' }))
+    await waitFor(() => expect(scheduleCalls.filter(([, request]) => request.method !== 'PUT')).toHaveLength(2))
+    const oldRecoveryRequest = scheduleCalls.filter(([, request]) => request.method !== 'PUT')[1]
+    expect(oldRecoveryRequest[1].signal).toBeInstanceOf(AbortSignal)
+    expect((oldRecoveryRequest[1].signal as AbortSignal).aborted).toBe(false)
+
+    portfolio = 'portfolio-b'
+    rendered.rerender(<SettingsPanel portfolioID="portfolio-b" csrfToken="csrf-token" onUnauthorized={vi.fn()} onReload={vi.fn()} />)
+    expect((oldRecoveryRequest[1].signal as AbortSignal).aborted).toBe(true)
+    await waitFor(() => expect(scheduleCalls.some(([path]) => String(path).includes('/portfolios/portfolio-b/market-data/schedule'))).toBe(true))
+    const replacementRequest = scheduleCalls.filter(([, request]) => request.method !== 'PUT')[2]
+    replacementRead.resolve(await json(replacementSchedule))
+    await waitFor(() => expect((screen.getByLabelText('Schedule timezone') as HTMLInputElement).value).toBe('Etc/UTC'))
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await waitFor(() => expect(putCalls).toHaveLength(2))
+    const [putPath, putInit] = putCalls[1]
+    expect(String(replacementRequest[0])).toContain('/portfolios/portfolio-b/market-data/schedule')
+    expect(String(putPath)).toContain('/portfolios/portfolio-b/market-data/schedule')
+    expect(JSON.parse(String(putInit.body))).toEqual({ enabled: true, cron: '0 5 * * *', timezone: 'Etc/UTC', reporting_currency: '' })
+    expect(new Headers(putInit.headers).get('If-Match')).toBe(scheduleEtag('b'))
+    expect(new Headers(putInit.headers).get('X-CSRF-Token')).toBe('csrf-token')
+
+    oldRecovery.resolve(await json(environmentSchedule({ portfolio_id: 'portfolio-a', timezone: 'America/New_York', etag: scheduleEtag('9') })))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((screen.getByLabelText('Schedule timezone') as HTMLInputElement).value).toBe('Etc/UTC')
   })
 
   it.each([

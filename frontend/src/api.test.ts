@@ -53,9 +53,43 @@ describe('typed API helper', () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => contradictory } as Response)))
     await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/contradictory degraded/i)
 
+    const invalidCron = { ...base, cron: '99 99 * * *', degraded: false, effective: true, runtime_status: 'active' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => invalidCron } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/cron/i)
+
     const unknown = { ...base, operator_note: 'unexpected' }
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => unknown } as Response)))
     await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/unexpected operator_note/i)
+  })
+
+  it('preserves valid cron whitespace and rejects cron values outside the server parser bounds', async () => {
+    const valid = { portfolio_id: 'portfolio-a', enabled: true, cron: '07  005 * * *', timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: `"${'d'.repeat(64)}"`, effective: true, degraded: false, runtime_status: 'active' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => valid } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).resolves.toMatchObject({ cron: valid.cron })
+
+    const named = { ...valid, cron: '0 5 * JAN MON' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => named } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).resolves.toMatchObject({ cron: named.cron })
+
+    const invalid = { ...valid, cron: '0 5 * * 7' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => invalid } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/cron/i)
+  })
+
+  it('matches the authoritative cron integer parser for signed zero and overflowing steps', async () => {
+    const base = { portfolio_id: 'portfolio-a', enabled: true, cron: '+0 5 * * *', timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: `"${'e'.repeat(64)}"`, effective: true, degraded: false, runtime_status: 'active' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => base } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).resolves.toMatchObject({ cron: '+0 5 * * *' })
+
+    const overflowingStep = { ...base, cron: '*/999999999999999999999999 5 * * *' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => overflowingStep } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/cron/i)
+  })
+
+  it.each(['0 5 * constructor *', '0 5 * * constructor'])('rejects inherited cron names accepted by neither the Go parser nor the wire contract: %s', async (cron) => {
+    const invalid = { portfolio_id: 'portfolio-a', enabled: true, cron, timezone: 'Asia/Singapore', reporting_currency: '', revision: 0, updated_at: null, source: 'environment', etag: '"' + 'f'.repeat(64) + '"', effective: true, degraded: false, runtime_status: 'active' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => invalid } as Response)))
+    await expect(getMarketRefreshSchedule('portfolio-a')).rejects.toThrow(/cron/i)
   })
 
   it('accepts an empty mapping array in a market-data setup response', async () => {
