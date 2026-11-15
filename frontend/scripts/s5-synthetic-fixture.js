@@ -1,5 +1,5 @@
 (() => {
-  const session = { authenticated: true, csrf_token: 's5-fixture-token', expires_at: '2030-01-01T00:00:00.000Z' }
+  const session = { authenticated: true, csrf_token: 's5-fixture-token', expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }
   const etag = (letter) => `"${letter.repeat(64)}"`
   const saved = (overrides = {}) => ({
     portfolio_id: 'portfolio-default', enabled: false, cron: '', timezone: 'Asia/Singapore',
