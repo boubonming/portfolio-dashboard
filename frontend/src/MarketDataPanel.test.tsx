@@ -172,6 +172,20 @@ describe('MarketDataPanel', () => {
     expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('keeps a confirmed mapping incomplete when quote currency differs from the instrument currency', async () => {
+    const fetchMock = vi.fn((_input: RequestInfo | URL) => json(setup({ instruments: [setup().instruments[0]] })))
+    renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(1))
+    const row = screen.getAllByRole('row')[1]
+    completeMapping(row)
+    const quoteInput = within(row).getByRole('textbox', { name: 'Quote currency for SAME (First company)' })
+    fireEvent.change(quoteInput, { target: { value: 'EUR' } })
+    fireEvent.click(within(row).getByRole('checkbox'))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText(/must match the instrument currency USD/i)).toBeTruthy()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(0)
+  })
+
   it('blocks an invalid quote currency on a committed mapping and restores its canonical payload', async () => {
     const committedSetup = setup({ instruments: [{ ...setup().instruments[0], mappings: [{ provider: 'coingecko', provider_symbol: 'coin-a', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing' }] }] })
     const outcomes = [{ instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-a', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'provider listing', created_at: '2026-01-01T00:00:00.000000000Z' } }]
@@ -431,6 +445,8 @@ describe('MarketDataPanel', () => {
     expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: 'Reload setup' }))
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data')).length).toBeGreaterThanOrEqual(2))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Keep editing with current setup' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing with current setup' }))
     expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
@@ -501,7 +517,7 @@ describe('MarketDataPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
     await waitFor(() => expect(screen.getByText('Mappings saved')).toBeTruthy())
     expect(screen.getByText(/Prices have not been refreshed/)).toBeTruthy()
-    expect(screen.getByText(/Could not reload Market Data|Reload setup/)).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toMatch(/Could not reload Market Data|Reload setup/)
     expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
   })
 
@@ -514,7 +530,7 @@ describe('MarketDataPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Reload setup/))
     fireEvent.click(screen.getByRole('button', { name: 'Reload setup' }))
-    expect(screen.getByText(/Keep editing with current setup/)).toBeTruthy()
+    await waitFor(() => expect(screen.getByText(/Keep editing with current setup/)).toBeTruthy())
     expect(screen.getByText(/Discard edits and reload/)).toBeTruthy()
     const readsBefore = fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data')).length
     fireEvent.click(screen.getByRole('button', { name: /Keep editing with current setup/ }))
@@ -523,20 +539,101 @@ describe('MarketDataPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/changed in another window/i))
     fireEvent.click(screen.getByRole('button', { name: 'Reload setup' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Discard edits and reload' })).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: 'Discard edits and reload' }))
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data')).length).toBeGreaterThan(readsBefore))
   })
 
-  it('reconciles an uncertain save with GET only before offering another save', async () => {
-    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/market-data/mappings') ? Promise.reject(new TypeError('network down')) : json(setup()))
+  it('keeps stale recovery locked until its validated GET completes', async () => {
+    let resolveRead!: (response: Response) => void
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith('/market-data/mappings')) return json({ error: 'stale' }, 412)
+      reads += 1
+      if (reads === 1) return json(setup())
+      return new Promise<Response>((resolve) => { resolveRead = resolve })
+    })
     renderPanel(fetchMock)
     await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
     completeMapping(screen.getAllByRole('row')[1])
     completeMapping(screen.getAllByRole('row')[2], 1)
     fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/not confirmed/i))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload setup' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Reload setup' }))
+    expect(screen.queryByRole('button', { name: 'Keep editing with current setup' })).toBeNull()
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    resolveRead(json(setup()) as unknown as Response)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Keep editing with current setup' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing with current setup' }))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('keeps stale recovery locked after a failed GET and generic retry', async () => {
+    let reads = 0
+    let failNextRead = false
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith('/market-data/mappings')) return json({ error: 'stale' }, 412)
+      reads += 1
+      if (failNextRead) { failNextRead = false; return json({ error: 'temporary read outage' }, 503) }
+      return json(setup())
+    })
+    renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
+    completeMapping(screen.getAllByRole('row')[1])
+    completeMapping(screen.getAllByRole('row')[2], 1)
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload setup' })).toBeTruthy())
+    failNextRead = true
+    fireEvent.click(screen.getByRole('button', { name: 'Reload setup' }))
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Reload setup' }).length).toBeGreaterThan(1))
+    expect(screen.queryByRole('button', { name: 'Keep editing with current setup' })).toBeNull()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Reload setup' })[0])
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Keep editing with current setup' })).toBeTruthy())
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing with current setup' }))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
     expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
-    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data')).length).toBeGreaterThan(1)
+  })
+
+  it('disables draft adoption when reconciliation changes the active instrument set', async () => {
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith('/market-data/mappings')) return json({ error: 'stale' }, 412)
+      reads += 1
+      return reads === 1 ? json(setup()) : json(setup({ instruments: [setup().instruments[0]] }))
+    })
+    renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
+    completeMapping(screen.getAllByRole('row')[1])
+    completeMapping(screen.getAllByRole('row')[2], 1)
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload setup' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Reload setup' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Keep editing with current setup' })).toBeTruthy())
+    expect((screen.getByRole('button', { name: 'Keep editing with current setup' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('aborts a pending write on portfolio replacement and ignores its late response', async () => {
+    let resolveSave!: (response: Response) => void
+    let writeSignal: AbortSignal | null | undefined
+    const replacementSetup = setup({ portfolio_id: 'portfolio-b', instruments: [] })
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) return new Promise<Response>((resolve) => { resolveSave = resolve; writeSignal = init?.signal })
+      return url.includes('/portfolio-b/') ? json(replacementSetup) : json(setup())
+    })
+    const rendered = renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
+    completeMapping(screen.getAllByRole('row')[1])
+    completeMapping(screen.getAllByRole('row')[2], 1)
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(writeSignal).toBeTruthy())
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-b" reportingCurrency="MYR" csrfToken="replacement-csrf" onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(writeSignal?.aborted).toBe(true))
+    resolveSave(json({ status: 'saved', etag: '"replacement"', outcomes: [] }) as unknown as Response)
+    await waitFor(() => expect(screen.getByText(/No active instruments to map/)).toBeTruthy())
+    expect(screen.queryByText('Mappings saved')).toBeNull()
   })
 
   it('explains zero active instruments and unconfigured providers without credential controls', async () => {

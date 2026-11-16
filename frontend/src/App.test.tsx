@@ -483,6 +483,38 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('heading', { name: 'Holdings' })).toBeNull()
   })
 
+  it('protects an edited Market Data mapping when navigation is requested', async () => {
+    const marketDraftSetup = {
+      ...marketSetup,
+      instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', description: 'AAA mapping fixture', currency: 'USD', mappings: [] }],
+    }
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/discover')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ portfolio_id: 'portfolio-default', etag: '"setup-1"', results: [{ instrument_id: 'instrument-a', status: 'no_result', attempted_providers: ['finnhub'], candidates: [], diagnostic: 'No candidate' }] }) } as Response)
+      if (url.includes('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => marketDraftSetup } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByPlaceholderText('Exact listing / coin ID')).toBeTruthy())
+    const identifier = screen.getByPlaceholderText('Exact listing / coin ID')
+    fireEvent.change(identifier, { target: { value: 'owner-edited-id' } })
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    expect(screen.getByRole('heading', { name: /unsaved market data mapping/i })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByDisplayValue('owner-edited-id')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits and leave' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByPlaceholderText('Exact listing / coin ID')).toBeTruthy())
+    expect(screen.queryByDisplayValue('owner-edited-id')).toBeNull()
+  })
+
   it('keeps the holdings table and actions in one compact surface', async () => {
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
     render(<App />)
