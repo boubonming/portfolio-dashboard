@@ -211,6 +211,11 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       setScopeChoice(true)
       return
     }
+    if (previousScope && previousScope.reportingCurrency !== reportingCurrency && reconciliationRequired) {
+      controllerRef.current?.abort(); discoveryControllerRef.current?.abort()
+      readSetup({ discover: true, resetDrafts: true, reconcile: true })
+      return
+    }
     readSetup({ discover: true, resetDrafts: true })
   }, [portfolioID, reportingCurrency])
 
@@ -351,7 +356,7 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
     {scopeChoice && <div className="notice" role="alertdialog" aria-labelledby="mapping-scope-title"><strong id="mapping-scope-title">Market Data scope changed while you were editing.</strong><span className="subline">Keep editing retains your exact in-memory draft. Discard clears it; if a save was pending, discarding does not undo a server write.</span><div className="market-actions"><button type="button" onClick={() => setScopeChoice(false)}>Keep editing</button><button type="button" onClick={discardLocalDrafts}>Discard mapping edits</button></div></div>}
     {state === 'loading' && <p role="status" aria-live="polite">Loading market-data setup…</p>}
     {state === 'error' && <p className="notice" role="status">Unable to load market-data setup. <button type="button" onClick={() => readSetup({ discover: true })}>Try again</button></p>}
-    {readError && <p className="notice error" role="alert" aria-live="polite">{readError} <button type="button" aria-label="Reload setup" onClick={() => readSetup({ discover: false, reconcile: conflict !== null, acknowledge: conflict === null })}>Retry</button></p>}
+    {readError && <p className="notice error" role="alert" aria-live="polite">{readError} <button type="button" aria-label="Reload setup" onClick={() => readSetup({ discover: false, reconcile: reconciliationRequired || conflict !== null, acknowledge: !reconciliationRequired && conflict === null })}>Retry</button></p>}
     {state === 'ready' && <>
       {entries.length === 0 ? <p className="empty-state"><strong>No active instruments to map.</strong> <span>Add a holding in Holdings first.</span></p> : <>
         <div className="mapping-progress" aria-live="polite"><strong>{confirmedCount} of {entries.length} mappings confirmed.</strong> {!firstIncomplete && <span>All active instruments are ready for one atomic save.</span>} {firstIncomplete && <button type="button" onClick={focusNextUnfinished} disabled={controlsDisabled} aria-label="Next unfinished mapping">Next unfinished mapping</button>}</div>
