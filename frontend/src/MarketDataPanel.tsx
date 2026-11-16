@@ -84,12 +84,14 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
   const mountedRef = useRef(true)
   draftsRef.current = drafts
 
-  const hasLocalDraftChanges = () => Object.values(draftsRef.current).some((draft) => draft.touched || draft.suggested)
+  const hasLocalDraftChanges = () => Object.values(draftsRef.current).some((draft) => draft.touched)
   useEffect(() => {
-    onWorkflowStateChange?.({ dirty: hasLocalDraftChanges() || conflict !== null || scopeChoice, pending: saving || reconciliationRequired, uncertain: conflict === 'uncertain' })
+    onWorkflowStateChange?.({ dirty: hasLocalDraftChanges() || conflict !== null || scopeChoice, pending: saving || (reconciliationRequired && conflict !== null), uncertain: conflict === 'uncertain' })
   }, [drafts, saving, reconciliationRequired, conflict, scopeChoice, onWorkflowStateChange])
 
   const clearPrivateState = () => {
+    savingRef.current = false
+    mutationControllerRef.current = null
     setSaving(false); setSetup(null); setDrafts({}); setState('loading')
     setDiscoveryMessage(''); setReadError(''); setSaveError(''); setSaveReceipt('')
     setConflict(null); setAdoptionChoice(false); setReconciliationRequired(false); setReconciliation('none'); setScopeChoice(false)
@@ -195,10 +197,14 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       readSetup({ discover: true, resetDrafts: true })
       return
     }
-    if (previousScope && previousScope.reportingCurrency !== reportingCurrency && hasLocalDraftChanges()) {
-      controllerRef.current?.abort(); discoveryControllerRef.current?.abort()
-      if (savingRef.current) {
-        mutationControllerRef.current?.abort()
+    if (previousScope && previousScope.reportingCurrency !== reportingCurrency && (hasLocalDraftChanges() || savingRef.current || conflictRef.current !== null || scopeChoice)) {
+      const pendingWrite = savingRef.current
+      generationRef.current += 1
+      controllerRef.current?.abort(); discoveryControllerRef.current?.abort(); mutationControllerRef.current?.abort()
+      controllerRef.current = null; discoveryControllerRef.current = null; mutationControllerRef.current = null
+      savingRef.current = false
+      setSaving(false)
+      if (pendingWrite || conflictRef.current === 'uncertain') {
         setConflict('uncertain'); conflictRef.current = 'uncertain'; setReconciliationRequired(true)
         setSaveError('The mapping scope changed while a save was pending. The server outcome is unknown; reload setup before trying again.')
       }
@@ -288,6 +294,11 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
       if (controller.signal.aborted || generation !== generationRef.current || scopeRef.current.portfolioID !== portfolioID) return
       const outcomeIDs = result.outcomes.map((outcome) => outcome.instrument_id)
       if (outcomeIDs.length !== expectedIDs.size || new Set(outcomeIDs).size !== outcomeIDs.length || outcomeIDs.some((id) => !expectedIDs.has(id))) throw new APIError(200, 'Invalid mapping batch response: stale instrument scope.')
+      const savedByInstrument = new Map(result.outcomes.flatMap((outcome) => outcome.mapping ? [[outcome.instrument_id, outcome.mapping] as const] : []))
+      setDrafts((current) => Object.fromEntries(Object.entries(current).map(([instrumentID, draft]) => {
+        const mapping = savedByInstrument.get(instrumentID)
+        return [instrumentID, mapping ? { ...draft, provider: mapping.provider, providerSymbol: mapping.provider_symbol, quoteCurrency: mapping.quote_currency, provenance: mapping.provenance, confirmed: true, suggested: false, touched: false } : draft]
+      })))
       setSaveReceipt(`Saved ${result.outcomes.length} mapping${result.outcomes.length === 1 ? '' : 's'} as a new revision.`)
       setConflict(null)
       setReconciliationRequired(true)
@@ -321,8 +332,17 @@ export default function MarketDataPanel({ portfolioID, reportingCurrency, csrfTo
   const controlsDisabled = saving || reconciliationRequired || conflict !== null
   const reconciledDraftSetCompatible = entries.length === Object.keys(drafts).length && entries.every((instrument) => Object.prototype.hasOwnProperty.call(drafts, instrument.instrument_id))
   const discardLocalDrafts = () => {
+    const scopeChanged = scopeChoice
     if (setup) setDrafts(draftSeeds(setup))
-    setScopeChoice(false); setAdoptionChoice(false); setConflict(null); conflictRef.current = null; setReconciliationRequired(false); setReconciliation('none'); setSaveError('')
+    setScopeChoice(false)
+    if (conflict !== null || reconciliationRequired) {
+      setAdoptionChoice(false)
+      setSaveError('Local mapping values were discarded. Reload setup to validate the current revision before saving again.')
+      readSetup({ discover: false, reconcile: true })
+      return
+    }
+    setAdoptionChoice(false); setConflict(null); conflictRef.current = null; setReconciliationRequired(false); setReconciliation('none'); setSaveError('')
+    if (scopeChanged) readSetup({ discover: true, resetDrafts: true })
   }
   return <section className="market-data-card" aria-labelledby="market-data-title">
     <div className="section-heading"><div><span className="eyebrow">One-time setup, revisioned</span><h2 id="market-data-title">Market data</h2></div><span className="muted">Provider keys authorize access; mappings identify exact listings.</span></div>

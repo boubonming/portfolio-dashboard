@@ -636,6 +636,72 @@ describe('MarketDataPanel', () => {
     expect(screen.queryByText('Mappings saved')).toBeNull()
   })
 
+  it('releases the old write latch before a nonempty portfolio replacement and keeps late cleanup out of the replacement save', async () => {
+    const portfolioA = setup({ portfolio_id: 'portfolio-a', instruments: [setup().instruments[0]] })
+    const portfolioB = setup({ portfolio_id: 'portfolio-b', etag: '\"setup-b\"', instruments: [{ ...setup().instruments[0], instrument_id: 'authority-b', description: 'Replacement company' }] })
+    const saveRequests: Array<{ body: string; signal?: AbortSignal; resolve: (response: Response) => void }> = []
+    let readsA = 0
+    let readsB = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) return new Promise<Response>((resolve) => saveRequests.push({ body: String(init?.body), signal: init?.signal as AbortSignal, resolve }))
+      if (url.endsWith('/market-data/discover')) {
+        const current = url.includes('/portfolio-b/') ? portfolioB : portfolioA
+        return json({ portfolio_id: current.portfolio_id, etag: current.etag, results: current.instruments.map((instrument) => ({ instrument_id: instrument.instrument_id, status: 'no_result', attempted_providers: ['coingecko'], candidates: [], diagnostic: 'manual' })) })
+      }
+      if (url.includes('/portfolio-b/')) { readsB += 1; return json(portfolioB) }
+      readsA += 1
+      return json(portfolioA)
+    })
+    const rendered = renderPanel(fetchMock, { portfolioID: 'portfolio-a' })
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(1))
+    completeMapping(screen.getAllByRole('row')[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(saveRequests).toHaveLength(1))
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-b" reportingCurrency="MYR" csrfToken="replacement-csrf" onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(saveRequests[0].signal?.aborted).toBe(true))
+    await waitFor(() => expect(readsB).toBeGreaterThan(0))
+    const replacementRow = screen.getAllByRole('row')[1]
+    completeMapping(replacementRow)
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(saveRequests).toHaveLength(2))
+    expect(JSON.parse(saveRequests[1].body).mappings).toEqual([expect.objectContaining({ instrument_id: 'authority-b' })])
+    expect(new Headers(fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/market-data/mappings') && init?.body === saveRequests[1].body)?.[1]?.headers as HeadersInit).get('If-Match')).toBe('"setup-b"')
+    saveRequests[0].resolve(json({ status: 'saved', etag: '"late-a"', outcomes: [{ instrument_id: 'authority-a', status: 'saved', mapping: { id: 'late-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-0', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'late', created_at: '2026-01-01T00:00:00.000000000Z' } }] }) as unknown as Response)
+    expect(saveRequests[1].signal?.aborted).toBe(false)
+    saveRequests[1].resolve(json({ status: 'saved', etag: '"saved-b"', outcomes: [{ instrument_id: 'authority-b', status: 'saved', mapping: { id: 'saved-b', instrument_id: 'authority-b', provider: 'coingecko', provider_symbol: 'coin-0', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'saved', created_at: '2026-01-01T00:00:00.000000000Z' } }] }) as unknown as Response)
+    await waitFor(() => expect(screen.getByText(/Saved 1 mapping/)).toBeTruthy())
+  })
+
+  it('keeps scope discard behind validated reconciliation and an explicit reset choice', async () => {
+    const configuredSetup = setup({ instruments: [setup().instruments[0]] })
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) return json({ error: 'stale' }, 412)
+      if (url.endsWith('/market-data/discover')) return json({ portfolio_id: configuredSetup.portfolio_id, etag: configuredSetup.etag, results: [] })
+      reads += 1
+      return json(configuredSetup)
+    })
+    const rendered = renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(1))
+    completeMapping(screen.getAllByRole('row')[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload setup' })).toBeTruthy())
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="USD" csrfToken="csrf" onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Discard mapping edits' })).toBeTruthy())
+    const readsBeforeDiscard = reads
+    fireEvent.click(screen.getByRole('button', { name: 'Discard mapping edits' }))
+    await waitFor(() => expect(reads).toBeGreaterThan(readsBeforeDiscard))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Discard edits and reload' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits and reload' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save all mappings' })).toBeTruthy())
+    completeMapping(screen.getAllByRole('row')[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(2))
+  })
+
   it('explains zero active instruments and unconfigured providers without credential controls', async () => {
     const fetchMock = vi.fn(() => json(setup({ providers: [{ name: 'finnhub', configured: false, public: false }], instruments: [] })))
     renderPanel(fetchMock)

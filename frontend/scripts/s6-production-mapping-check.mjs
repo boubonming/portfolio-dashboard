@@ -30,15 +30,45 @@ function command(method, params = {}) { const id = ++nextID; socket.send(JSON.st
 async function evaluate(expression) { const result = await command('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }); if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || 'browser evaluation failed'); return result.result?.value }
 async function waitFor(expression, timeout = 6000) { const started = Date.now(); while (Date.now() - started < timeout) { if (await evaluate(expression)) return; await new Promise((resolve) => setTimeout(resolve, 60)) } throw new Error(`Timed out waiting for ${expression}`) }
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 100)) }
-async function keyPress(key, shift = false) { const params = { key, code: key, modifiers: shift ? 8 : 0 }; const codes = { Tab: 9, Enter: 13 }; if (codes[key]) Object.assign(params, { windowsVirtualKeyCode: codes[key], nativeVirtualKeyCode: codes[key] }); await command('Input.dispatchKeyEvent', { type: 'keyDown', ...params }); await command('Input.dispatchKeyEvent', { type: 'keyUp', ...params }); await settle() }
-async function requestTab(label) { await evaluate(`(() => { const node = [...document.querySelectorAll('[role="tab"]')].find((item) => item.textContent?.includes(${JSON.stringify(label)})); node?.click(); return Boolean(node) })()`); await settle() }
-async function activateTab(label) { await requestTab(label); await waitFor(`Boolean([...document.querySelectorAll('[role="tab"]')].find((node) => node.textContent?.includes(${JSON.stringify(label)}) && node.getAttribute('aria-selected') === 'true'))`) }
-async function setField(selector, value) { await evaluate(`(() => { const node = document.querySelector(${JSON.stringify(selector)}); if (!node) return false; const setter = Object.getOwnPropertyDescriptor(node.constructor.prototype, 'value')?.set; setter?.call(node, ${JSON.stringify(value)}); node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); return true })()`); await settle() }
-async function click(selector) { await evaluate(`(() => { const node = document.querySelector(${JSON.stringify(selector)}); node?.click(); return Boolean(node) })()`); await settle() }
-async function clickText(text) { await evaluate(`(() => { const node = [...document.querySelectorAll('button')].find((item) => item.textContent?.includes(${JSON.stringify(text)})); node?.click(); return Boolean(node) })()`); await settle() }
+async function keyPress(key, { ctrl = false, shift = false } = {}) {
+  const virtualKeyCodes = { Enter: 13, Tab: 9, Space: 32, ArrowDown: 40, ArrowUp: 38, ArrowRight: 39, ArrowLeft: 37, a: 65 }
+  const inputKey = key === 'Space' ? ' ' : key
+  const params = { key: inputKey, code: key === 'a' ? 'KeyA' : key, modifiers: ctrl ? 2 : shift ? 8 : 0 }
+  if (virtualKeyCodes[key]) Object.assign(params, { windowsVirtualKeyCode: virtualKeyCodes[key], nativeVirtualKeyCode: virtualKeyCodes[key] })
+  const character = key === 'Enter' ? '\r' : key === 'Space' ? ' ' : undefined
+  await command('Input.dispatchKeyEvent', { type: 'keyDown', ...params, ...(character ? { text: character, unmodifiedText: character } : {}) })
+  await command('Input.dispatchKeyEvent', { type: 'keyUp', ...params })
+  await settle()
+}
+async function focus(selector) {
+  const found = await evaluate(`(() => { const node = document.querySelector(${JSON.stringify(selector)}); node?.focus(); return Boolean(node && document.activeElement === node); })()`)
+  assert.equal(found, true, `Could not focus ${selector}`)
+}
+async function typeInto(selector, value) {
+  await focus(selector)
+  await keyPress('a', { ctrl: true })
+  await command('Input.insertText', { text: value })
+  await settle()
+}
+async function activateButton(label) {
+  const found = await evaluate(`(() => { const node = [...document.querySelectorAll('button')].find((candidate) => candidate.textContent?.trim() === ${JSON.stringify(label)} || candidate.getAttribute('aria-label') === ${JSON.stringify(label)}); node?.focus(); return Boolean(node); })()`)
+  assert.equal(found, true, `Button not found: ${label}`)
+  await keyPress('Enter')
+}
+async function activateTab(label, { expectSelected = true } = {}) {
+  const found = await evaluate(`(() => { const node = [...document.querySelectorAll('[role="tab"]')].find((candidate) => (candidate.textContent || '').trim() === ${JSON.stringify(label)} || candidate.getAttribute('aria-label') === ${JSON.stringify(label)}); node?.focus(); return Boolean(node); })()`)
+  assert.equal(found, true, `Tab not found: ${label}`)
+  await keyPress('Enter')
+  if (expectSelected) await waitFor(`Boolean([...document.querySelectorAll('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true' && ((node.textContent || '').trim() === ${JSON.stringify(label)} || node.getAttribute('aria-label') === ${JSON.stringify(label)})))`)
+}
+async function selectFirstProvider(selector) {
+  await focus(selector)
+  await keyPress('ArrowDown')
+  await keyPress('Enter')
+}
 function assertNoOverflow(state, label) { assert.ok(state.rootScrollWidth <= state.innerWidth + 1, `${label} root overflow: ${JSON.stringify(state)}`); assert.ok(state.bodyScrollWidth <= state.innerWidth + 1, `${label} body overflow: ${JSON.stringify(state)}`) }
 async function shellState() { return evaluate(`(() => ({ innerWidth, rootScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth, selected: [...document.querySelectorAll('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true')?.textContent }))()`) }
-async function mappingState() { return evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Market"]'); const rows = [...(region?.querySelectorAll('tbody tr') || [])]; const controls = rows.flatMap((row) => [...row.querySelectorAll('select, input')]).filter((node) => !node.disabled); return { rows: rows.length, controls: controls.length, radios: region?.querySelectorAll('input[type="radio"]').length || 0, text: region?.textContent || '', scrollWidth: region?.scrollWidth || 0, clientWidth: region?.clientWidth || 0, identities: rows.map((row) => row.querySelector('.mapping-identity-cell')?.getBoundingClientRect().toJSON()) } })()`) }
+async function mappingState() { return evaluate(`(() => { const region = document.querySelector('[role="region"][aria-label*="Market"]'); const rows = [...(region?.querySelectorAll('tbody tr') || [])]; return { rows: rows.length, text: region?.textContent || '', scrollWidth: region?.scrollWidth || 0, clientWidth: region?.clientWidth || 0, identities: rows.map((row) => row.querySelector('.mapping-identity-cell')?.getBoundingClientRect().toJSON()) } })()`) }
 async function nativeScan(reverse = false) {
   const count = await evaluate(`document.querySelectorAll('[role="region"][aria-label*="Market"] tbody tr select:not(:disabled), [role="region"][aria-label*="Market"] tbody tr input:not(:disabled)').length`)
   assert.ok(count > 0, 'native mapping scan has no controls')
@@ -50,31 +80,87 @@ async function nativeScan(reverse = false) {
     assert.equal(state.node === 'INPUT' || state.node === 'SELECT', true, `native ${reverse ? 'reverse' : 'forward'} focus left mapping controls`)
     assert.ok(state.rect.left >= state.region.left - 1 && state.rect.right <= state.region.right + 1, `native focus clipped: ${JSON.stringify(state)}`)
     if (!state.insideIdentity) assert.ok(state.rect.left >= state.identity.right + 4, `native focus hidden by sticky identity: ${JSON.stringify(state)}`)
-    if (reverse && index > 0) await keyPress('Tab', true)
+    if (reverse && index > 0) await keyPress('Tab', { shift: true })
   }
+}
+async function runWidth(width) {
+  await command('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: false })
+  await command('Page.navigate', { url: appURL })
+  await waitFor('Boolean(document.querySelector("[role=tab]"))')
+  await waitFor('Boolean([...document.querySelectorAll("button")].some((node) => node.textContent?.includes("Sign out")))')
+  await activateTab('Market Data')
+  await waitFor('document.querySelectorAll("[role=region][aria-label*=Market] tbody tr").length === 2')
+  await waitFor('document.querySelectorAll("[role=region][aria-label*=Market] input[type=radio]").length === 1')
+  let state = await mappingState()
+  assert.equal(state.rows, 2)
+  assert.match(state.text, /Distinguishing provider candidate/)
+  assert.match(state.text, /provider unavailable/)
+  assertNoOverflow(await shellState(), `${width}px Market Data initial`)
+  // Unverified discovery suggestions are not owner edits and must not block a tab exit.
+  await activateTab('Holdings')
+  await activateTab('Market Data')
+  await waitFor('document.querySelectorAll("[role=region][aria-label*=Market] tbody tr").length === 2')
+  assert.equal(await evaluate('Boolean(document.querySelector("[role=alertdialog]"))'), false)
+  assert.equal(await evaluate('Boolean(document.querySelector("button[aria-label=\\"Next unfinished mapping\\"]"))'), true)
+  await activateButton('Next unfinished mapping')
+  assert.equal(await evaluate('Boolean(document.activeElement?.matches("tbody tr:first-child select, tbody tr:first-child input"))'), true)
+  assert.equal(await evaluate('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Save all mappings"))?.disabled)'), true)
+
+  // Owner editing, confirmation and navigation are all native keyboard input.
+  await typeInto('tbody tr:nth-child(1) input[placeholder="Exact listing / coin ID"]', 'same-coin-owner-edit')
+  await focus('tbody tr:nth-child(1) input[type="checkbox"]'); await keyPress('Space')
+  await activateTab('Holdings', { expectSelected: false })
+  await waitFor('Boolean(document.querySelector("[role=alertdialog]"))')
+  await activateButton('Keep editing')
+  await waitFor('Boolean([...document.querySelectorAll("[role=tab]")].find((node) => node.getAttribute("aria-selected") === "true" && node.getAttribute("aria-label") === "Market data"))')
+  await typeInto('tbody tr:nth-child(1) input[placeholder="Exact listing / coin ID"]', 'same-coin')
+  await focus('tbody tr:nth-child(1) input[type="checkbox"]'); await keyPress('Space')
+  await selectFirstProvider('tbody tr:nth-child(2) select')
+  await typeInto('tbody tr:nth-child(2) input[placeholder="Exact listing / coin ID"]', 'second-coin')
+  await typeInto('tbody tr:nth-child(2) input[aria-label^="Quote currency"]', 'EUR')
+  assert.equal(await evaluate('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Save all mappings"))?.disabled)'), true)
+  await typeInto('tbody tr:nth-child(2) input[aria-label^="Quote currency"]', 'USD')
+  await typeInto('tbody tr:nth-child(2) input[placeholder="Where you verified it"]', 'S6 manual verification')
+  await focus('tbody tr:nth-child(2) input[type="checkbox"]'); await keyPress('Space')
+  await waitFor('document.body.textContent.includes("2 of 2 mappings confirmed")')
+  assert.equal(await evaluate('Boolean(document.querySelector("button[aria-label=\\"Next unfinished mapping\\"]"))'), false)
+  assert.equal(await evaluate('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Save all mappings"))?.disabled)'), false)
+  await nativeScan(false)
+
+  await activateButton('Save all mappings')
+  await waitFor('window.__s6.state.putCalls === 1')
+  await waitFor('document.body.textContent.includes("changed in another window")')
+  assert.equal(await evaluate('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Save all mappings"))?.disabled)'), true)
+  await activateButton('Reload setup')
+  await waitFor('Boolean(window.__s6.state.pendingRead)')
+  assert.equal(await evaluate('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Keep editing with current setup")))'), false)
+  await evaluate('window.__s6.resolveRead(); true')
+  await waitFor('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Keep editing with current setup")))')
+  await activateButton('Keep editing with current setup')
+
+  await activateButton('Save all mappings')
+  await waitFor('window.__s6.state.putCalls === 2')
+  await waitFor('document.body.textContent.includes("outcome is uncertain")')
+  await waitFor('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Keep editing with current setup")))')
+  await activateButton('Keep editing with current setup')
+  await activateButton('Save all mappings')
+  await waitFor('window.__s6.state.putCalls === 3')
+  await waitFor('document.body.textContent.includes("Mappings saved")')
+  await waitFor('document.body.textContent.includes("Could not reload Market Data setup")')
+  await activateButton('Reload setup')
+  await waitFor('window.__s6.state.setupReads >= 5')
+  assert.ok(await evaluate('document.body.textContent.includes("Mappings saved")'))
+  assert.equal(await evaluate('Boolean(document.querySelector("[role=alert]"))'), false)
+  assertNoOverflow(await shellState(), `${width}px Market Data recovered`)
+  state = await mappingState()
+  if (width <= 320) assert.ok(state.scrollWidth > state.clientWidth, `${width}px mapping table is not horizontally bounded`)
+  await nativeScan(false)
+  await nativeScan(true)
+  return { width, shell: await shellState(), mapping: state, putCalls: await evaluate('window.__s6.state.putCalls'), setupReads: await evaluate('window.__s6.state.setupReads'), receipt: await evaluate('document.body.textContent.includes("Mappings saved")') }
 }
 await command('Page.enable'); await command('Runtime.enable')
 await command('Page.addScriptToEvaluateOnNewDocument', { source: fixture })
-await command('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
-await command('Page.navigate', { url: appURL })
-await waitFor('Boolean(document.querySelector("[role=tab]"))'); await waitFor('Boolean([...document.querySelectorAll("button")].some((node) => node.textContent?.includes("Sign out")))')
-await activateTab('Market Data'); await waitFor('document.querySelectorAll("[role=region][aria-label*=Market] tbody tr").length === 2'); await waitFor('document.querySelectorAll("[role=region][aria-label*=Market] input[type=radio]").length === 1')
-let state = await mappingState(); assert.equal(state.rows, 2); assert.match(state.text, /Distinguishing provider candidate/); assert.match(state.text, /provider unavailable/); assertNoOverflow(await shellState(), '1280px Market Data')
-// Candidate metadata, manual identity editing, confirmation and truthful progress.
-await setField('tbody tr:nth-child(1) input[placeholder="Exact listing / coin ID"]', 'same-coin-owner-edit')
-await click('tbody tr:nth-child(1) input[type="checkbox"]')
-await requestTab('Holdings'); await waitFor('document.querySelector("[role=alertdialog] h2")?.textContent?.includes("Unsaved Market Data mapping")'); await clickText('Keep editing'); await waitFor('document.querySelector("[role=tab][aria-label=\\"Market data\\"]")?.getAttribute("aria-selected") === "true"')
-await setField('tbody tr:nth-child(1) input[placeholder="Exact listing / coin ID"]', 'same-coin')
-await click('tbody tr:nth-child(1) input[type="checkbox"]')
-await setField('tbody tr:nth-child(2) select', 'coingecko'); await setField('tbody tr:nth-child(2) input[placeholder="Exact listing / coin ID"]', 'second-coin'); await setField('tbody tr:nth-child(2) input[aria-label^="Quote currency"]', 'USD'); await setField('tbody tr:nth-child(2) input[placeholder="Where you verified it"]', 'S6 manual verification'); await click('tbody tr:nth-child(2) input[type="checkbox"]')
-await waitFor('document.body.textContent.includes("2 of 2 mappings confirmed")'); assert.equal(await evaluate('document.querySelector("button[aria-label=\\"Next unfinished mapping\\"]")'), null); assert.equal(await evaluate('[...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Save all mappings"))?.disabled'), false)
-await nativeScan(false)
-// Stale recovery: GET is held, so no choice or second PUT can appear early.
-await clickText('Save all mappings'); await waitFor('window.__s6.state.putCalls === 1'); await waitFor('document.body.textContent.includes("changed in another window")'); assert.equal(await evaluate('[...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Save all mappings"))?.disabled'), true); await click('p[role=alert] button'); await waitFor('Boolean(window.__s6.state.pendingRead)'); assert.equal(await evaluate('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Keep editing with current setup")))'), false)
-assert.equal(await evaluate('[...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Save all mappings"))?.disabled'), true); await evaluate('window.__s6.resolveRead(); true'); await waitFor('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Keep editing with current setup")))'); await clickText('Keep editing with current setup')
-// The next save is uncertain; reconciliation offers no blind PUT and requires a choice.
-await clickText('Save all mappings'); await waitFor('window.__s6.state.putCalls === 2'); await waitFor('document.body.textContent.includes("outcome is uncertain")'); await waitFor('Boolean([...document.querySelectorAll("button")].find((node) => node.textContent?.includes("Keep editing with current setup")))'); await clickText('Keep editing with current setup')
-await clickText('Save all mappings'); await waitFor('window.__s6.state.putCalls === 3'); await waitFor('document.body.textContent.includes("Mappings saved")'); await waitFor('document.body.textContent.includes("Could not reload Market Data setup")'); assert.equal(await evaluate('window.__s6.state.putCalls'), 3); await click('p[role=alert] button[aria-label="Reload setup"]'); await waitFor('window.__s6.state.setupReads >= 5'); assert.equal(await evaluate('document.querySelector("[role=alert]")?.textContent || ""'), ''); assert.ok(await evaluate('document.body.textContent.includes("Mappings saved")'))
-await command('Emulation.setDeviceMetricsOverride', { width: 320, height: 800, deviceScaleFactor: 1, mobile: false }); await evaluate('window.dispatchEvent(new Event("resize")); true'); await settle(); state = await mappingState(); assertNoOverflow(await shellState(), '320px Market Data'); assert.ok(state.scrollWidth > state.clientWidth, '320px mapping table is not horizontally bounded'); await nativeScan(false); await nativeScan(true)
-console.log(JSON.stringify({ putCalls: await evaluate('window.__s6.state.putCalls'), setupReads: await evaluate('window.__s6.state.setupReads'), desktop: await shellState(), narrow: state, receipt: await evaluate('document.body.textContent.includes("Mappings saved")') }, null, 2))
+const desktop = await runWidth(1280)
+const narrow = await runWidth(320)
+console.log(JSON.stringify({ desktop, narrow }, null, 2))
 socket.close()

@@ -967,14 +967,14 @@ export default function App() {
   }, [])
 
   const requestViewChange = useCallback((nextView: View) => {
-    if (view === 'market' && nextView !== 'market' && marketWorkflow.dirty) {
+    if (view === 'market' && nextView !== 'market' && (marketWorkflow.dirty || marketWorkflow.pending || marketWorkflow.uncertain)) {
       setMarketNavigationRequest(nextView)
       return
     }
     if (nextView === 'reviews') setReviewsHoldingId(undefined)
     setMarketNavigationRequest(undefined)
     setView(nextView)
-  }, [marketWorkflow.dirty, view])
+  }, [marketWorkflow.dirty, marketWorkflow.pending, marketWorkflow.uncertain, view])
 
   const keepMarketEditing = useCallback(() => setMarketNavigationRequest(undefined), [])
   const discardMarketAndNavigate = useCallback(() => {
