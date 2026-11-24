@@ -782,6 +782,196 @@ describe('MarketDataPanel', () => {
     await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(2))
   })
 
+  it('reconciles a stale scope discard through failure and changed active instruments before an exact replacement save', async () => {
+    const initialSetup = setup({ instruments: [setup().instruments[0]] })
+    const changedSetup = setup({ etag: '"setup-current"', instruments: [{ ...setup().instruments[1], instrument_id: 'authority-b', description: 'Replacement company' }] })
+    const savedOutcome = { instrument_id: 'authority-b', status: 'saved', mapping: { id: 'mapping-b', instrument_id: 'authority-b', provider: 'coingecko', provider_symbol: 'replacement-coin', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'replacement source', created_at: '2026-01-01T00:00:00.000000000Z' } }
+    let reads = 0
+    let resolveHeldReconciliation!: (response: Response) => void
+    let failReconciliation = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) {
+        if (fetchMock.mock.calls.filter(([request]) => String(request).endsWith('/market-data/mappings')).length === 1) return json({ error: 'stale' }, 412)
+        const headers = new Headers(init?.headers as HeadersInit)
+        expect(headers.get('If-Match')).toBe('"setup-current"')
+        expect(headers.get('X-CSRF-Token')).toBe('replacement-csrf')
+        return json({ status: 'saved', etag: '"setup-saved"', outcomes: [savedOutcome] })
+      }
+      if (url.endsWith('/market-data/discover')) return json({ portfolio_id: 'portfolio-a', etag: '"setup-current"', results: [] })
+      reads += 1
+      if (reads === 1) return json(initialSetup)
+      if (reads === 2) return new Promise<Response>((resolve) => { resolveHeldReconciliation = resolve })
+      if (failReconciliation) return json({ error: 'temporary reconciliation outage' }, 503)
+      return json(changedSetup)
+    })
+    const rendered = renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(1))
+    completeMapping(screen.getAllByRole('row')[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/changed in another window/i))
+
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="USD" csrfToken="replacement-csrf" onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Discard mapping edits' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Discard mapping edits' }))
+    expect(reads).toBe(2)
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(screen.getAllByRole('row')[1]).getByRole('combobox') as HTMLSelectElement).disabled).toBe(true)
+
+    failReconciliation = true
+    resolveHeldReconciliation(json({ error: 'temporary reconciliation outage' }, 503) as unknown as Response)
+    await waitFor(() => expect(screen.getAllByRole('alert').some((alert) => /reconciliation outage|Could not reload Market Data setup/i.test(alert.textContent || ''))).toBe(true))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Keep editing with current setup' })).toBeNull()
+
+    failReconciliation = false
+    fireEvent.click(screen.getAllByRole('button', { name: 'Reload setup' })[0])
+    await waitFor(() => expect(reads).toBe(3))
+    await waitFor(() => expect(screen.getAllByRole('row')[1].textContent).toContain('Replacement company'))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Keep editing with current setup' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits and reload' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Keep editing with current setup' })).toBeNull())
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
+    const replacementRow = screen.getAllByRole('row')[1]
+    completeMapping(replacementRow)
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(2))
+    const replacementCall = fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))[1] as [RequestInfo | URL, RequestInit]
+    expect(String(replacementCall[0])).toBe('/api/v1/portfolios/portfolio-a/market-data/mappings')
+    expect(JSON.parse(String(replacementCall[1].body)).mappings).toEqual([expect.objectContaining({ instrument_id: 'authority-b', provider_symbol: 'coin-0' })])
+    expect(JSON.parse(String(replacementCall[1].body)).mappings).not.toEqual(expect.arrayContaining([expect.objectContaining({ instrument_id: 'authority-a' })]))
+    expect(new Headers(replacementCall[1].headers as HeadersInit).get('If-Match')).toBe('"setup-current"')
+    expect(new Headers(replacementCall[1].headers as HeadersInit).get('X-CSRF-Token')).toBe('replacement-csrf')
+  })
+
+  it('aborts a pending mapping write on reporting-scope replacement and ignores its late response', async () => {
+    let resolveSave!: (response: Response) => void
+    let writeSignal: AbortSignal | undefined
+    let setupReads = 0
+    let resolveReconciliation!: (response: Response) => void
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) return new Promise<Response>((resolve) => { resolveSave = resolve; writeSignal = init?.signal ?? undefined })
+      if (url.endsWith('/market-data/discover')) return json({ portfolio_id: 'portfolio-a', etag: '"setup-1"', results: [] })
+      setupReads += 1
+      if (setupReads === 1) return json(setup())
+      return new Promise<Response>((resolve) => { resolveReconciliation = resolve })
+    })
+    const rendered = renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
+    completeMapping(screen.getAllByRole('row')[1])
+    completeMapping(screen.getAllByRole('row')[2], 1)
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(writeSignal).toBeTruthy())
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="USD" csrfToken="replacement-csrf" onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(writeSignal?.aborted).toBe(true))
+    expect(screen.getByText(/Market Data scope changed while you were editing/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Discard mapping edits' }))
+    await waitFor(() => expect(setupReads).toBe(2))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(screen.getAllByRole('row')[1]).getByRole('combobox') as HTMLSelectElement).disabled).toBe(true)
+    resolveReconciliation(json(setup()) as unknown as Response)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Keep editing with current setup' })).toBeTruthy())
+    resolveSave(json({ status: 'saved', etag: '"late"', outcomes: [] }) as unknown as Response)
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1))
+    expect(screen.queryByText('Mappings saved')).toBeNull()
+  })
+
+  it('keeps the confirmed receipt and current controls when a replacement GET wins before an obsolete GET', async () => {
+    const initialSetup = setup({ instruments: [setup().instruments[0]] })
+    const currentSetup = setup({ etag: '"setup-current"', instruments: [{ ...setup().instruments[0], mappings: [{ provider: 'coingecko', provider_symbol: 'coin-current', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'current source' }] }] })
+    const obsoleteSetup = setup({ etag: '"setup-obsolete"', instruments: [{ ...setup().instruments[0], mappings: [{ provider: 'coingecko', provider_symbol: 'coin-obsolete', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'obsolete source' }] }] })
+    const outcome = { instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-current', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'current source', created_at: '2026-01-01T00:00:00.000000000Z' } }
+    let reads = 0
+    let resolveFollowUp!: (response: Response) => void
+    let resolveReplacement!: (response: Response) => void
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) return json({ status: 'saved', etag: '"setup-saved"', outcomes: [outcome] })
+      if (url.endsWith('/market-data/discover')) return json({ portfolio_id: 'portfolio-a', etag: '"setup-1"', results: [] })
+      reads += 1
+      if (reads === 1) return json(initialSetup)
+      if (reads === 2) return new Promise<Response>((resolve) => { resolveFollowUp = resolve })
+      return new Promise<Response>((resolve) => { resolveReplacement = resolve })
+    })
+    const rendered = renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(1))
+    completeMapping(screen.getAllByRole('row')[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(screen.getByText('Mappings saved')).toBeTruthy())
+    await waitFor(() => expect(reads).toBe(2))
+
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="USD" csrfToken="csrf" onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(reads).toBe(3))
+    resolveReplacement(json(currentSetup) as unknown as Response)
+    await waitFor(() => expect(screen.getByText('Current / confirmed: coingecko / coin-current')).toBeTruthy())
+    resolveFollowUp(json(obsoleteSetup) as unknown as Response)
+    await waitFor(() => expect(screen.getByText('Current / confirmed: coingecko / coin-current')).toBeTruthy())
+    expect(screen.queryByText('coin-obsolete')).toBeNull()
+    expect(screen.getByText('Mappings saved')).toBeTruthy()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
+  })
+
+  it('preserves a confirmed receipt when the original follow-up GET failed before scope replacement', async () => {
+    const initialSetup = setup({ instruments: [setup().instruments[0]] })
+    const currentSetup = setup({ etag: '"setup-current"', instruments: [{ ...setup().instruments[0], mappings: [{ provider: 'coingecko', provider_symbol: 'coin-current', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'current source' }] }] })
+    const outcome = { instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-current', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'current source', created_at: '2026-01-01T00:00:00.000000000Z' } }
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) return json({ status: 'saved', etag: '"setup-saved"', outcomes: [outcome] })
+      if (url.endsWith('/market-data/discover')) return json({ portfolio_id: 'portfolio-a', etag: '"setup-1"', results: [] })
+      reads += 1
+      if (reads === 1) return json(initialSetup)
+      if (reads === 2) return json({ error: 'original follow-up failed' }, 503)
+      return json(currentSetup)
+    })
+    const rendered = renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(1))
+    completeMapping(screen.getAllByRole('row')[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(screen.getByText('Mappings saved')).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Could not reload Market Data setup/i))
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="USD" csrfToken="csrf" onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByText('Current / confirmed: coingecko / coin-current')).toBeTruthy())
+    expect(screen.getByText('Mappings saved')).toBeTruthy()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
+  })
+
+  it('recovers a failed replacement GET with GET-only retry and never repeats the confirmed mapping write', async () => {
+    const initialSetup = setup({ instruments: [setup().instruments[0]] })
+    const currentSetup = setup({ etag: '"setup-current"', instruments: [{ ...setup().instruments[0], mappings: [{ provider: 'coingecko', provider_symbol: 'coin-current', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'current source' }] }] })
+    const outcome = { instrument_id: 'authority-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'authority-a', provider: 'coingecko', provider_symbol: 'coin-current', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'current source', created_at: '2026-01-01T00:00:00.000000000Z' } }
+    let reads = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) return json({ status: 'saved', etag: '"setup-saved"', outcomes: [outcome] })
+      if (url.endsWith('/market-data/discover')) return json({ portfolio_id: 'portfolio-a', etag: '"setup-1"', results: [] })
+      reads += 1
+      if (reads === 1) return json(initialSetup)
+      if (reads === 2) return json({ error: 'original follow-up failed' }, 503)
+      if (reads === 3) return json({ error: 'replacement read failed' }, 503)
+      return json(currentSetup)
+    })
+    const rendered = renderPanel(fetchMock)
+    await waitFor(() => expect(mappingComboboxes()).toHaveLength(1))
+    completeMapping(screen.getAllByRole('row')[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(screen.getByText('Mappings saved')).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Could not reload Market Data setup/i))
+    rendered.rerender(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="USD" csrfToken="csrf" onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Could not reload Market Data setup/i))
+    expect(screen.getByText('Mappings saved')).toBeTruthy()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Reload setup' }))
+    await waitFor(() => expect(screen.getByText('Current / confirmed: coingecko / coin-current')).toBeTruthy())
+    expect(screen.getByText('Mappings saved')).toBeTruthy()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
+  })
+
   it('explains zero active instruments and unconfigured providers without credential controls', async () => {
     const fetchMock = vi.fn(() => json(setup({ providers: [{ name: 'finnhub', configured: false, public: false }], instruments: [] })))
     renderPanel(fetchMock)
