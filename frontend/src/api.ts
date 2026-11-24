@@ -471,13 +471,35 @@ function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDat
     }
     const missingInstrumentLabels = new Set(setup.instruments.map((instrument) => `${instrument.symbol} (${instrument.currency})`))
     if (new Set(result.missing_instruments).size !== result.missing_instruments.length || result.missing_instruments.some((instrument) => !missingInstrumentLabels.has(instrument))) throw new APIError(200, 'Invalid market refresh response: unknown missing instrument.')
-    for (const dependency of [...result.snapshot.missing_dependencies, ...result.snapshot.stale_dependencies, ...result.snapshot.future_dependencies, ...result.snapshot.invalid_dependencies]) {
-      const normalized = dependency.replace(/^(?:missing|stale|invalid)\s+/i, '')
+    const quoteWitnessByID = new Map(quoteWitnesses.map((observation) => [observation.id, observation]))
+    const fxWitnessByID = new Map(fxWitnesses.map((observation) => [observation.id, observation]))
+    const dependenciesByKind: Array<[string[], 'missing' | 'observed']> = [
+      [result.snapshot.missing_dependencies, 'missing'],
+      [result.snapshot.stale_dependencies, 'observed'],
+      [result.snapshot.future_dependencies, 'observed'],
+      [result.snapshot.invalid_dependencies, 'observed'],
+    ]
+    for (const [dependencies, identityKind] of dependenciesByKind) for (const dependency of dependencies) {
+      const normalized = dependency.replace(/^(?:missing|stale|future|invalid)\s+/i, '')
       const quote = normalized.match(/^quote:([A-Za-z0-9._~-]+)$/)
-      const fx = normalized.match(/^fx:([A-Z]{3})\/([A-Z]{3})$/)
-      if (quote && !instrumentIDs.has(quote[1])) throw new APIError(200, 'Invalid market refresh response: unknown dependency identity.')
-      if (fx && (!expectedFXCurrencies.has(fx[1]) || fx[2] !== result.snapshot.reporting_currency)) throw new APIError(200, 'Invalid market refresh response: unknown dependency currency.')
-      if (!quote && !fx && !/^(?:lot|cost):[A-Za-z0-9._~-]+(?::[A-Za-z0-9._~-]+)?$/.test(normalized)) throw new APIError(200, 'Invalid market refresh response: unknown dependency identity.')
+      const fx = normalized.match(/^fx:([A-Za-z0-9._~-]+)(?:\/([A-Z]{3}))?$/)
+      if (quote) {
+        if (identityKind === 'missing') {
+          if (!instrumentIDs.has(quote[1])) throw new APIError(200, 'Invalid market refresh response: unknown missing instrument dependency.')
+        } else {
+          const witness = quoteWitnessByID.get(quote[1])
+          if (!witness || !instrumentIDs.has(witness.instrument_id)) throw new APIError(200, 'Invalid market refresh response: unknown quote observation dependency.')
+        }
+      } else if (fx) {
+        if (identityKind === 'missing') {
+          if (!fx[2] || !expectedFXCurrencies.has(fx[1]) || fx[2] !== result.snapshot.reporting_currency) throw new APIError(200, 'Invalid market refresh response: unknown missing FX dependency.')
+        } else {
+          const witness = fxWitnessByID.get(fx[1])
+          if (!witness || !expectedFXCurrencies.has(witness.base_currency) || witness.quote_currency !== result.snapshot.reporting_currency) throw new APIError(200, 'Invalid market refresh response: unknown FX observation dependency.')
+        }
+      } else if (!/^(?:lot|cost):[A-Za-z0-9._~-]+(?::[A-Za-z0-9._~-]+)?$/.test(normalized)) {
+        throw new APIError(200, 'Invalid market refresh response: unknown dependency identity.')
+      }
     }
     if (result.complete && result.missing_instruments.length !== 0) throw new APIError(200, 'Invalid market refresh response: complete result has missing instruments.')
     if (result.complete && result.snapshot.quote_ids.length !== setup.instruments.length) throw new APIError(200, 'Invalid market refresh response: incomplete quote dependencies.')

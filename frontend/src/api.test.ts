@@ -150,7 +150,7 @@ describe('semantic market refresh decoding', () => {
   it('accepts setup-bound future quote and FX dependencies', async () => {
     const value = coherentRefresh()
     value.snapshot.future_count = 2
-    value.snapshot.future_dependencies = ['quote:instrument-a', 'fx:USD/MYR']
+    value.snapshot.future_dependencies = ['quote:quote-observation', 'fx:fx-observation']
     await expect(decodeMarketResult(value)).resolves.toMatchObject({ complete: true })
   })
 

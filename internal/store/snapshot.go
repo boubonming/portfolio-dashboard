@@ -241,7 +241,38 @@ func statusFromPayload(encoded []byte) (domain.SnapshotStatus, error) {
 		seenFXIDs[id] = true
 		fxObservations = append(fxObservations, domain.FXObservation{ID: fx.ID, BaseCurrency: fx.BaseCurrency, QuoteCurrency: fx.QuoteCurrency, Source: fx.Source})
 	}
-	return domain.SnapshotStatus{SnapshotID: payload.SnapshotID, PortfolioID: payload.PortfolioID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: v.Complete, ReportingCurrency: v.ReportingCurrency, ReportingTotal: v.ReportingTotal, Currencies: currencies, Subtotals: v.Subtotals, MissingCount: len(v.MissingDependencies), StaleCount: len(v.StaleDependencies), FutureCount: len(v.FutureDependencies), InvalidCount: len(v.InvalidDependencies), MissingDependencies: v.MissingDependencies, StaleDependencies: v.StaleDependencies, FutureDependencies: v.FutureDependencies, InvalidDependencies: v.InvalidDependencies, QuoteIDs: v.QuoteIDs, FXIDs: v.FXIDs, QuoteObservations: quoteObservations, FXObservations: fxObservations, SourceTimestamps: v.SourceTimestamps, PresentationTimezone: v.PresentationTimezone}, nil
+	return domain.SnapshotStatus{SnapshotID: payload.SnapshotID, PortfolioID: payload.PortfolioID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: v.Complete, ReportingCurrency: v.ReportingCurrency, ReportingTotal: v.ReportingTotal, Currencies: currencies, Subtotals: snapshotSubtotals(v.Subtotals), MissingCount: len(v.MissingDependencies), StaleCount: len(v.StaleDependencies), FutureCount: len(v.FutureDependencies), InvalidCount: len(v.InvalidDependencies), MissingDependencies: snapshotStrings(v.MissingDependencies), StaleDependencies: snapshotStrings(v.StaleDependencies), FutureDependencies: snapshotStrings(v.FutureDependencies), InvalidDependencies: snapshotStrings(v.InvalidDependencies), QuoteIDs: snapshotStrings(v.QuoteIDs), FXIDs: snapshotStrings(v.FXIDs), QuoteObservations: snapshotQuoteObservations(quoteObservations), FXObservations: snapshotFXObservations(fxObservations), SourceTimestamps: snapshotStrings(v.SourceTimestamps), PresentationTimezone: v.PresentationTimezone}, nil
+}
+
+// snapshotStrings keeps the wire contract stable for historical payloads that
+// were persisted before empty slices were initialized. This is a read-model
+// normalization only; immutable snapshot bytes are never rewritten.
+func snapshotStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return append([]string{}, values...)
+}
+
+func snapshotSubtotals(values []domain.CurrencySubtotal) []domain.CurrencySubtotal {
+	if values == nil {
+		return []domain.CurrencySubtotal{}
+	}
+	return append([]domain.CurrencySubtotal{}, values...)
+}
+
+func snapshotQuoteObservations(values []domain.QuoteObservation) []domain.QuoteObservation {
+	if values == nil {
+		return []domain.QuoteObservation{}
+	}
+	return append([]domain.QuoteObservation{}, values...)
+}
+
+func snapshotFXObservations(values []domain.FXObservation) []domain.FXObservation {
+	if values == nil {
+		return []domain.FXObservation{}
+	}
+	return append([]domain.FXObservation{}, values...)
 }
 
 func (s *Store) SnapshotStatus(ctx context.Context, snapshotID string) (domain.SnapshotStatus, error) {

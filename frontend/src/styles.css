@@ -123,8 +123,9 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .refresh-complete { background: #164d43; color: #b8f4df; }
 .refresh-incomplete { background: #5b421e; color: #ffdc9a; }
 .refresh-error { background: #652c35; color: #ffd2d8; }
-.refresh-details { border-top: 1px solid #41615d; display: grid; gap: .75rem; margin-top: .75rem; padding-top: .75rem; width: 100%; }
-.refresh-details ul { line-height: 1.6; margin: .25rem 0; padding-left: 1.2rem; }
+.refresh-details { border-top: 1px solid #41615d; display: grid; gap: .75rem; margin-top: .75rem; max-width: 100%; min-width: 0; padding-top: .75rem; width: 100%; }
+.refresh-details > *, .refresh-details li { max-width: 100%; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.refresh-details ul { line-height: 1.6; margin: .25rem 0; max-width: 100%; min-width: 0; overflow-wrap: anywhere; padding-left: 1.2rem; }
 .overview-actions { margin-top: 1rem; }
 .empty { color: #b8cbc8; padding: 1rem; }
 .activity-card { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; margin-top: 1.5rem; min-width: 0; padding: 1.25rem; }

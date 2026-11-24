@@ -208,7 +208,7 @@ func snapshotView(payload snapshotPayload, valuation domain.Valuation) domain.Sn
 	if valuation.Complete {
 		state = "complete"
 	}
-	return domain.SnapshotView{State: state, SnapshotID: payload.SnapshotID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: valuation.Complete, ReportingTotal: valuation.ReportingTotal, MissingDependencies: valuation.MissingDependencies, StaleDependencies: valuation.StaleDependencies, FutureDependencies: valuation.FutureDependencies, InvalidDependencies: valuation.InvalidDependencies, SourceTimestamps: valuation.SourceTimestamps, Subtotals: valuation.Subtotals}
+	return domain.SnapshotView{State: state, SnapshotID: payload.SnapshotID, CalculationVersion: payload.CalculationVersion, CreatedAt: payload.CreatedAt, AsOf: payload.AsOf, Complete: valuation.Complete, ReportingTotal: valuation.ReportingTotal, MissingDependencies: snapshotStrings(valuation.MissingDependencies), StaleDependencies: snapshotStrings(valuation.StaleDependencies), FutureDependencies: snapshotStrings(valuation.FutureDependencies), InvalidDependencies: snapshotStrings(valuation.InvalidDependencies), SourceTimestamps: snapshotStrings(valuation.SourceTimestamps), Subtotals: snapshotSubtotals(valuation.Subtotals)}
 }
 
 func latestQuoteByInstrument(quotes []domain.Quote) map[string]domain.Quote {
