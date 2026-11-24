@@ -1,20 +1,47 @@
 (() => {
   const session = { authenticated: true, csrf_token: 's7-fixture-token', expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }
+  const longSymbol = 'S7-' + 'LONG-LABEL-'.repeat(11) + 'END'
+  const longDiagnostics = new URLSearchParams(location.search).get('s7-long-diagnostics') === '1'
+  const overviewActions = new URLSearchParams(location.search).get('s7-overview-actions') === '1'
   const overview = {
     portfolio: { id: 'portfolio-default', name: 'S7 Synthetic Portfolio With An Extraordinarily Long Label For Wrapping', default_reporting_currency: 'MYR' },
     reporting_currency: 'MYR',
     snapshot: { state: 'complete', complete: true, as_of: '2026-01-02T12:00:00.000000000Z', calculation_version: 'test.v1', reporting_total: '100.5', subtotals: [] },
     holdings: [{ lot_id: 'lot-a', symbol: 'AAA', name: 'AAA Fund', description: 'Synthetic instrument', quantity: '2', currency: 'USD', unit_cost: '5', cost_basis: '10', latest_price: '50.5', latest_value: '101', reporting_value: '100.5', quote_source: 'fixture', freshness: { status: 'fresh' }, data_quality: [], missing_broker: false, missing_acquisition_date: false }],
   }
+  if (overviewActions) {
+    overview.snapshot = { state: 'no_snapshot', complete: false, subtotals: [] }
+    overview.holdings = []
+  }
   const market = {
     portfolio_id: 'portfolio-default', etag: '"s7-setup-1"',
     providers: [{ name: 'coingecko', configured: true, public: true }, { name: 'open_exchange_rates', configured: true, public: false }],
-    instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', currency: 'USD', mappings: [{ provider: 'coingecko', provider_symbol: 'aaa', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z' }] }],
+    instruments: [{ instrument_id: 'instrument-a', symbol: longSymbol, currency: 'USD', mappings: longDiagnostics ? [] : [{ provider: 'coingecko', provider_symbol: 'aaa', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z' }] }],
   }
   const refresh = {
-    refresh: { refresh_id: 'refresh-s7', portfolio_id: 'portfolio-default', status: 'complete', started_at: '2026-01-01T00:00:00.000000000Z', ended_at: '2026-01-01T00:00:01.000000000Z', observation_ids: ['quote-observation', 'fx-observation'], quote_observations: [{ id: 'quote-observation', instrument_id: 'instrument-a', symbol: 'AAA', currency: 'USD', source: 'coingecko' }], fx_observations: [{ id: 'fx-observation', base_currency: 'USD', quote_currency: 'MYR', source: 'open_exchange_rates' }], providers: [{ provider: 'coingecko', status: 'complete', request_count: 1, succeeded_count: 1, failed_count: 0, missing_mapping_count: 0, observation_ids: ['quote-observation'], quote_observations: [{ id: 'quote-observation', instrument_id: 'instrument-a', symbol: 'AAA', currency: 'USD', source: 'coingecko' }], fx_observations: [], errors: [] }, { provider: 'open_exchange_rates', status: 'complete', request_count: 1, succeeded_count: 1, failed_count: 0, missing_mapping_count: 0, observation_ids: ['fx-observation'], quote_observations: [], fx_observations: [{ id: 'fx-observation', base_currency: 'USD', quote_currency: 'MYR', source: 'open_exchange_rates' }], errors: [] }] },
-    snapshot: { snapshot_id: 'snapshot-s7', portfolio_id: 'portfolio-default', calculation_version: 'phase-b.decimal.v1', created_at: '2026-01-01T00:00:02.000000000Z', as_of: '2026-01-01T00:00:01.000000000Z', complete: true, reporting_currency: 'MYR', reporting_total: '12', currencies: ['USD'], subtotals: [{ currency: 'USD', market_value: '10', cost_basis: '8', unrealised_pnl: '2' }], missing_count: 0, stale_count: 0, future_count: 0, invalid_count: 0, missing_dependencies: [], stale_dependencies: [], future_dependencies: [], invalid_dependencies: [], quote_ids: ['quote-observation'], fx_ids: ['fx-observation'], quote_observations: [{ id: 'quote-observation', instrument_id: 'instrument-a', symbol: 'AAA', currency: 'USD', source: 'coingecko' }], fx_observations: [{ id: 'fx-observation', base_currency: 'USD', quote_currency: 'MYR', source: 'open_exchange_rates' }], source_timestamps: ['2026-01-01T00:00:00.000000000Z'], presentation_timezone: 'Asia/Singapore' },
+    refresh: { refresh_id: 'refresh-s7', portfolio_id: 'portfolio-default', status: 'complete', started_at: '2026-01-01T00:00:00.000000000Z', ended_at: '2026-01-01T00:00:01.000000000Z', observation_ids: ['quote-observation', 'fx-observation'], quote_observations: [{ id: 'quote-observation', instrument_id: 'instrument-a', symbol: longSymbol, currency: 'USD', source: 'coingecko' }], fx_observations: [{ id: 'fx-observation', base_currency: 'USD', quote_currency: 'MYR', source: 'open_exchange_rates' }], providers: [{ provider: 'coingecko', status: 'complete', request_count: 1, succeeded_count: 1, failed_count: 0, missing_mapping_count: 0, observation_ids: ['quote-observation'], quote_observations: [{ id: 'quote-observation', instrument_id: 'instrument-a', symbol: longSymbol, currency: 'USD', source: 'coingecko' }], fx_observations: [], errors: [] }, { provider: 'open_exchange_rates', status: 'complete', request_count: 1, succeeded_count: 1, failed_count: 0, missing_mapping_count: 0, observation_ids: ['fx-observation'], quote_observations: [], fx_observations: [{ id: 'fx-observation', base_currency: 'USD', quote_currency: 'MYR', source: 'open_exchange_rates' }], errors: [] }] },
+    snapshot: { snapshot_id: 'snapshot-s7', portfolio_id: 'portfolio-default', calculation_version: 'phase-b.decimal.v1', created_at: '2026-01-01T00:00:02.000000000Z', as_of: '2026-01-01T00:00:01.000000000Z', complete: true, reporting_currency: 'MYR', reporting_total: '12', currencies: ['USD'], subtotals: [{ currency: 'USD', market_value: '10', cost_basis: '8', unrealised_pnl: '2' }], missing_count: 0, stale_count: 0, future_count: 0, invalid_count: 0, missing_dependencies: [], stale_dependencies: [], future_dependencies: [], invalid_dependencies: [], quote_ids: ['quote-observation'], fx_ids: ['fx-observation'], quote_observations: [{ id: 'quote-observation', instrument_id: 'instrument-a', symbol: longSymbol, currency: 'USD', source: 'coingecko' }], fx_observations: [{ id: 'fx-observation', base_currency: 'USD', quote_currency: 'MYR', source: 'open_exchange_rates' }], source_timestamps: ['2026-01-01T00:00:00.000000000Z', '2026-01-01T00:00:00.000000000Z'], presentation_timezone: 'Asia/Singapore' },
     complete: true, freshness_policy: 'quotes and FX must be no older than the configured freshness window; incomplete data never becomes zero', missing_instruments: [],
+  }
+  if (longDiagnostics) {
+    refresh.complete = false
+    refresh.refresh.status = 'incomplete'
+    refresh.refresh.providers[0].status = 'incomplete'
+    refresh.refresh.providers[0].failed_count = 1
+    refresh.refresh.providers[0].succeeded_count = 0
+    refresh.refresh.providers[0].observation_ids = []
+    refresh.refresh.providers[0].quote_observations = []
+    refresh.refresh.providers[0].errors = ['missing mapping']
+    refresh.refresh.observation_ids = ['fx-observation']
+    refresh.refresh.quote_observations = []
+    refresh.snapshot.complete = false
+    delete refresh.snapshot.reporting_total
+    refresh.snapshot.missing_count = 1
+    refresh.snapshot.missing_dependencies = ['missing quote:instrument-a']
+    refresh.snapshot.quote_ids = []
+    refresh.snapshot.quote_observations = []
+    refresh.snapshot.source_timestamps = ['2026-01-01T00:00:00.000000000Z']
+    refresh.missing_instruments = [`${longSymbol} (USD)`]
   }
   const response = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
   const originalFetch = window.fetch.bind(window)

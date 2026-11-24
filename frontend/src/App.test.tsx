@@ -1502,6 +1502,28 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByText(/Refreshing prices/)).toBeNull()
   })
 
+  it('cancels setup safely when reporting currency changes before a provider request', async () => {
+    let resolveSetup: ((response: Response) => void) | undefined
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData')
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return new Promise<Response>((resolve) => { resolveSetup = resolve })
+      return Promise.resolve({ ok: true, status: 200, json: async () => url.includes('currency=USD') ? { ...completeOverview, reporting_currency: 'USD' } : completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/market-data'))).toBe(true))
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/setup was canceled before a provider request/i))
+    expect(refreshSpy).not.toHaveBeenCalled()
+    resolveSetup?.({ ok: true, status: 200, json: async () => marketSetup } as Response)
+    await flushEffects()
+    expect(refreshSpy).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert').textContent).toMatch(/no refresh was started/i)
+  })
+
   it('renders Unavailable for stale snapshots, no snapshots, and every affected freshness state', async () => {
     let response: PortfolioOverview = {
       ...pnlOverview,

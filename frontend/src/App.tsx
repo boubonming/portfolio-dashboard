@@ -977,13 +977,20 @@ export default function App() {
       refreshControllerRef.current?.abort()
       refreshControllerRef.current = null
       refreshingRef.current = false
-    }
-    if (attempt && (interrupted || refreshDetails?.phase === 'uncertain')) {
-      setRefreshDetails({ phase: 'uncertain', portfolioID: attempt.portfolioID, reportingCurrency: attempt.reportingCurrency, requestKey: attempt.requestKey, setup: attempt.setup, readState: 'not_attempted' })
-      setRefreshDetailsOpen(true)
-      setRefreshState('error')
-      setRefreshError(`Reporting currency changed to ${currency}. Return to ${attempt.reportingCurrency} to retry the same refresh; no new refresh is allowed while its outcome is unresolved.`)
-      setRefreshAnnouncement('The unresolved refresh was stopped safely. Return to its original reporting currency to retry the same request.')
+      if (attempt) {
+        setRefreshDetails({ phase: 'uncertain', portfolioID: attempt.portfolioID, reportingCurrency: attempt.reportingCurrency, requestKey: attempt.requestKey, setup: attempt.setup, readState: 'not_attempted' })
+        setRefreshDetailsOpen(true)
+        setRefreshState('error')
+        setRefreshError(`Reporting currency changed to ${currency}. Return to ${attempt.reportingCurrency} to retry the same refresh; no new refresh is allowed while its outcome is unresolved.`)
+        setRefreshAnnouncement('The unresolved refresh was stopped safely. Return to its original reporting currency to retry the same request.')
+      } else {
+        refreshAttemptRef.current = null
+        setRefreshDetails(null)
+        setRefreshDetailsOpen(false)
+        setRefreshState('error')
+        setRefreshError(`Reporting currency changed to ${currency} while market-data setup was loading. Setup was canceled before a provider request; no refresh was started.`)
+        setRefreshAnnouncement('The market-data setup request was canceled safely; no provider request was started.')
+      }
       return
     }
     refreshAttemptRef.current = null
