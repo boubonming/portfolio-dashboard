@@ -1,5 +1,5 @@
 (() => {
-  const session = { authenticated: true, csrf_token: 's3-fixture-token', expires_at: '2030-01-01T00:00:00.000Z' }
+  const session = { authenticated: true, csrf_token: 's3-fixture-token', expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() }
   const overview = {
     portfolio: { id: 'portfolio-default', name: 'Synthetic Portfolio With A Long Label For Reflow', default_reporting_currency: 'MYR' },
     reporting_currency: 'MYR',

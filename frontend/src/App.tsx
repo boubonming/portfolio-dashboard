@@ -36,7 +36,7 @@ import { apiFetch, APIError, getMarketDataSetup, jsonResponse, refreshMarketData
 import ThesisEditor from './ThesisEditor'
 import Reviews, { type FeedbackAttemptStore } from './Reviews'
 import HoldingMutations, { validatePortfolioETag } from './HoldingMutations'
-import MarketDataPanel from './MarketDataPanel'
+import MarketDataPanel, { type MarketDataWorkflowState } from './MarketDataPanel'
 import SettingsPanel from './SettingsPanel'
 
 export type Freshness = {
@@ -545,6 +545,8 @@ export default function App() {
   const [authError, setAuthError] = useState('')
   const [memoryBoundaryNotice, setMemoryBoundaryNotice] = useState('')
   const [thesisNavigationRequest, setThesisNavigationRequest] = useState<{ target: View; token: number; sessionKey: number } | undefined>(undefined)
+  const [marketNavigationRequest, setMarketNavigationRequest] = useState<View | undefined>(undefined)
+  const [marketWorkflow, setMarketWorkflow] = useState<MarketDataWorkflowState>({ dirty: false, pending: false, uncertain: false })
   const thesisNavigationTokenRef = useRef(0)
   const csrfToken = useRef<string | undefined>(undefined)
   const [filter, setFilter] = useState('')
@@ -599,6 +601,7 @@ export default function App() {
     activityItemsRef.current = []
     thesisNavigationTokenRef.current += 1
     setThesisNavigationRequest(undefined)
+    setMarketNavigationRequest(undefined); setMarketWorkflow({ dirty: false, pending: false, uncertain: false })
     setData(null); setOverviewETag(undefined); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setRefreshError(''); setRefreshAnnouncement(''); setRefreshState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
@@ -963,6 +966,23 @@ export default function App() {
     }, 0)
   }, [])
 
+  const requestViewChange = useCallback((nextView: View) => {
+    if (view === 'market' && nextView !== 'market' && (marketWorkflow.dirty || marketWorkflow.pending || marketWorkflow.uncertain)) {
+      setMarketNavigationRequest(nextView)
+      return
+    }
+    if (nextView === 'reviews') setReviewsHoldingId(undefined)
+    setMarketNavigationRequest(undefined)
+    setView(nextView)
+  }, [marketWorkflow.dirty, marketWorkflow.pending, marketWorkflow.uncertain, view])
+
+  const keepMarketEditing = useCallback(() => setMarketNavigationRequest(undefined), [])
+  const discardMarketAndNavigate = useCallback(() => {
+    const target = marketNavigationRequest
+    setMarketNavigationRequest(undefined)
+    if (target) setView(target)
+  }, [marketNavigationRequest])
+
   const completeThesisNavigation = useCallback((target: string) => {
     if (!['overview', 'holdings', 'market', 'activity', 'reviews', 'settings'].includes(target)) return
     setThesisNavigationRequest(undefined)
@@ -1050,8 +1070,7 @@ export default function App() {
                 setThesisNavigationRequest({ target: nextView, token: ++thesisNavigationTokenRef.current, sessionKey: authGeneration.current })
                 return
               }
-              if (nextView === 'reviews') setReviewsHoldingId(undefined)
-              setView(nextView)
+              requestViewChange(nextView)
             }} selectionFollowsFocus variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile aria-label="Portfolio views" sx={{ minHeight: 40, '& .MuiTab-root': { minHeight: 40, minWidth: { xs: 92, sm: 108 }, px: { xs: 1.25, sm: 2 } } }}>
               {navTabs.map((tab) => <Tab key={tab.value} value={tab.value} label={tab.label} aria-label={tab.ariaLabel} aria-current={view === tab.value ? 'page' : undefined} />)}
             </Tabs>
@@ -1060,6 +1079,7 @@ export default function App() {
         </Toolbar>
       </AppBar>
       <Typography component="h1" id="portfolio-content" className="visually-hidden" tabIndex={-1}>{portfolioContentHeading}</Typography>
+      {marketNavigationRequest && view === 'market' && <Paper className="notice market-navigation-prompt" role="alertdialog" aria-labelledby="market-navigation-title" sx={{ mt: 3, p: 2 }}><Typography component="h2" id="market-navigation-title" variant="h6">Unsaved Market Data mapping</Typography><Typography color="text.secondary">{marketWorkflow.pending ? marketWorkflow.uncertain ? 'A mapping save outcome is uncertain. Leaving does not undo a server write; keep editing to reconcile safely.' : 'A mapping save is pending. Leaving freezes the local workflow; it does not imply that a server write was undone.' : 'You have edited or confirmed mappings that are not saved. Choose whether to keep this exact draft or discard it before leaving.'}</Typography><Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap' }}><Button type="button" onClick={keepMarketEditing}>Keep editing</Button><Button type="button" color="warning" onClick={discardMarketAndNavigate}>Discard edits and leave</Button></Stack></Paper>}
 
       {thesisHolding ? <ThesisEditor key={thesisHolding.lot_id} portfolioId={data?.portfolio.id || activityPortfolioID} holding={thesisHolding} csrfToken={csrfToken.current} onClose={closeThesis} onUnauthorized={handleThesisUnauthorized} returnFocusRef={thesisReturnRef} navigationRequest={thesisNavigationRequest} sessionKey={authGeneration.current} onNavigationComplete={completeThesisNavigation} /> : <>
       {(view === 'overview' || view === 'holdings') && <>
@@ -1156,7 +1176,7 @@ export default function App() {
         <Typography>{state === 'error' ? 'Settings and Reviews need the authenticated portfolio read before they can open.' : 'Reading the portfolio before opening this view…'}</Typography>
         {state === 'error' && <Button type="button" onClick={() => load()}>Retry portfolio read</Button>}
       </Paper>}
-      {view === 'market' && <MarketDataPanel portfolioID={data?.portfolio.id || activityPortfolioID} reportingCurrency={currency} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} />}
+      {view === 'market' && <MarketDataPanel portfolioID={data?.portfolio.id || activityPortfolioID} reportingCurrency={currency} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} onWorkflowStateChange={setMarketWorkflow} />}
       {view === 'settings' && data && <Box component="section" className="settings-page" aria-labelledby="settings-title" sx={{ mt: 3 }}><Typography component="h1" id="settings-title" variant="h4" sx={{ mb: 2 }}>Settings</Typography><SettingsPanel portfolioID={data.portfolio.id} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} onReload={() => load()} /></Box>}
       {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} feedbackAttempts={feedbackAttemptsRef.current} onUnauthorized={handleThesisUnauthorized} onBackToHoldings={closeReviews} />}
       </>}

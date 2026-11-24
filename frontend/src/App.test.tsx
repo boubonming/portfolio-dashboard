@@ -483,6 +483,118 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('heading', { name: 'Holdings' })).toBeNull()
   })
 
+  it('does not treat untouched provider suggestions as unsaved navigation work', async () => {
+    const suggestionSetup = {
+      ...marketSetup,
+      instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', description: 'AAA mapping fixture', currency: 'USD', mappings: [] }],
+    }
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/discover')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ portfolio_id: 'portfolio-default', etag: '"setup-1"', results: [{ instrument_id: 'instrument-a', status: 'candidates', provider: 'finnhub', attempted_providers: ['finnhub'], candidates: [{ provider: 'finnhub', identifier: 'AAA', symbol: 'AAA', name: 'AAA provider listing', currency: 'USD' }], diagnostic: 'candidate' }] }) } as Response)
+      if (url.includes('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => suggestionSetup } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Market data' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByText(/Suggested by finnhub/)).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    expect(screen.queryByRole('alertdialog', { name: /Unsaved Market Data mapping/i })).toBeNull()
+  })
+
+  it('guards navigation while a committed mapping save is pending even without owner edits', async () => {
+    const committedSetup = {
+      ...marketSetup,
+      instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', description: 'AAA mapping fixture', currency: 'USD', mappings: [{ provider: 'finnhub', provider_symbol: 'AAA', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'fixture' }] }],
+    }
+    let resolveSave: ((response: Response) => void) | undefined
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) return new Promise<Response>((resolve) => { resolveSave = resolve })
+      if (url.includes('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => committedSetup } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Market data' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save all mappings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(resolveSave).toBeDefined())
+    await waitFor(() => expect(screen.getByText('Saving mappings…')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    await waitFor(() => expect(screen.getByRole('alertdialog', { name: /Unsaved Market Data mapping/i }).textContent).toMatch(/pending/i))
+    resolveSave?.({ ok: true, status: 200, json: async () => ({ status: 'saved', etag: '"setup-2"', outcomes: [{ instrument_id: 'instrument-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'instrument-a', provider: 'finnhub', provider_symbol: 'AAA', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'fixture', created_at: '2026-01-01T00:00:00.000000000Z' } }] }) } as Response)
+  })
+
+  it('does not call a confirmed current-read mapping unsaved after its receipt is visible', async () => {
+    const initialSetup = {
+      ...marketSetup,
+      instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', description: 'AAA mapping fixture', currency: 'USD', mappings: [] }],
+    }
+    const committedSetup = {
+      ...initialSetup,
+      etag: '"setup-2"',
+      instruments: [{ ...initialSetup.instruments[0], mappings: [{ provider: 'finnhub', provider_symbol: 'AAA', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'fixture' }] }],
+    }
+    let marketReads = 0
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/mappings')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ status: 'saved', etag: '"setup-2"', outcomes: [{ instrument_id: 'instrument-a', status: 'saved', mapping: { id: 'mapping-a', instrument_id: 'instrument-a', provider: 'finnhub', provider_symbol: 'AAA', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'fixture', created_at: '2026-01-01T00:00:00.000000000Z' } }] }) } as Response)
+      if (url.endsWith('/market-data/discover')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ portfolio_id: 'portfolio-default', etag: '"setup-1"', results: [] }) } as Response)
+      if (url.includes('/market-data')) { marketReads += 1; return Promise.resolve({ ok: true, status: 200, json: async () => marketReads === 1 ? initialSetup : committedSetup } as Response) }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Market data' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByPlaceholderText('Exact listing / coin ID')).toBeTruthy())
+    const row = screen.getAllByRole('row')[1]
+    fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'finnhub' } })
+    fireEvent.change(within(row).getByPlaceholderText('Exact listing / coin ID'), { target: { value: 'AAA' } })
+    fireEvent.change(within(row).getByPlaceholderText('Where you verified it'), { target: { value: 'fixture' } })
+    fireEvent.click(within(row).getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(screen.getByText('Mappings saved')).toBeTruthy())
+    await waitFor(() => expect(marketReads).toBeGreaterThan(1))
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    expect(screen.queryByRole('alertdialog', { name: /Unsaved Market Data mapping/i })).toBeNull()
+  })
+
+  it('protects an edited Market Data mapping when navigation is requested', async () => {
+    const marketDraftSetup = {
+      ...marketSetup,
+      instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', description: 'AAA mapping fixture', currency: 'USD', mappings: [] }],
+    }
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data/discover')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ portfolio_id: 'portfolio-default', etag: '"setup-1"', results: [{ instrument_id: 'instrument-a', status: 'no_result', attempted_providers: ['finnhub'], candidates: [], diagnostic: 'No candidate' }] }) } as Response)
+      if (url.includes('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => marketDraftSetup } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByPlaceholderText('Exact listing / coin ID')).toBeTruthy())
+    const identifier = screen.getByPlaceholderText('Exact listing / coin ID')
+    fireEvent.change(identifier, { target: { value: 'owner-edited-id' } })
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    expect(screen.getByRole('heading', { name: /unsaved market data mapping/i })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByDisplayValue('owner-edited-id')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits and leave' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Holdings' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByPlaceholderText('Exact listing / coin ID')).toBeTruthy())
+    expect(screen.queryByDisplayValue('owner-edited-id')).toBeNull()
+  })
+
   it('keeps the holdings table and actions in one compact surface', async () => {
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
     render(<App />)
