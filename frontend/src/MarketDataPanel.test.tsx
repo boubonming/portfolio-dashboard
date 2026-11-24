@@ -1,5 +1,5 @@
 import userEvent from '@testing-library/user-event'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import MarketDataPanel from './MarketDataPanel'
 import { committedStyleRules, hasMatchingDeclaration, installCommittedStyles } from './cssTestUtils'
@@ -847,18 +847,33 @@ describe('MarketDataPanel', () => {
     expect(new Headers(replacementCall[1].headers as HeadersInit).get('X-CSRF-Token')).toBe('replacement-csrf')
   })
 
-  it('aborts a pending mapping write on reporting-scope replacement and ignores its late response', async () => {
+  it('aborts a pending mapping write, recovers uncertain discard through a changed scope, and ignores its valid late receipt', async () => {
+    const initialSetup = setup()
+    const changedSetup = setup({ etag: '"setup-current"', instruments: [{ ...setup().instruments[0], instrument_id: 'authority-b', description: 'Replacement company' }] })
+    const originalOutcomes = initialSetup.instruments.map((instrument, index) => ({ instrument_id: instrument.instrument_id, status: 'saved', mapping: { id: `late-${index}`, instrument_id: instrument.instrument_id, provider: 'coingecko', provider_symbol: `late-${index}`, quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'late original receipt', created_at: '2026-01-01T00:00:00.000000000Z' } }))
+    const replacementOutcome = { instrument_id: 'authority-b', status: 'saved', mapping: { id: 'mapping-b', instrument_id: 'authority-b', provider: 'coingecko', provider_symbol: 'replacement-coin', quote_currency: 'USD', active_from: '2026-01-01T00:00:00.000000000Z', provenance: 'replacement source', created_at: '2026-01-01T00:00:00.000000000Z' } }
     let resolveSave!: (response: Response) => void
     let writeSignal: AbortSignal | undefined
     let setupReads = 0
+    let mappingWrites = 0
     let resolveReconciliation!: (response: Response) => void
+    let failReconciliation = false
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.endsWith('/market-data/mappings')) return new Promise<Response>((resolve) => { resolveSave = resolve; writeSignal = init?.signal ?? undefined })
-      if (url.endsWith('/market-data/discover')) return json({ portfolio_id: 'portfolio-a', etag: '"setup-1"', results: [] })
+      if (url.endsWith('/market-data/mappings')) {
+        mappingWrites += 1
+        if (mappingWrites === 1) return new Promise<Response>((resolve) => { resolveSave = resolve; writeSignal = init?.signal ?? undefined })
+        const headers = new Headers(init?.headers as HeadersInit)
+        expect(headers.get('If-Match')).toBe('"setup-current"')
+        expect(headers.get('X-CSRF-Token')).toBe('replacement-csrf')
+        return json({ status: 'saved', etag: '"setup-saved"', outcomes: [replacementOutcome] })
+      }
+      if (url.endsWith('/market-data/discover')) return json({ portfolio_id: 'portfolio-a', etag: '"setup-current"', results: [] })
       setupReads += 1
-      if (setupReads === 1) return json(setup())
-      return new Promise<Response>((resolve) => { resolveReconciliation = resolve })
+      if (setupReads === 1) return json(initialSetup)
+      if (setupReads === 2) return new Promise<Response>((resolve) => { resolveReconciliation = resolve })
+      if (failReconciliation) return json({ error: 'temporary reconciliation outage' }, 503)
+      return json(changedSetup)
     })
     const rendered = renderPanel(fetchMock)
     await waitFor(() => expect(mappingComboboxes()).toHaveLength(2))
@@ -873,11 +888,42 @@ describe('MarketDataPanel', () => {
     await waitFor(() => expect(setupReads).toBe(2))
     expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
     expect((within(screen.getAllByRole('row')[1]).getByRole('combobox') as HTMLSelectElement).disabled).toBe(true)
-    resolveReconciliation(json(setup()) as unknown as Response)
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Keep editing with current setup' })).toBeTruthy())
-    resolveSave(json({ status: 'saved', etag: '"late"', outcomes: [] }) as unknown as Response)
-    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1))
-    expect(screen.queryByText('Mappings saved')).toBeNull()
+
+    failReconciliation = true
+    resolveReconciliation(json({ error: 'temporary reconciliation outage' }, 503) as unknown as Response)
+    await waitFor(() => expect(screen.getAllByRole('alert').some((alert) => /reconciliation outage|Could not reload Market Data setup/i.test(alert.textContent || ''))).toBe(true))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Keep editing with current setup' })).toBeNull()
+    expect((within(screen.getAllByRole('row')[1]).getByRole('combobox') as HTMLSelectElement).disabled).toBe(true)
+
+    failReconciliation = false
+    fireEvent.click(screen.getAllByRole('button', { name: 'Reload setup' })[0])
+    await waitFor(() => expect(setupReads).toBe(3))
+    await waitFor(() => expect(screen.getAllByRole('row')[1].textContent).toContain('Replacement company'))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Keep editing with current setup' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(mappingWrites).toBe(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits and reload' }))
+    await waitFor(() => expect(setupReads).toBe(4))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Keep editing with current setup' })).toBeNull())
+    const replacementRow = screen.getAllByRole('row')[1]
+    expect((within(replacementRow).getByRole('combobox') as HTMLSelectElement).disabled).toBe(false)
+    completeMapping(replacementRow)
+    fireEvent.click(screen.getByRole('button', { name: 'Save all mappings' }))
+    await waitFor(() => expect(mappingWrites).toBe(2))
+    await waitFor(() => expect(screen.getByText(/Saved 1 mapping as a new revision/)).toBeTruthy())
+    const replacementCall = fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))[1] as [RequestInfo | URL, RequestInit]
+    expect(JSON.parse(String(replacementCall[1].body)).mappings).toEqual([expect.objectContaining({ instrument_id: 'authority-b', provider_symbol: 'coin-0' })])
+
+    await act(async () => {
+      resolveSave(json({ status: 'saved', etag: '"late"', outcomes: originalOutcomes }) as unknown as Response)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(mappingWrites).toBe(2)
+    expect(screen.getByText(/Saved 1 mapping as a new revision/)).toBeTruthy()
+    expect(screen.getAllByRole('row')[1].textContent).toContain('Replacement company')
+    expect(screen.getAllByRole('row')[1].textContent).not.toContain('late-0')
   })
 
   it('keeps the confirmed receipt and current controls when a replacement GET wins before an obsolete GET', async () => {
@@ -908,9 +954,19 @@ describe('MarketDataPanel', () => {
     await waitFor(() => expect(reads).toBe(3))
     resolveReplacement(json(currentSetup) as unknown as Response)
     await waitFor(() => expect(screen.getByText('Current / confirmed: coingecko / coin-current')).toBeTruthy())
-    resolveFollowUp(json(obsoleteSetup) as unknown as Response)
-    await waitFor(() => expect(screen.getByText('Current / confirmed: coingecko / coin-current')).toBeTruthy())
+    const currentRow = screen.getAllByRole('row')[1]
+    expect((within(currentRow).getByRole('combobox') as HTMLSelectElement).value).toBe('coingecko')
+    expect((within(currentRow).getByPlaceholderText('Exact listing / coin ID') as HTMLInputElement).value).toBe('coin-current')
+    expect((within(currentRow).getByRole('combobox') as HTMLSelectElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
+    await act(async () => {
+      resolveFollowUp(json(obsoleteSetup) as unknown as Response)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(screen.getByText('Current / confirmed: coingecko / coin-current')).toBeTruthy()
     expect(screen.queryByText('coin-obsolete')).toBeNull()
+    expect((within(screen.getAllByRole('row')[1]).getByPlaceholderText('Exact listing / coin ID') as HTMLInputElement).value).toBe('coin-current')
+    expect((within(screen.getAllByRole('row')[1]).getByRole('combobox') as HTMLSelectElement).disabled).toBe(false)
     expect(screen.getByText('Mappings saved')).toBeTruthy()
     expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
   })
@@ -937,6 +993,11 @@ describe('MarketDataPanel', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Could not reload Market Data setup/i))
     rendered.rerender(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="USD" csrfToken="csrf" onUnauthorized={vi.fn()} />)
     await waitFor(() => expect(screen.getByText('Current / confirmed: coingecko / coin-current')).toBeTruthy())
+    const currentRow = screen.getAllByRole('row')[1]
+    expect((within(currentRow).getByRole('combobox') as HTMLSelectElement).value).toBe('coingecko')
+    expect((within(currentRow).getByPlaceholderText('Exact listing / coin ID') as HTMLInputElement).value).toBe('coin-current')
+    expect((within(currentRow).getByRole('combobox') as HTMLSelectElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
     expect(screen.getByText('Mappings saved')).toBeTruthy()
     expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
   })
@@ -964,10 +1025,17 @@ describe('MarketDataPanel', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Could not reload Market Data setup/i))
     rendered.rerender(<MarketDataPanel portfolioID="portfolio-a" reportingCurrency="USD" csrfToken="csrf" onUnauthorized={vi.fn()} />)
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Could not reload Market Data setup/i))
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(screen.getAllByRole('row')[1]).getByRole('combobox') as HTMLSelectElement).disabled).toBe(true)
     expect(screen.getByText('Mappings saved')).toBeTruthy()
     expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
     fireEvent.click(screen.getByRole('button', { name: 'Reload setup' }))
     await waitFor(() => expect(screen.getByText('Current / confirmed: coingecko / coin-current')).toBeTruthy())
+    const currentRow = screen.getAllByRole('row')[1]
+    expect((within(currentRow).getByRole('combobox') as HTMLSelectElement).value).toBe('coingecko')
+    expect((within(currentRow).getByPlaceholderText('Exact listing / coin ID') as HTMLInputElement).value).toBe('coin-current')
+    expect((within(currentRow).getByRole('combobox') as HTMLSelectElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Save all mappings' }) as HTMLButtonElement).disabled).toBe(false)
     expect(screen.getByText('Mappings saved')).toBeTruthy()
     expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/mappings'))).toHaveLength(1)
   })
