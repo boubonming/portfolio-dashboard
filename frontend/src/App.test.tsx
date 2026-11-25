@@ -114,6 +114,9 @@ const authenticatedSession = { ok: true, status: 200, json: async () => ({ authe
 function authenticatedFetch(handler: (input: RequestInfo | URL, init?: RequestInit) => Response | Promise<Response>) {
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).includes('/api/v1/auth/session') ? Promise.resolve(authenticatedSession) : handler(input, init))
 }
+function appResponse(body: unknown, status = 200) {
+  return Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body } as Response)
+}
 
 function appThesis(lotId = 'lot-a', overrides: Record<string, unknown> = {}) {
   return {
@@ -3394,6 +3397,92 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
     expect(screen.queryByRole('button', { name: 'View refresh details' })).toBeNull()
     expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+  })
+
+  it('keeps full-App feedback identity across filter replacement and retries the same authority attempt', async () => {
+    const feedback = { feedback_id: 'feedback-app', portfolio_id: 'portfolio-default', review_id: 'review-app', decision: 'agree', note: 'Keep same authority', occurred_at: '2026-01-02T12:00:00.000000000Z', submitted_by: { principal_id: 'local-owner', principal_type: 'browser_user', permissions: ['portfolio:read'] } }
+    let feedbackCalls = 0
+    let pendingFeedback: { signal?: AbortSignal; resolve: (response: Response) => void; init?: RequestInit } | undefined
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/reviews/') && url.includes('/feedback')) {
+        feedbackCalls += 1
+        if (feedbackCalls === 1) return new Promise<Response>((resolve) => { pendingFeedback = { signal: init?.signal as AbortSignal | undefined, resolve, init } })
+        return appResponse(feedback, 201)
+      }
+      if (url.endsWith('/review-app')) return appResponse(appReview)
+      if (url.includes('/reviews')) return url.includes('status=incomplete') ? appResponse({ items: [], has_more: false }) : appResponse({ items: [appReview], has_more: false })
+      if (url.includes('/overview')) return appResponse(completeOverview)
+      return appResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Reviews' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Record human feedback' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Optional note'), { target: { value: 'Keep same authority' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => expect(pendingFeedback).toBeTruthy())
+    const firstKey = new Headers(pendingFeedback?.init?.headers as HeadersInit).get('Idempotency-Key')
+    const firstBody = pendingFeedback?.init?.body
+    expect(firstKey).toMatch(/^feedback-/)
+    expect(firstBody).toBe(JSON.stringify({ decision: 'agree', note: 'Keep same authority' }))
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'incomplete' } })
+    await waitFor(() => expect(screen.getByText(/No reviews match/)).toBeTruthy())
+    expect(pendingFeedback?.signal?.aborted).toBe(true)
+    pendingFeedback!.resolve(await appResponse(feedback, 201))
+    await flushEffects()
+    expect(screen.queryByText(/Feedback recorded at/)).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'all' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect((screen.getByLabelText('Optional note') as HTMLTextAreaElement).value).toBe('Keep same authority'))
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => expect(screen.getByText(/Feedback recorded at/)).toBeTruthy())
+    const feedbackRequests = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews/') && String(input).includes('/feedback'))
+    expect(feedbackRequests).toHaveLength(2)
+    const secondHeaders = new Headers(feedbackRequests[1]?.[1]?.headers as HeadersInit)
+    expect(secondHeaders.get('Idempotency-Key')).toBe(firstKey)
+    expect(feedbackRequests[1]?.[1]?.body).toBe(firstBody)
+  })
+
+  it('aborts full-App feedback on sign-out and ignores a valid old receipt without resurrecting private state', async () => {
+    const feedback = { feedback_id: 'feedback-late', portfolio_id: 'portfolio-default', review_id: 'review-app', decision: 'agree', note: null, occurred_at: '2026-01-02T12:00:00.000000000Z', submitted_by: { principal_id: 'local-owner', principal_type: 'browser_user', permissions: ['portfolio:read'] } }
+    let pendingFeedback: { signal?: AbortSignal; resolve: (response: Response) => void } | undefined
+    let feedbackCalls = 0
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/reviews/') && url.includes('/feedback')) {
+        feedbackCalls += 1
+        return new Promise<Response>((resolve) => { pendingFeedback = { signal: init?.signal as AbortSignal | undefined, resolve } })
+      }
+      if (url.endsWith('/review-app')) return appResponse(appReview)
+      if (url.includes('/reviews')) return appResponse({ items: [appReview], has_more: false })
+      if (url.includes('/overview')) return appResponse(completeOverview)
+      if (url.includes('/auth/logout')) return appResponse({}, 200)
+      return appResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Reviews' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Record human feedback' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => expect(pendingFeedback).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(pendingFeedback?.signal?.aborted).toBe(true)
+    pendingFeedback!.resolve(await appResponse(feedback, 201))
+    await flushEffects()
+    expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy()
+    expect(screen.queryByText(/Feedback recorded at/)).toBeNull()
+    expect(feedbackCalls).toBe(1)
   })
 
   it('withholds a nonempty zero reporting total on Overview', async () => {

@@ -189,6 +189,9 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .review-card p { overflow-wrap: anywhere; }
 .review-card-meta { align-items: center; color: #a9c1bd; display: flex; flex-wrap: wrap; gap: .5rem 1rem; margin: .8rem 0; }
 .review-detail { border-color: #52c7b8; margin-top: 1rem; outline: none; }
+.review-detail > .section-heading { align-items: flex-start; flex-wrap: wrap; }
+.review-detail > .section-heading > div { flex: 1 1 12rem; min-width: 0; }
+.review-detail > .section-heading > .state-pill { flex: 0 1 auto; max-width: 100%; overflow-wrap: anywhere; }
 .review-meta, .review-metrics { display: grid; gap: .75rem 1rem; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 1rem 0; }
 .review-meta dt, .review-metrics dt { color: #a9c1bd; font-size: .8rem; }
 .review-meta dd, .review-metrics dd { margin: .2rem 0 0; overflow-wrap: anywhere; }

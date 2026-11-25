@@ -79,6 +79,26 @@ describe('Phase D review contract validation', () => {
     }
   })
 
+  it('keeps the open detail heading and status contained at narrow widths', async () => {
+    const removeStyles = installCommittedStyles()
+    try {
+      const incomplete = { ...review, status: 'incomplete' as const, recommendation: 'no_recommendation' as const, lifecycle: { historical_status: 'incomplete' as const, current_snapshot_id: 'snap-1', outdated: false } }
+      vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input).endsWith('/review-1') ? emptyResponse(incomplete) : emptyResponse({ items: [incomplete], has_more: false })))
+      render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+      await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+      fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+      await waitFor(() => expect(document.querySelector('.review-detail')).toBeTruthy())
+      const heading = document.querySelector('.review-detail > .section-heading') as HTMLElement
+      const title = heading.firstElementChild as HTMLElement
+      const status = heading.lastElementChild as HTMLElement
+      expect(hasMatchingDeclaration(heading, 'flex-wrap', 'wrap')).toBe(true)
+      expect(hasMatchingDeclaration(title, 'min-width', '0')).toBe(true)
+      expect(hasMatchingDeclaration(status, 'max-width', '100%')).toBe(true)
+    } finally {
+      removeStyles()
+    }
+  })
+
   it('fails closed for contradictory lifecycle and unsafe evidence URLs', () => {
     expect(() => validateReview({ ...review, lifecycle: { ...review.lifecycle, current_snapshot_id: 'snap-2', outdated: false } })).toThrow(/lifecycle/i)
     expect(() => validateReview({ ...review, lifecycle: { ...review.lifecycle, current_snapshot_id: null, outdated: true } })).toThrow(/lifecycle/i)
@@ -538,5 +558,65 @@ describe('Phase D review contract validation', () => {
     await waitFor(() => expect(screen.getByText(/lot-archived/)).toBeTruthy())
     expect(screen.getByText(/current holding metadata is unavailable/i)).toBeTruthy()
     expect(screen.queryByText(/SAME · lot lot-archived/)).toBeNull()
+  })
+
+  it('aborts a pending list request on filter replacement and ignores a valid old response settled last', async () => {
+    const stale = reviewFor('review-stale-list', timestamp, { rationale: 'Stale list response' })
+    const current = reviewFor('review-current-list', timestamp, {
+      status: 'incomplete', recommendation: 'no_recommendation', rationale: 'Current incomplete response',
+      lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false },
+    })
+    const requests: Array<{ signal?: AbortSignal; resolve: (response: Response) => void }> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve) => {
+      requests.push({ signal: init?.signal as AbortSignal | undefined, resolve })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(requests).toHaveLength(1))
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'incomplete' } })
+    await waitFor(() => expect(requests).toHaveLength(2))
+    expect(requests[0]?.signal?.aborted).toBe(true)
+    expect(requests[1]?.signal?.aborted).toBe(false)
+
+    requests[1]!.resolve(await emptyResponse({ items: [current], has_more: false }))
+    await waitFor(() => expect(screen.getByText('Current incomplete response')).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy()
+
+    requests[0]!.resolve(await emptyResponse({ items: [stale], has_more: false }))
+    await waitFor(() => expect(screen.queryByText('Stale list response')).toBeNull())
+    expect(screen.getByText('Current incomplete response')).toBeTruthy()
+  })
+
+  it('aborts a pending detail request on filter replacement and keeps current controls after the old detail settles last', async () => {
+    const staleDetail = reviewFor('review-stale-detail', timestamp, { rationale: 'Stale detail response' })
+    const current = reviewFor('review-current-detail', timestamp, {
+      status: 'incomplete', recommendation: 'no_recommendation', rationale: 'Current filtered response',
+      lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false },
+    })
+    let detailResolve: ((response: Response) => void) | undefined
+    let detailSignal: AbortSignal | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/review-1')) return new Promise<Response>((resolve) => { detailResolve = resolve; detailSignal = init?.signal as AbortSignal | undefined })
+      return url.includes('status=incomplete')
+        ? emptyResponse({ items: [current], has_more: false })
+        : emptyResponse({ items: [review], has_more: false })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(detailResolve).toBeTypeOf('function'))
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'incomplete' } })
+    await waitFor(() => expect(screen.getByText('Current filtered response')).toBeTruthy())
+    expect(detailSignal?.aborted).toBe(true)
+    expect(screen.queryByRole('heading', { name: 'Record human feedback' })).toBeNull()
+
+    detailResolve!(await emptyResponse(staleDetail))
+    await waitFor(() => expect(screen.queryByText('Stale detail response')).toBeNull())
+    expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy()
+    expect(screen.getByText('Current filtered response')).toBeTruthy()
   })
 })
