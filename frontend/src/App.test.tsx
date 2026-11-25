@@ -456,6 +456,8 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByText(/Filtered to exact lot/)).toBeNull()
     const globalCall = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)
     expect(String(globalCall?.[0])).not.toContain('holding_id=')
+    fireEvent.click(screen.getByRole('button', { name: 'Back to holdings' }))
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Holdings' })))
   })
 
   it('does not replay a pending thesis tab exit after sign-out and session retry', async () => {

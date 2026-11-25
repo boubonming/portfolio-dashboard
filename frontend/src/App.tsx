@@ -1309,7 +1309,7 @@ export default function App() {
       setMarketNavigationRequest(nextView)
       return
     }
-    if (nextView === 'reviews') setReviewsHoldingId(undefined)
+    if (nextView === 'reviews') { setReviewsHoldingId(undefined); reviewsReturnLotIdRef.current = null }
     setMarketNavigationRequest(undefined)
     setView(nextView)
   }, [marketWorkflow.dirty, marketWorkflow.pending, marketWorkflow.uncertain, view])
@@ -1325,7 +1325,7 @@ export default function App() {
     if (!['overview', 'holdings', 'market', 'activity', 'reviews', 'settings'].includes(target)) return
     setThesisNavigationRequest(undefined)
     setThesisHolding(null)
-    if (target === 'reviews') setReviewsHoldingId(undefined)
+    if (target === 'reviews') { setReviewsHoldingId(undefined); reviewsReturnLotIdRef.current = null }
     setView(target as View)
   }, [])
 
@@ -1342,6 +1342,7 @@ export default function App() {
 
   const showAllReviews = useCallback(() => {
     setReviewsHoldingId(undefined)
+    reviewsReturnLotIdRef.current = null
     setView('reviews')
     window.setTimeout(() => document.getElementById('reviews-title')?.focus(), 0)
   }, [])
