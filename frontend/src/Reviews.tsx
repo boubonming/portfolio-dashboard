@@ -32,6 +32,7 @@ type ReviewProps = {
   holdingId?: string
   onUnauthorized: () => void
   onBackToHoldings?: () => void
+  onShowAllReviews?: () => void
   feedbackAttempts?: FeedbackAttemptStore
 }
 
@@ -208,7 +209,7 @@ function errorMessage(reason: unknown, action: string) {
     if (reason.status === 400) return `${action} was rejected because the request was invalid.`
     if (reason.status === 403) return `You are not allowed to ${action.toLowerCase()}. Check your session and try again.`
     if (reason.status === 404) return `The ${action.toLowerCase()} is no longer available.`
-    if (reason.status === 409) return 'This feedback key is already associated with another append-only event. To record a separate event, change the decision or note and submit again.'
+    if (reason.status === 409) return 'The feedback outcome could not be confirmed because this idempotency key conflicts with another append-only event. Do not retry this same attempt with a new key. If you intentionally want a separate event, first change the decision or note and submit it as a new event.'
     if (reason.status === 413) return 'The feedback note is too large.'
     if (reason.status === 415) return 'The server rejected the feedback format.'
     if (reason.status >= 500) return `The server could not ${action.toLowerCase()}. Retry without changing the draft.`
@@ -300,8 +301,8 @@ function ReviewDetail({ review, targetContext, portfolioId, snapshot, csrfToken,
     <ReviewSection title="Model opinion"><p>{review.model_opinion}</p></ReviewSection>
     <ReviewList title="Risks" items={review.risks} /><ReviewList title="Counterarguments" items={review.counterarguments} /><ReviewList title="Conditions" items={review.conditions} />
     {review.metrics.length > 0 && <ReviewSection title="Deterministic metrics"><div className="review-metrics">{review.metrics.map((metric) => <div key={`${metric.name}-${metric.as_of}`}><dt>{metric.name}</dt><dd>{metric.value} {metric.unit}<span className="subline">{metric.source} · {displayDate(metric.as_of)}</span></dd></div>)}</div></ReviewSection>}
-    {review.sourced_facts.length > 0 && <ReviewSection title="Sourced facts"><ul>{review.sourced_facts.map((fact, index) => <li key={`${fact.statement}-${index}`}>{fact.statement} <span className="subline">Evidence: {fact.evidence_ids.map((evidenceId, evidenceIndex) => <span key={evidenceId}>{evidenceIndex > 0 && ', '}<a href={`#${evidenceAnchor(review.review_id, evidenceId)}`}>{evidenceId}</a></span>)}</span></li>)}</ul></ReviewSection>}
-    <ReviewSection title="Evidence"><ul className="evidence-list">{review.evidence.map((evidence) => <li id={evidenceAnchor(review.review_id, evidence.evidence_id)} key={evidence.evidence_id}><a href={evidence.url} target="_blank" rel="noopener noreferrer">{evidence.title}</a><span className="subline">Evidence ID {evidence.evidence_id} · {evidence.availability} · {evidence.freshness} · accessed {displayDate(evidence.accessed_at)} · Publication date: {evidence.published_at ? displayDate(evidence.published_at) : 'Not supplied'}</span><p>{evidence.excerpt}</p></li>)}</ul></ReviewSection>
+    {review.sourced_facts.length > 0 && <ReviewSection title="Sourced facts"><ul>{review.sourced_facts.map((fact, index) => <li key={`${fact.statement}-${index}`}>{fact.statement} <span className="subline">Evidence: {fact.evidence_ids.map((evidenceId, evidenceIndex) => { const evidence = review.evidence.find((candidate) => candidate.evidence_id === evidenceId); return <span key={evidenceId}>{evidenceIndex > 0 && ', '}<a href={`#${evidenceAnchor(review.review_id, evidenceId)}`}>{evidenceId}{evidence ? ` — ${evidence.title}` : ''}</a></span> })}</span></li>)}</ul></ReviewSection>}
+    <ReviewSection title="Evidence">{review.evidence.length > 0 ? <ul className="evidence-list">{review.evidence.map((evidence) => <li id={evidenceAnchor(review.review_id, evidence.evidence_id)} key={evidence.evidence_id}><a href={evidence.url} target="_blank" rel="noopener noreferrer">{evidence.title}</a><span className="subline">Evidence ID {evidence.evidence_id} · {evidence.availability} · {evidence.freshness} · accessed {displayDate(evidence.accessed_at)} · Publication date: {evidence.published_at ? displayDate(evidence.published_at) : 'Not supplied'}</span><p>{evidence.excerpt}</p></li>)}</ul> : <p className="muted">No evidence supplied; no supported recommendation is asserted.</p>}</ReviewSection>
     <section className="feedback-panel" aria-labelledby={`feedback-title-${review.review_id}`}><h4 id={`feedback-title-${review.review_id}`}>Record human feedback</h4><p className="muted">Feedback is an append-only event and does not edit this review. “Request another review” records feedback only; it does not schedule a review.</p><form onSubmit={submit}>
       <fieldset disabled={feedbackState === 'submitting'}><legend>Decision</legend><div className="feedback-options">{feedbackDecisions.map((value) => <label key={value}><input type="radio" name={`feedback-${review.review_id}`} value={value} checked={decision === value} onChange={() => changeDecision(value)} /> {value.replaceAll('_', ' ')}</label>)}</div>
       <label htmlFor={`feedback-note-${review.review_id}`}>Optional note</label><textarea id={`feedback-note-${review.review_id}`} value={note} maxLength={2000} onChange={(event) => noteChanged(event.target.value)} /></fieldset>
@@ -320,7 +321,7 @@ function SnapshotBadge({ review, snapshot }: { review: Review; snapshot: Overvie
   return <><p className="snapshot-badge">Historical snapshot; current identity could not be confirmed.</p><p className="subline">This review is not marked outdated, but the loaded current snapshot does not match it.</p></>
 }
 
-export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, holdingId, onUnauthorized, onBackToHoldings, feedbackAttempts }: ReviewProps) {
+export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, holdingId, onUnauthorized, onBackToHoldings, onShowAllReviews, feedbackAttempts }: ReviewProps) {
   const [page, setPage] = useState<ReviewPage | null>(null)
   const [state, setState] = useState<ReviewState>('loading')
   const [error, setError] = useState('')
@@ -356,7 +357,9 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
     const labels = review.scope.holding_ids.map((id, index) => {
       const holding = holdingMap.get(id)
       if (!holding) return `Target identity unavailable; review is not attached to a holding. Lot ${id} · instrument ${review.scope.instrument_ids[index] || 'unavailable'} · current holding metadata is unavailable.`
-      return `${holding.symbol} · lot ${id}`
+      const descriptor = holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'
+      const cost = holding.cost_basis ? `cost basis ${holding.cost_basis} ${holding.currency}` : 'cost basis unavailable'
+      return `${holding.symbol} · ${descriptor} · qty ${holding.quantity} · ${holding.currency} · ${cost} · lot ${id}`
     })
     return { valid: labels.length > 0 && labels.every((label) => !label.startsWith('Target identity unavailable')), label: labels.join(', ') }
   }, [holdingMap])
@@ -447,7 +450,7 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
     <p ref={listStatusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}>{listAnnouncement}</p>
     {state === 'loading' && <p role="status" aria-live="polite">Loading reviews…</p>}
     {state === 'error' && <p className="notice error" role="alert">Unable to load reviews: {error} <button type="button" onClick={() => load(undefined, false)}>Try again</button></p>}
-    {state === 'ready' && renderedItems.length === 0 && <p className="empty">No reviews match the selected portfolio, lot, status, or lifecycle filters.</p>}
+    {state === 'ready' && renderedItems.length === 0 && <div className="empty"><p>No reviews match the selected portfolio, lot, status, or lifecycle filters.</p>{(statusFilter !== 'all' || outdatedFilter !== 'all') && <button type="button" onClick={() => { setStatusFilter('all'); setOutdatedFilter('all') }}>Clear review filters</button>}{holdingId && onShowAllReviews && <button type="button" onClick={onShowAllReviews}>Show all portfolio reviews</button>}</div>}
     {state === 'ready' && renderedItems.length > 0 && <div className="review-list" aria-label="Advisory reviews">{renderedItems.map((review) => { const target = targetState(review); return <article className="review-card" key={review.review_id}><div className="review-card-heading"><div><h3>{review.recommendation.replaceAll('_', ' ')}</h3><p className="muted">{target.label}</p></div><span className={`state-pill state-${review.status}`}>{review.status}</span></div><p>{review.rationale}</p><div className="review-card-meta"><span>Snapshot {review.snapshot_id}</span><span>Submitted {displayDate(review.submitted_at)}</span><SnapshotBadge review={review} snapshot={snapshot} /></div>{!target.valid && <p className="notice warning">This review is not attached to a holding because its exact target identity is unavailable.</p>}<button type="button" data-review-id={review.review_id} onClick={(event) => selectReview(review.review_id, event.currentTarget)}>View review details</button></article>})}</div>}
     {appendError && <p className="notice error" role="alert">Unable to load more reviews: {appendError} <button type="button" onClick={() => load(page?.next_cursor, true)}>Retry loading reviews</button> <button type="button" onClick={() => load(undefined, false)}>Reload first page</button></p>}
     {page?.has_more && !appendError && <button type="button" onClick={() => load(page.next_cursor, true)} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more reviews…' : 'Load more reviews'}</button>}

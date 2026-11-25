@@ -240,7 +240,7 @@ describe('Phase D review contract validation', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => emptyResponse({ items: [review], has_more: false }))
     vi.stubGlobal('fetch', fetchMock)
     render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} holdingId="lot-b" />)
-    await waitFor(() => expect(screen.getByText(/SAME · lot lot-b/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/SAME · Second same-symbol lot/)).toBeTruthy())
     expect(screen.queryByText(/lot lot-a/)).toBeNull()
     expect(fetchMock.mock.calls[0]?.[0]).toContain('holding_id=lot-b')
     expect(fetchMock).toHaveBeenCalledOnce()
@@ -402,6 +402,7 @@ describe('Phase D review contract validation', () => {
     await waitFor(() => screen.getByRole('heading', { name: 'Record human feedback' }))
     fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/append-only event/i))
+    expect(screen.getByRole('alert').textContent).toMatch(/do not retry this same attempt with a new key/i)
     expect(screen.getByRole('alert').textContent).not.toMatch(/edit|replace/i)
   })
 
@@ -458,8 +459,32 @@ describe('Phase D review contract validation', () => {
     const multiTarget = reviewFor('review-multi', timestamp, { scope: { type: 'holding', holding_ids: ['lot-a', 'lot-b'], instrument_ids: ['instrument-a', 'instrument-b'] } })
     vi.stubGlobal('fetch', vi.fn(() => emptyResponse({ items: [multiTarget], has_more: false })))
     render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} holdingId="lot-b" onUnauthorized={vi.fn()} />)
-    await waitFor(() => expect(screen.getByText('SAME · lot lot-a, SAME · lot lot-b')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('SAME · First same-symbol lot · qty 1 · USD · cost basis unavailable · lot lot-a, SAME · Second same-symbol lot · qty 2 · USD · cost basis unavailable · lot lot-b')).toBeTruthy())
     expect(screen.queryByText('Target identity unavailable; review is not attached to a holding.')).toBeNull()
+  })
+
+  it('explains incomplete reviews without evidence and offers filter recovery', async () => {
+    const incomplete = reviewFor('review-no-evidence', timestamp, {
+      status: 'incomplete', recommendation: 'no_recommendation', evidence: [], sourced_facts: [],
+      lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false },
+    })
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('status=complete')) return emptyResponse({ items: [], has_more: false })
+      return url.endsWith('/review-no-evidence') ? emptyResponse(incomplete) : emptyResponse({ items: [incomplete], has_more: false })
+    })
+    const onShowAllReviews = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} holdingId="lot-b" onShowAllReviews={onShowAllReviews} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Review status')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'complete' } })
+    await waitFor(() => expect(screen.getByText(/No reviews match/)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Show all portfolio reviews' }))
+    expect(onShowAllReviews).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Clear review filters' }))
+    await waitFor(() => expect((screen.getByLabelText('Review status') as HTMLSelectElement).value).toBe('all'))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(screen.getByText('No evidence supplied; no supported recommendation is asserted.')).toBeTruthy())
   })
 
   it('sends status and lifecycle filters to the server and validates returned scope', async () => {
@@ -497,12 +522,12 @@ describe('Phase D review contract validation', () => {
     render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
     await waitFor(() => expect(screen.getAllByRole('button', { name: 'View review details' })).toHaveLength(2))
     fireEvent.click(screen.getAllByRole('button', { name: 'View review details' })[0]!)
-    await waitFor(() => expect(screen.getByRole('link', { name: 'evidence-1' }).getAttribute('href')).toBe('#review-review-1-evidence-evidence-1'))
+    await waitFor(() => expect(screen.getByRole('link', { name: /evidence-1/ }).getAttribute('href')).toBe('#review-review-1-evidence-evidence-1'))
     expect(screen.getByText(/Publication date:/).textContent).toContain('Not supplied')
     expect(screen.getByText(/Evidence ID/).textContent).toContain('evidence-1')
     fireEvent.click(screen.getByRole('button', { name: 'Close review detail' }))
     fireEvent.click(screen.getAllByRole('button', { name: 'View review details' })[1]!)
-    await waitFor(() => expect(screen.getByRole('link', { name: 'evidence-1' }).getAttribute('href')).toBe('#review-review-2-evidence-evidence-1'))
+    await waitFor(() => expect(screen.getByRole('link', { name: /evidence-1/ }).getAttribute('href')).toBe('#review-review-2-evidence-evidence-1'))
     expect(screen.getByText(/Publication date: 2026-01-02 12:00:00Z/)).toBeTruthy()
   })
 
