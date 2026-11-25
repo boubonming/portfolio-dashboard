@@ -1381,6 +1381,45 @@ describe('Portfolio Dashboard', () => {
     expect(refreshSpy.mock.calls[1]?.[2]).toBe(firstKey)
   })
 
+  it('restores GET-only recovery after a pending retry is canceled by currency scope change', async () => {
+    let overviewCalls = 0
+    let resolveRetryRead: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => strictMarketSetup } as Response)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 2) return Promise.reject(new Error('read unavailable'))
+        if (overviewCalls === 3) return new Promise<Response>((resolve) => { resolveRetryRead = resolve })
+        if (url.includes('currency=USD')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ ...completeOverview, reporting_currency: 'USD' }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue(strictCompleteRefresh())
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText('Prices refreshed, but Holdings could not be reloaded. Retry loading Holdings; do not repeat this refresh.')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View refresh details' }))
+    fireEvent.click(within(screen.getByRole('region', { name: 'Refresh details' })).getByRole('button', { name: 'Retry loading Holdings' }))
+    await waitFor(() => expect(overviewCalls).toBe(3))
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes('currency=USD'))).toBe(true))
+    await waitFor(() => expect(screen.getByText(/Reporting values: USD/i)).toBeTruthy())
+    resolveRetryRead?.({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    await flushEffects()
+    expect(screen.getByText(/Reporting values: USD/i)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'MYR' } })
+    await waitFor(() => expect(overviewCalls).toBeGreaterThanOrEqual(5))
+    const retryButton = within(screen.getByRole('region', { name: 'Refresh details' })).getByRole('button', { name: 'Retry loading Holdings' })
+    expect((retryButton as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(retryButton)
+    await waitFor(() => expect(overviewCalls).toBeGreaterThanOrEqual(6))
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh prices' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(refreshSpy).toHaveBeenCalledOnce()
+  })
+
   it('fails closed for malformed nested Overview data', async () => {
     const malformed = { ...completeOverview, holdings: [{ ...completeOverview.holdings[0], freshness: null }] }
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, json: async () => malformed } as Response)))
@@ -1403,6 +1442,34 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
     fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Unable to load portfolio/i))
+  })
+
+  it('does not claim confirmed Holdings values before the post-refresh GET settles', async () => {
+    let overviewCalls = 0
+    let resolveRefreshRead: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => strictMarketSetup } as Response)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 2) return new Promise<Response>((resolve) => { resolveRefreshRead = resolve })
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue(strictCompleteRefresh())
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(overviewCalls).toBe(2))
+    expect(screen.queryByText('Prices refreshed. Complete valuation loaded.')).toBeNull()
+    expect(screen.queryByText('Complete valuation loaded.')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'View refresh details' }))
+    const detailsRegion = screen.getByRole('region', { name: 'Refresh details' })
+    expect(within(detailsRegion).queryByText('Complete valuation loaded.')).toBeNull()
+    resolveRefreshRead?.({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledOnce()
   })
 
   it('retains a confirmed receipt when the Holdings read fails and retries GET only', async () => {
@@ -1428,6 +1495,8 @@ describe('Portfolio Dashboard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View refresh details' }))
     const detailsRegion = screen.getByRole('region', { name: 'Refresh details' })
     expect(within(detailsRegion).getByRole('button', { name: 'Retry loading Holdings' })).toBeTruthy()
+    expect(within(detailsRegion).queryByText('Complete valuation loaded.')).toBeNull()
+    expect(screen.queryByText('Complete valuation loaded.')).toBeNull()
     failRefreshRead = false
     fireEvent.click(within(detailsRegion).getByRole('button', { name: 'Retry loading Holdings' }))
     await waitFor(() => expect(screen.getByText('Holdings loaded from the confirmed snapshot. No refresh was repeated.')).toBeTruthy())

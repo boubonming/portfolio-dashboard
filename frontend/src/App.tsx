@@ -300,7 +300,7 @@ function RefreshDetailsPanel({ details, onRetryRead, onRetrySame, onOpenMarketDa
       <Button type="button" onClick={onRetrySame}>Retry same refresh</Button>
     </> : result ? <>
       <Typography color="text.secondary">Snapshot as of {displayUTC(result.snapshot.as_of)} · Reporting in {result.snapshot.reporting_currency}</Typography>
-      <Typography role="status" className={`refresh-inline-status refresh-${result.complete ? 'complete' : 'incomplete'}`}>{result.complete ? 'Complete valuation loaded.' : 'Usable per-lot values loaded; total and allocation remain withheld.'}</Typography>
+      <Typography role="status" className={`refresh-inline-status refresh-${result.complete ? 'complete' : 'incomplete'}`}>{details.readState === 'ready' ? (result.complete ? 'Complete valuation loaded.' : 'Usable per-lot values loaded; total and allocation remain withheld.') : details.readState === 'loading' ? 'Refresh confirmed; Holdings is still loading. Values are not yet available.' : 'Refresh confirmed; Holdings values are not currently loaded.'}</Typography>
       {details.readState === 'error' && <Box className="notice error" role="alert"><Typography>Prices refreshed, but Holdings could not be reloaded. Do not repeat this refresh.</Typography><Button type="button" onClick={onRetryRead}>Retry loading Holdings</Button></Box>}
       {setupMissing.length > 0 && <Box><Typography component="h4" variant="subtitle1">Mapping correction needed</Typography><Typography>These setup instruments have no confirmed mapping:</Typography><ul>{setupMissing.map((instrument) => <li key={instrument.instrument_id}>{instrument.symbol} ({instrument.currency})</li>)}</ul></Box>}
       <Box><Typography component="h4" variant="subtitle1">Provider coverage</Typography><ul>{details.setup.providers.map((provider) => {
@@ -741,6 +741,7 @@ export default function App() {
   const refreshControllerRef = useRef<AbortController | null>(null)
   const refreshAttemptRef = useRef<RefreshAttempt | null>(null)
   const refreshDetailsRef = useRef<RefreshDetails | null>(null)
+  const refreshReadGenerationRef = useRef(0)
   const activePortfolioIDRef = useRef<string | undefined>(undefined)
   const activeCurrencyRef = useRef('MYR')
   const currencySelectRef = useRef<HTMLSelectElement>(null)
@@ -772,6 +773,7 @@ export default function App() {
     activityGeneration.current += 1
     exportGeneration.current += 1
     refreshGeneration.current += 1
+    refreshReadGenerationRef.current += 1
     authControllerRef.current?.abort()
     authControllerRef.current = null
     loadControllerRef.current?.abort()
@@ -867,12 +869,13 @@ export default function App() {
       refreshAttemptRef.current = null
       setRefreshDetails({ phase: 'confirmed', portfolioID: attempt.portfolioID, reportingCurrency: attempt.reportingCurrency, requestKey: attempt.requestKey, setup: attempt.setup, result, readState: 'loading' })
       setRefreshState(result.complete ? 'complete' : 'incomplete')
-      setRefreshAnnouncement(result.complete ? 'Prices refreshed. Complete valuation loaded.' : 'Prices refreshed. Valuation is incomplete; usable per-lot values were loaded and totals remain withheld.')
+      setRefreshAnnouncement(result.complete ? 'Prices refreshed. Confirmation received; Holdings is loading.' : 'Prices refreshed. Confirmation received; valuation is incomplete and Holdings is loading; totals remain withheld.')
       const readGeneration = loadGeneration.current + 1
       try {
         await load(true)
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || readGeneration !== loadGeneration.current || activePortfolioIDRef.current !== attempt.portfolioID || activeCurrencyRef.current !== attempt.reportingCurrency) return
         setRefreshDetails((current) => current?.requestKey === attempt.requestKey ? { ...current, readState: 'ready' } : current)
+        setRefreshAnnouncement(result.complete ? 'Prices refreshed. Complete valuation loaded.' : 'Prices refreshed. Valuation is incomplete; usable per-lot values were loaded and totals remain withheld.')
       } catch (reason) {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || readGeneration !== loadGeneration.current || activePortfolioIDRef.current !== attempt.portfolioID || activeCurrencyRef.current !== attempt.reportingCurrency) return
         if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
@@ -961,17 +964,17 @@ export default function App() {
     const details = refreshDetails
     if (!details || details.phase !== 'confirmed' || details.readState === 'loading' || details.portfolioID !== activePortfolioIDRef.current || details.reportingCurrency !== activeCurrencyRef.current) return
     const authGenerationAtStart = authGeneration.current
-    const readGeneration = loadGeneration.current + 1
+    const readGeneration = ++refreshReadGenerationRef.current
     setRefreshDetails({ ...details, readState: 'loading' })
     setRefreshError('')
     try {
       await load(true)
-      if (authGenerationAtStart !== authGeneration.current || readGeneration !== loadGeneration.current || details.portfolioID !== activePortfolioIDRef.current || details.reportingCurrency !== activeCurrencyRef.current) return
+      if (authGenerationAtStart !== authGeneration.current || readGeneration !== refreshReadGenerationRef.current || details.portfolioID !== activePortfolioIDRef.current || details.reportingCurrency !== activeCurrencyRef.current) return
       setRefreshDetails((current) => current?.requestKey === details.requestKey ? { ...current, readState: 'ready' } : current)
       setRefreshError('')
       setRefreshAnnouncement('Holdings loaded from the confirmed snapshot. No refresh was repeated.')
     } catch (reason) {
-      if (authGenerationAtStart !== authGeneration.current || readGeneration !== loadGeneration.current || details.portfolioID !== activePortfolioIDRef.current || details.reportingCurrency !== activeCurrencyRef.current) return
+      if (authGenerationAtStart !== authGeneration.current || readGeneration !== refreshReadGenerationRef.current || details.portfolioID !== activePortfolioIDRef.current || details.reportingCurrency !== activeCurrencyRef.current) return
       if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
       setRefreshDetails((current) => current?.requestKey === details.requestKey ? { ...current, readState: 'error' } : current)
       setRefreshError('Holdings could not be reloaded. Retry the read; do not repeat this refresh.')
@@ -1054,6 +1057,7 @@ export default function App() {
         setRefreshError(`Reporting currency changed to ${currency}. Return to ${attempt.reportingCurrency} to retry the same refresh; no new refresh is allowed while its outcome is unresolved.`)
         setRefreshAnnouncement('The unresolved refresh was stopped safely. Return to its original reporting currency to retry the same request.')
       } else if (details?.phase === 'confirmed') {
+        if (details.readState === 'loading') refreshReadGenerationRef.current += 1
         setRefreshDetails({ ...details, readState: details.readState === 'loading' ? 'error' : details.readState })
         setRefreshDetailsOpen(true)
         setRefreshState(details.result?.complete ? 'complete' : 'incomplete')
@@ -1075,6 +1079,18 @@ export default function App() {
       setRefreshState('error')
       setRefreshError(`Reporting currency changed to ${currency}. Return to ${attempt.reportingCurrency} to retry the same refresh; no new refresh is allowed while its outcome is unresolved.`)
       setRefreshAnnouncement('The unresolved refresh remains retained; no new refresh is allowed until its original currency is restored.')
+      return
+    }
+    if (details?.phase === 'confirmed' && details.readState === 'loading' && details.reportingCurrency !== currency) {
+      refreshReadGenerationRef.current += 1
+      loadGeneration.current += 1
+      loadControllerRef.current?.abort()
+      loadControllerRef.current = null
+      setRefreshDetails({ ...details, readState: 'error' })
+      setRefreshDetailsOpen(true)
+      setRefreshState(details.result?.complete ? 'complete' : 'incomplete')
+      setRefreshError(`Confirmed refresh for ${details.reportingCurrency} is retained. Reporting currency changed to ${currency}; retry Holdings loading only after returning to ${details.reportingCurrency}. No refresh was repeated.`)
+      setRefreshAnnouncement('The confirmed refresh receipt was retained while the Holdings read was canceled safely.')
       return
     }
     if (details?.phase === 'confirmed') {
