@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import Reviews, { validateReview, validateReviewPage, type FeedbackAttemptStore, type Review } from './Reviews'
 import type { Holding } from './App'
@@ -22,6 +22,11 @@ const review: Review = {
 const emptyResponse = (body: unknown, status = 200) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body } as Response)
 const cursorOne = 'cursor-1234567890'
 const cursorTwo = 'cursor-0987654321'
+async function drainCallbacks() {
+  await act(async () => {
+    for (let index = 0; index < 30; index += 1) await Promise.resolve()
+  })
+}
 function reviewFor(reviewId: string, submittedAt = timestamp, overrides: Partial<Review> = {}): Review {
   return { ...review, review_id: reviewId, generated_at: submittedAt, submitted_at: submittedAt, ...overrides }
 }
@@ -74,6 +79,26 @@ describe('Phase D review contract validation', () => {
       expect((submit as HTMLButtonElement).disabled).toBe(true)
       expect(hasMatchingDeclaration(submit, 'opacity', '.65', 'disabled')).toBe(true)
       resolveFeedback?.(await emptyResponse({}))
+    } finally {
+      removeStyles()
+    }
+  })
+
+  it('keeps the open detail heading and status contained at narrow widths', async () => {
+    const removeStyles = installCommittedStyles()
+    try {
+      const incomplete = { ...review, status: 'incomplete' as const, recommendation: 'no_recommendation' as const, lifecycle: { historical_status: 'incomplete' as const, current_snapshot_id: 'snap-1', outdated: false } }
+      vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input).endsWith('/review-1') ? emptyResponse(incomplete) : emptyResponse({ items: [incomplete], has_more: false })))
+      render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+      await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+      fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+      await waitFor(() => expect(document.querySelector('.review-detail')).toBeTruthy())
+      const heading = document.querySelector('.review-detail > .section-heading') as HTMLElement
+      const title = heading.firstElementChild as HTMLElement
+      const status = heading.lastElementChild as HTMLElement
+      expect(hasMatchingDeclaration(heading, 'flex-wrap', 'wrap')).toBe(true)
+      expect(hasMatchingDeclaration(title, 'min-width', '0')).toBe(true)
+      expect(hasMatchingDeclaration(status, 'max-width', '100%')).toBe(true)
     } finally {
       removeStyles()
     }
@@ -183,6 +208,9 @@ describe('Phase D review contract validation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry loading reviews' }))
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/made no progress/i))
     expect(screen.getByText(first.rationale)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Reload first page' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Load more reviews' })).toBeTruthy())
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).not.toContain('cursor=')
   })
 
   it('preserves the first page on append errors and retries the same cursor', async () => {
@@ -237,7 +265,7 @@ describe('Phase D review contract validation', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => emptyResponse({ items: [review], has_more: false }))
     vi.stubGlobal('fetch', fetchMock)
     render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} holdingId="lot-b" />)
-    await waitFor(() => expect(screen.getByText(/SAME · lot lot-b/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/SAME · Second same-symbol lot/)).toBeTruthy())
     expect(screen.queryByText(/lot lot-a/)).toBeNull()
     expect(fetchMock.mock.calls[0]?.[0]).toContain('holding_id=lot-b')
     expect(fetchMock).toHaveBeenCalledOnce()
@@ -390,6 +418,19 @@ describe('Phase D review contract validation', () => {
     expect(screen.queryByText(/Feedback recorded at/)).toBeNull()
   })
 
+  it('describes feedback conflicts as separate append-only events rather than edits', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/feedback') ? emptyResponse({}, 409) : String(input).endsWith('/review-1') ? emptyResponse(review) : emptyResponse({ items: [review], has_more: false }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => screen.getByRole('button', { name: 'View review details' }))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => screen.getByRole('heading', { name: 'Record human feedback' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/append-only event/i))
+    expect(screen.getByRole('alert').textContent).toMatch(/do not retry this same attempt with a new key/i)
+    expect(screen.getByRole('alert').textContent).not.toMatch(/edit|replace/i)
+  })
+
   it('keeps an uncertain attempt key and canonical draft across detail close and reopen', async () => {
     let feedbackAttempts = 0
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -443,7 +484,147 @@ describe('Phase D review contract validation', () => {
     const multiTarget = reviewFor('review-multi', timestamp, { scope: { type: 'holding', holding_ids: ['lot-a', 'lot-b'], instrument_ids: ['instrument-a', 'instrument-b'] } })
     vi.stubGlobal('fetch', vi.fn(() => emptyResponse({ items: [multiTarget], has_more: false })))
     render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} holdingId="lot-b" onUnauthorized={vi.fn()} />)
-    await waitFor(() => expect(screen.getByText('SAME · lot lot-a, SAME · lot lot-b')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('SAME · First same-symbol lot · qty 1 · USD · cost basis unavailable · lot lot-a, SAME · Second same-symbol lot · qty 2 · USD · cost basis unavailable · lot lot-b')).toBeTruthy())
     expect(screen.queryByText('Target identity unavailable; review is not attached to a holding.')).toBeNull()
+  })
+
+  it('explains incomplete reviews without evidence and offers filter recovery', async () => {
+    const incomplete = reviewFor('review-no-evidence', timestamp, {
+      status: 'incomplete', recommendation: 'no_recommendation', evidence: [], sourced_facts: [],
+      lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false },
+    })
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('status=complete')) return emptyResponse({ items: [], has_more: false })
+      return url.endsWith('/review-no-evidence') ? emptyResponse(incomplete) : emptyResponse({ items: [incomplete], has_more: false })
+    })
+    const onShowAllReviews = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} holdingId="lot-b" onShowAllReviews={onShowAllReviews} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Review status')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'complete' } })
+    await waitFor(() => expect(screen.getByText(/No reviews match/)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Show all portfolio reviews' }))
+    expect(onShowAllReviews).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Clear review filters' }))
+    await waitFor(() => expect((screen.getByLabelText('Review status') as HTMLSelectElement).value).toBe('all'))
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(screen.getByText('No evidence supplied; no supported recommendation is asserted.')).toBeTruthy())
+  })
+
+  it('sends status and lifecycle filters to the server and validates returned scope', async () => {
+    const incompleteOutdated = reviewFor('review-incomplete', timestamp, {
+      status: 'incomplete', recommendation: 'no_recommendation',
+      lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-2', outdated: true },
+    })
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      return url.includes('status=incomplete')
+        ? emptyResponse({ items: [incompleteOutdated], has_more: false })
+        : emptyResponse({ items: [review], has_more: true, next_cursor: cursorOne })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Review status')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'incomplete' } })
+    await waitFor(() => expect(screen.getByLabelText('Review lifecycle')).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Review lifecycle'), { target: { value: 'true' } })
+    await waitFor(() => expect(screen.getByText('incomplete')).toBeTruthy())
+    const filteredUrl = String(fetchMock.mock.calls.at(-1)?.[0])
+    expect(filteredUrl).toContain('status=incomplete')
+    expect(filteredUrl).toContain('outdated=true')
+    expect(filteredUrl).not.toContain('cursor=')
+    expect(() => validateReviewPage({ items: [review], has_more: false }, 'portfolio-default', undefined, { status: 'incomplete' })).toThrow(/status/i)
+    expect(() => validateReviewPage({ items: [review], has_more: false }, 'portfolio-default', undefined, { outdated: true })).toThrow(/outdated|lifecycle/i)
+  })
+
+  it('links each fact to evidence in the same detail and shows publication fallbacks', async () => {
+    const second = reviewFor('review-2', '2026-01-01T12:00:00.000000000Z', {
+      evidence: [{ ...review.evidence[0], published_at: timestamp }],
+      sourced_facts: [{ statement: 'Second sourced fact', evidence_ids: ['evidence-1'] }],
+    })
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input).endsWith('/review-2') ? emptyResponse(second) : String(input).endsWith('/review-1') ? emptyResponse(review) : emptyResponse({ items: [review, second], has_more: false })))
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'View review details' })).toHaveLength(2))
+    fireEvent.click(screen.getAllByRole('button', { name: 'View review details' })[0]!)
+    await waitFor(() => expect(screen.getByRole('link', { name: /evidence-1/ }).getAttribute('href')).toBe('#review-review-1-evidence-evidence-1'))
+    expect(screen.getByText(/Publication date:/).textContent).toContain('Not supplied')
+    expect(screen.getByText(/Evidence ID/).textContent).toContain('evidence-1')
+    fireEvent.click(screen.getByRole('button', { name: 'Close review detail' }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'View review details' })[1]!)
+    await waitFor(() => expect(screen.getByRole('link', { name: /evidence-1/ }).getAttribute('href')).toBe('#review-review-2-evidence-evidence-1'))
+    expect(screen.getByText(/Publication date: 2026-01-02 12:00:00Z/)).toBeTruthy()
+  })
+
+  it('keeps archived or unknown lots identifiable without inventing symbol metadata', async () => {
+    const archived = reviewFor('review-archived', timestamp, { scope: { type: 'holding', holding_ids: ['lot-archived'], instrument_ids: ['instrument-archived'] } })
+    vi.stubGlobal('fetch', vi.fn(() => emptyResponse({ items: [archived], has_more: false })))
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByText(/lot-archived/)).toBeTruthy())
+    expect(screen.getByText(/current holding metadata is unavailable/i)).toBeTruthy()
+    expect(screen.queryByText(/SAME · lot lot-archived/)).toBeNull()
+  })
+
+  it('aborts a pending list request on filter replacement and ignores a valid old response settled last', async () => {
+    const stale = reviewFor('review-stale-list', timestamp, { rationale: 'Stale list response' })
+    const current = reviewFor('review-current-list', timestamp, {
+      status: 'incomplete', recommendation: 'no_recommendation', rationale: 'Current incomplete response',
+      lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false },
+    })
+    const requests: Array<{ signal?: AbortSignal; resolve: (response: Response) => void }> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve) => {
+      requests.push({ signal: init?.signal as AbortSignal | undefined, resolve })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(requests).toHaveLength(1))
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'incomplete' } })
+    await waitFor(() => expect(requests).toHaveLength(2))
+    expect(requests[0]?.signal?.aborted).toBe(true)
+    expect(requests[1]?.signal?.aborted).toBe(false)
+
+    requests[1]!.resolve(await emptyResponse({ items: [current], has_more: false }))
+    await waitFor(() => expect(screen.getByText('Current incomplete response')).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy()
+
+    requests[0]!.resolve(await emptyResponse({ items: [stale], has_more: false }))
+    await drainCallbacks()
+    expect(screen.queryByText('Stale list response')).toBeNull()
+    expect(screen.getByText('Current incomplete response')).toBeTruthy()
+  })
+
+  it('aborts a pending detail request on filter replacement and keeps current controls after the old detail settles last', async () => {
+    const selectedReview = { ...review, status: 'incomplete' as const, recommendation: 'no_recommendation' as const, rationale: 'Original immutable detail rationale', lifecycle: { historical_status: 'incomplete' as const, current_snapshot_id: 'snap-1', outdated: false } }
+    const current = reviewFor('review-current-detail', timestamp, {
+      status: 'incomplete', recommendation: 'no_recommendation', rationale: 'Current filtered response',
+      lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false },
+    })
+    let detailResolve: ((response: Response) => void) | undefined
+    let detailSignal: AbortSignal | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/review-1')) return new Promise<Response>((resolve) => { detailResolve = resolve; detailSignal = init?.signal as AbortSignal | undefined })
+      return url.includes('status=incomplete')
+        ? emptyResponse({ items: [selectedReview, current], has_more: false })
+        : emptyResponse({ items: [selectedReview], has_more: false })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(detailResolve).toBeTypeOf('function'))
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'incomplete' } })
+    await waitFor(() => expect(screen.getByText('Current filtered response')).toBeTruthy())
+    expect(detailSignal?.aborted).toBe(true)
+    expect(screen.queryByRole('heading', { name: 'Record human feedback' })).toBeNull()
+
+    detailResolve!(await emptyResponse(selectedReview))
+    await drainCallbacks()
+    expect(screen.queryByRole('heading', { name: 'Record human feedback' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Close review detail' })).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'View review details' })).toHaveLength(2)
+    expect(screen.getByText('Current filtered response')).toBeTruthy()
   })
 })

@@ -18,6 +18,7 @@ export type Review = {
   lifecycle: { historical_status: 'complete' | 'incomplete'; current_snapshot_id: string | null; outdated: boolean }
 }
 export type ReviewPage = { items: Review[]; has_more: boolean; next_cursor?: string }
+export type ReviewListFilters = { status?: Review['status']; outdated?: boolean }
 export type ReviewFeedback = { feedback_id: string; portfolio_id: string; review_id: string; decision: FeedbackDecision; note: string | null; occurred_at: string; submitted_by: Review['submitted_by'] }
 export type FeedbackDecision = 'agree' | 'disagree' | 'defer' | 'request_another_review'
 
@@ -31,6 +32,7 @@ type ReviewProps = {
   holdingId?: string
   onUnauthorized: () => void
   onBackToHoldings?: () => void
+  onShowAllReviews?: () => void
   feedbackAttempts?: FeedbackAttemptStore
 }
 
@@ -171,11 +173,15 @@ function sameReview(left: Review, right: Review) {
   return canonicalValue(immutable(left)) === canonicalValue(immutable(right))
 }
 
+function evidenceAnchor(reviewId: string, evidenceId: string) {
+  return `review-${reviewId}-evidence-${evidenceId}`
+}
+
 function matchesHoldingFilter(review: Review, holdingId: string) {
   return review.scope.type === 'holding' && review.scope.holding_ids.length === review.scope.instrument_ids.length && review.scope.holding_ids.includes(holdingId)
 }
 
-export function validateReviewPage(value: unknown, portfolioId: string, holdingId?: string): ReviewPage {
+export function validateReviewPage(value: unknown, portfolioId: string, holdingId?: string, filters: ReviewListFilters = {}): ReviewPage {
   const candidate = object(value)
   exactKeys(candidate, ['items', 'has_more'], ['next_cursor'])
   if (!Array.isArray(candidate.items) || candidate.items.length > 50 || typeof candidate.has_more !== 'boolean') throw new Error('Invalid review pagination response')
@@ -184,6 +190,8 @@ export function validateReviewPage(value: unknown, portfolioId: string, holdingI
   const items = candidate.items.map(validateReview)
   if (items.some((review) => review.portfolio_id !== portfolioId) || new Set(items.map((review) => review.review_id)).size !== items.length) throw new Error('Cross-portfolio or duplicate review response')
   if (holdingId && items.some((review) => !matchesHoldingFilter(review, holdingId))) throw new Error('Review target does not match the requested holding filter')
+  if (filters.status && items.some((review) => review.status !== filters.status)) throw new Error('Review status does not match the requested filter')
+  if (filters.outdated !== undefined && items.some((review) => review.lifecycle.outdated !== filters.outdated)) throw new Error('Review lifecycle does not match the requested filter')
   return candidate.has_more ? { items, has_more: true, next_cursor: candidate.next_cursor as string } : { items, has_more: false }
 }
 export function validateFeedback(value: unknown, portfolioId: string, reviewId: string, expected?: { decision: FeedbackDecision; note: string | null }): ReviewFeedback {
@@ -201,7 +209,7 @@ function errorMessage(reason: unknown, action: string) {
     if (reason.status === 400) return `${action} was rejected because the request was invalid.`
     if (reason.status === 403) return `You are not allowed to ${action.toLowerCase()}. Check your session and try again.`
     if (reason.status === 404) return `The ${action.toLowerCase()} is no longer available.`
-    if (reason.status === 409) return 'This feedback key conflicts with a previous event. Change the feedback and submit again.'
+    if (reason.status === 409) return 'The feedback outcome could not be confirmed because this idempotency key conflicts with another append-only event. Do not retry this same attempt with a new key. If you intentionally want a separate event, first change the decision or note and submit it as a new event.'
     if (reason.status === 413) return 'The feedback note is too large.'
     if (reason.status === 415) return 'The server rejected the feedback format.'
     if (reason.status >= 500) return `The server could not ${action.toLowerCase()}. Retry without changing the draft.`
@@ -219,7 +227,7 @@ function newIdempotencyKey() {
   throw new Error('Secure randomness is unavailable; feedback cannot be submitted safely.')
 }
 
-function ReviewDetail({ review, portfolioId, snapshot, csrfToken, onUnauthorized, detailRef, feedbackAttempts }: { review: Review; portfolioId: string; snapshot: OverviewSnapshot; csrfToken?: string; onUnauthorized: () => void; detailRef: RefObject<HTMLElement | null>; feedbackAttempts: FeedbackAttemptStore }) {
+function ReviewDetail({ review, targetContext, portfolioId, snapshot, csrfToken, onUnauthorized, detailRef, feedbackAttempts }: { review: Review; targetContext: string; portfolioId: string; snapshot: OverviewSnapshot; csrfToken?: string; onUnauthorized: () => void; detailRef: RefObject<HTMLElement | null>; feedbackAttempts: FeedbackAttemptStore }) {
   const attemptIdentity = feedbackAttemptIdentity(portfolioId, review.review_id)
   const storedAttempt = feedbackAttempts.get(attemptIdentity)
   const storedDraft = (() => {
@@ -288,13 +296,13 @@ function ReviewDetail({ review, portfolioId, snapshot, csrfToken, onUnauthorized
       <div><dt>Model</dt><dd>{review.model.provider} / {review.model.model} / {review.model.version}</dd></div><div><dt>Submitted by</dt><dd>{review.submitted_by.principal_type} ({review.submitted_by.permissions.join(', ')})</dd></div>
     </dl>
     <SnapshotBadge review={review} snapshot={snapshot} />
-    <ReviewSection title="Scope"><p>{review.scope.type === 'portfolio' ? 'Portfolio-wide; not attached to a holding.' : `Exact holding lot IDs: ${review.scope.holding_ids.join(', ')}`}</p></ReviewSection>
+    <ReviewSection title="Scope"><p>{targetContext}</p><p className="subline">{review.scope.type === 'portfolio' ? 'Portfolio-wide review.' : `Exact holding lot IDs: ${review.scope.holding_ids.join(', ')}`}</p></ReviewSection>
     <ReviewSection title="Rationale"><p>{review.rationale}</p></ReviewSection>
     <ReviewSection title="Model opinion"><p>{review.model_opinion}</p></ReviewSection>
     <ReviewList title="Risks" items={review.risks} /><ReviewList title="Counterarguments" items={review.counterarguments} /><ReviewList title="Conditions" items={review.conditions} />
     {review.metrics.length > 0 && <ReviewSection title="Deterministic metrics"><div className="review-metrics">{review.metrics.map((metric) => <div key={`${metric.name}-${metric.as_of}`}><dt>{metric.name}</dt><dd>{metric.value} {metric.unit}<span className="subline">{metric.source} · {displayDate(metric.as_of)}</span></dd></div>)}</div></ReviewSection>}
-    {review.sourced_facts.length > 0 && <ReviewSection title="Sourced facts"><ul>{review.sourced_facts.map((fact, index) => <li key={`${fact.statement}-${index}`}>{fact.statement} <span className="subline">Evidence: {fact.evidence_ids.join(', ')}</span></li>)}</ul></ReviewSection>}
-    <ReviewSection title="Evidence"><ul className="evidence-list">{review.evidence.map((evidence) => <li key={evidence.evidence_id}><a href={evidence.url} target="_blank" rel="noopener noreferrer">{evidence.title}</a><span className="subline">{evidence.availability} · {evidence.freshness} · accessed {displayDate(evidence.accessed_at)}</span><p>{evidence.excerpt}</p></li>)}</ul></ReviewSection>
+    {review.sourced_facts.length > 0 && <ReviewSection title="Sourced facts"><ul>{review.sourced_facts.map((fact, index) => <li key={`${fact.statement}-${index}`}>{fact.statement} <span className="subline">Evidence: {fact.evidence_ids.map((evidenceId, evidenceIndex) => { const evidence = review.evidence.find((candidate) => candidate.evidence_id === evidenceId); return <span key={evidenceId}>{evidenceIndex > 0 && ', '}<a href={`#${evidenceAnchor(review.review_id, evidenceId)}`}>{evidenceId}{evidence ? ` — ${evidence.title}` : ''}</a></span> })}</span></li>)}</ul></ReviewSection>}
+    <ReviewSection title="Evidence">{review.evidence.length > 0 ? <ul className="evidence-list">{review.evidence.map((evidence) => <li id={evidenceAnchor(review.review_id, evidence.evidence_id)} key={evidence.evidence_id}><a href={evidence.url} target="_blank" rel="noopener noreferrer">{evidence.title}</a><span className="subline">Evidence ID {evidence.evidence_id} · {evidence.availability} · {evidence.freshness} · accessed {displayDate(evidence.accessed_at)} · Publication date: {evidence.published_at ? displayDate(evidence.published_at) : 'Not supplied'}</span><p>{evidence.excerpt}</p></li>)}</ul> : <p className="muted">No evidence supplied; no supported recommendation is asserted.</p>}</ReviewSection>
     <section className="feedback-panel" aria-labelledby={`feedback-title-${review.review_id}`}><h4 id={`feedback-title-${review.review_id}`}>Record human feedback</h4><p className="muted">Feedback is an append-only event and does not edit this review. “Request another review” records feedback only; it does not schedule a review.</p><form onSubmit={submit}>
       <fieldset disabled={feedbackState === 'submitting'}><legend>Decision</legend><div className="feedback-options">{feedbackDecisions.map((value) => <label key={value}><input type="radio" name={`feedback-${review.review_id}`} value={value} checked={decision === value} onChange={() => changeDecision(value)} /> {value.replaceAll('_', ' ')}</label>)}</div>
       <label htmlFor={`feedback-note-${review.review_id}`}>Optional note</label><textarea id={`feedback-note-${review.review_id}`} value={note} maxLength={2000} onChange={(event) => noteChanged(event.target.value)} /></fieldset>
@@ -307,19 +315,21 @@ function ReviewDetail({ review, portfolioId, snapshot, csrfToken, onUnauthorized
 function ReviewSection({ title, children }: { title: string; children: React.ReactNode }) { return <section className="review-section"><h4>{title}</h4>{children}</section> }
 function ReviewList({ title, items }: { title: string; items: string[] }) { return <ReviewSection title={title}>{items.length ? <ul>{items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul> : <p className="muted">None recorded.</p>}</ReviewSection> }
 function SnapshotBadge({ review, snapshot }: { review: Review; snapshot: OverviewSnapshot }) {
-  if (review.lifecycle.outdated) return <p className="snapshot-badge outdated">Outdated review. Current snapshot: {review.lifecycle.current_snapshot_id}</p>
-  if (!review.lifecycle.current_snapshot_id) return <p className="snapshot-badge missing">No current snapshot is available.</p>
+  if (review.lifecycle.outdated) return <p className="snapshot-badge outdated">Outdated review. Current snapshot: {review.lifecycle.current_snapshot_id || 'not available'}</p>
+  if (!review.lifecycle.current_snapshot_id) return <><p className="snapshot-badge missing">No current snapshot is available.</p><p className="subline">Current review status is unknown; outdated=false does not establish Current.</p></>
   if (review.lifecycle.current_snapshot_id === review.snapshot_id && snapshot.snapshot_id === review.snapshot_id && snapshot.calculation_version === review.calculation_version) return <p className="snapshot-badge current">Current review snapshot</p>
-  return <p className="snapshot-badge">Historical snapshot; current identity could not be confirmed.</p>
+  return <><p className="snapshot-badge">Historical snapshot; current identity could not be confirmed.</p><p className="subline">This review is not marked outdated, but the loaded current snapshot does not match it.</p></>
 }
 
-export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, holdingId, onUnauthorized, onBackToHoldings, feedbackAttempts }: ReviewProps) {
+export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, holdingId, onUnauthorized, onBackToHoldings, onShowAllReviews, feedbackAttempts }: ReviewProps) {
   const [page, setPage] = useState<ReviewPage | null>(null)
   const [state, setState] = useState<ReviewState>('loading')
   const [error, setError] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
   const [appendError, setAppendError] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<Review['status'] | 'all'>('all')
+  const [outdatedFilter, setOutdatedFilter] = useState<'all' | 'true' | 'false'>('all')
   const [detail, setDetail] = useState<Review | null>(null)
   const [detailState, setDetailState] = useState<ReviewState>('ready')
   const [detailError, setDetailError] = useState('')
@@ -336,12 +346,27 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
   const paginationCursorsRef = useRef(new Set<string>())
   const localFeedbackAttempts = useRef<FeedbackAttemptStore>(new Map())
   const feedbackAttemptStore = feedbackAttempts || localFeedbackAttempts.current
+  const activeFilters = useMemo<ReviewListFilters>(() => ({
+    ...(statusFilter === 'all' ? {} : { status: statusFilter }),
+    ...(outdatedFilter === 'all' ? {} : { outdated: outdatedFilter === 'true' }),
+  }), [outdatedFilter, statusFilter])
+  const scopeKey = `${portfolioId}\u0000${holdingId || ''}\u0000${statusFilter}\u0000${outdatedFilter}`
   const holdingMap = useMemo(() => new Map(holdings.map((holding) => [holding.lot_id, holding])), [holdings])
-  const targetState = useCallback((review: Review) => review.scope.type === 'portfolio' ? { valid: true, label: 'Portfolio-wide' } : review.scope.holding_ids.every((id) => holdingMap.has(id)) ? { valid: true, label: review.scope.holding_ids.map((id) => `${holdingMap.get(id)?.symbol || 'lot'} · lot ${id}`).join(', ') } : { valid: false, label: 'Target identity unavailable; review is not attached to a holding.' }, [holdingMap])
+  const targetState = useCallback((review: Review) => {
+    if (review.scope.type === 'portfolio') return { valid: true, label: 'Portfolio-wide' }
+    const labels = review.scope.holding_ids.map((id, index) => {
+      const holding = holdingMap.get(id)
+      if (!holding) return `Target identity unavailable; review is not attached to a holding. Lot ${id} · instrument ${review.scope.instrument_ids[index] || 'unavailable'} · current holding metadata is unavailable.`
+      const descriptor = holding.description && holding.description !== holding.symbol ? holding.description : holding.name && holding.name !== holding.symbol ? holding.name : 'Instrument description unavailable'
+      const cost = holding.cost_basis ? `cost basis ${holding.cost_basis} ${holding.currency}` : 'cost basis unavailable'
+      return `${holding.symbol} · ${descriptor} · qty ${holding.quantity} · ${holding.currency} · ${cost} · lot ${id}`
+    })
+    return { valid: labels.length > 0 && labels.every((label) => !label.startsWith('Target identity unavailable')), label: labels.join(', ') }
+  }, [holdingMap])
   const load = useCallback((cursor: string | undefined, append: boolean) => {
     if (!portfolioId || (append && loadingMoreRef.current)) return
     if (append && (!cursor || paginationCursorsRef.current.has(cursor))) {
-      setAppendError('Unable to load more reviews: the server returned a repeated pagination cursor. Retry from the first page.')
+      setAppendError('The server returned a repeated pagination cursor. Reload the first page to restart review navigation.')
       return
     }
     const generation = ++listGeneration.current
@@ -350,9 +375,9 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
     if (append) { loadingMoreRef.current = true; setLoadingMore(true); setAppendError('') } else { loadingMoreRef.current = false; setState('loading'); setPage(null); itemsRef.current = []; setError(''); setAppendError(''); setListAnnouncement(''); setSelectedId(null); setDetail(null) }
     if (!append) paginationCursorsRef.current.clear()
     if (cursor) paginationCursorsRef.current.add(cursor)
-    const params = new URLSearchParams({ limit: '20' }); if (cursor) params.set('cursor', cursor); if (holdingId) params.set('holding_id', holdingId)
+    const params = new URLSearchParams({ limit: '20' }); if (cursor) params.set('cursor', cursor); if (holdingId) params.set('holding_id', holdingId); if (activeFilters.status) params.set('status', activeFilters.status); if (activeFilters.outdated !== undefined) params.set('outdated', String(activeFilters.outdated))
     apiFetch(`/api/v1/portfolios/${encodeURIComponent(portfolioId)}/reviews?${params.toString()}`, { signal: controller.signal })
-      .then((response) => jsonResponse<unknown>(response)).then((raw) => validateReviewPage(raw, portfolioId, holdingId))
+      .then((response) => jsonResponse<unknown>(response)).then((raw) => validateReviewPage(raw, portfolioId, holdingId, activeFilters))
       .then((nextPage) => {
         if (controller.signal.aborted || generation !== listGeneration.current) return
         const previous = itemsRef.current; const previousIds = new Set(previous.map((review) => review.review_id)); const merged = new Map(previous.map((review) => [review.review_id, review]))
@@ -373,7 +398,22 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
         if (append && cursor) paginationCursorsRef.current.delete(cursor)
         if (append) { loadingMoreRef.current = false; setLoadingMore(false); setAppendError(reason instanceof Error ? reason.message : 'Unable to load more reviews') } else { setState('error'); setError(reason instanceof Error ? reason.message : 'Unable to load reviews') }
       }).finally(() => { if (listController.current === controller) listController.current = null })
-  }, [holdingId, onUnauthorized, portfolioId])
+  }, [activeFilters, holdingId, onUnauthorized, portfolioId])
+  useLayoutEffect(() => {
+    if (!scopeKey) return
+    listGeneration.current += 1
+    listController.current?.abort()
+    listController.current = null
+    detailGeneration.current += 1
+    detailController.current?.abort()
+    detailController.current = null
+    loadingMoreRef.current = false
+    paginationCursorsRef.current.clear()
+    itemsRef.current = []
+    selectedButtonRef.current = null
+    setSelectedId(null)
+    setDetail(null)
+  }, [scopeKey])
   useEffect(() => { load(undefined, false); return () => { listGeneration.current += 1; listController.current?.abort(); listController.current = null; detailGeneration.current += 1; detailController.current?.abort(); detailController.current = null } }, [load])
   const selectReview = (reviewId: string, button?: HTMLButtonElement) => {
     selectedButtonRef.current = reviewId; button?.focus(); setSelectedId(reviewId); setDetail(null); setDetailState('loading'); setDetailError('')
@@ -383,6 +423,8 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
       const selectedReview = itemsRef.current.find((candidate) => candidate.review_id === reviewId)
       if (!selectedReview || review.portfolio_id !== portfolioId || review.review_id !== reviewId) throw new Error('Review identity does not match the requested review')
       if (holdingId && !matchesHoldingFilter(review, holdingId)) throw new Error('Review detail target does not match the requested holding filter')
+      if (activeFilters.status && review.status !== activeFilters.status) throw new Error('Review detail status does not match the requested filter')
+      if (activeFilters.outdated !== undefined && review.lifecycle.outdated !== activeFilters.outdated) throw new Error('Review detail lifecycle does not match the requested filter')
       if (!sameReview(selectedReview, review)) throw new Error('Review detail does not match the selected list review')
       setDetail(review); setDetailState('ready'); window.setTimeout(() => detailRef.current?.focus(), 0)
     }).catch((reason: unknown) => {
@@ -395,15 +437,25 @@ export default function Reviews({ portfolioId, holdings, snapshot, csrfToken, ho
   const renderedItems = page?.items || []
   return <section className="reviews-card" aria-labelledby="reviews-title">
     <div className="section-heading"><div><span className="eyebrow">Immutable advisory analysis</span><h2 id="reviews-title">Reviews</h2></div><div className="review-actions">{holdingId && <span className="filter-chip">Filtered to exact lot {holdingId}</span>}{onBackToHoldings && <button type="button" onClick={onBackToHoldings}>Back to holdings</button>}</div></div>
+    <div className="review-filters" aria-label="Review filters">
+      <label htmlFor="review-status-filter">Review status</label>
+      <select id="review-status-filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as Review['status'] | 'all')}>
+        <option value="all">All statuses</option><option value="complete">Complete</option><option value="incomplete">Incomplete</option>
+      </select>
+      <label htmlFor="review-lifecycle-filter">Review lifecycle</label>
+      <select id="review-lifecycle-filter" value={outdatedFilter} onChange={(event) => setOutdatedFilter(event.target.value as 'all' | 'true' | 'false')}>
+        <option value="all">All lifecycle states</option><option value="false">Not marked outdated (verify snapshot)</option><option value="true">Outdated</option>
+      </select>
+    </div>
     <p ref={listStatusRef} className="visually-hidden" role="status" aria-live="polite" tabIndex={-1}>{listAnnouncement}</p>
     {state === 'loading' && <p role="status" aria-live="polite">Loading reviews…</p>}
     {state === 'error' && <p className="notice error" role="alert">Unable to load reviews: {error} <button type="button" onClick={() => load(undefined, false)}>Try again</button></p>}
-    {state === 'ready' && renderedItems.length === 0 && <p className="empty">No reviews match this portfolio or holding filter.</p>}
+    {state === 'ready' && renderedItems.length === 0 && <div className="empty"><p>No reviews match the selected portfolio, lot, status, or lifecycle filters.</p>{(statusFilter !== 'all' || outdatedFilter !== 'all') && <button type="button" onClick={() => { setStatusFilter('all'); setOutdatedFilter('all') }}>Clear review filters</button>}{holdingId && onShowAllReviews && <button type="button" onClick={onShowAllReviews}>Show all portfolio reviews</button>}</div>}
     {state === 'ready' && renderedItems.length > 0 && <div className="review-list" aria-label="Advisory reviews">{renderedItems.map((review) => { const target = targetState(review); return <article className="review-card" key={review.review_id}><div className="review-card-heading"><div><h3>{review.recommendation.replaceAll('_', ' ')}</h3><p className="muted">{target.label}</p></div><span className={`state-pill state-${review.status}`}>{review.status}</span></div><p>{review.rationale}</p><div className="review-card-meta"><span>Snapshot {review.snapshot_id}</span><span>Submitted {displayDate(review.submitted_at)}</span><SnapshotBadge review={review} snapshot={snapshot} /></div>{!target.valid && <p className="notice warning">This review is not attached to a holding because its exact target identity is unavailable.</p>}<button type="button" data-review-id={review.review_id} onClick={(event) => selectReview(review.review_id, event.currentTarget)}>View review details</button></article>})}</div>}
-    {appendError && <p className="notice error" role="alert">Unable to load more reviews: {appendError} <button type="button" onClick={() => load(page?.next_cursor, true)}>Retry loading reviews</button></p>}
+    {appendError && <p className="notice error" role="alert">Unable to load more reviews: {appendError} <button type="button" onClick={() => load(page?.next_cursor, true)}>Retry loading reviews</button> <button type="button" onClick={() => load(undefined, false)}>Reload first page</button></p>}
     {page?.has_more && !appendError && <button type="button" onClick={() => load(page.next_cursor, true)} disabled={loadingMore} aria-busy={loadingMore}>{loadingMore ? 'Loading more reviews…' : 'Load more reviews'}</button>}
     {selectedId && detailState === 'loading' && <p role="status" aria-live="polite">Loading review detail…</p>}
     {selectedId && detailState === 'error' && <p className="notice error" role="alert">Unable to load review detail: {detailError} <button type="button" onClick={() => selectReview(selectedId)}>Retry review detail</button></p>}
-    {detail && <><button type="button" onClick={closeDetail}>Close review detail</button><ReviewDetail key={`${portfolioId}:${detail.review_id}`} review={detail} portfolioId={portfolioId} snapshot={snapshot} csrfToken={csrfToken} onUnauthorized={onUnauthorized} detailRef={detailRef} feedbackAttempts={feedbackAttemptStore} /></>}
+    {detail && <><button type="button" onClick={closeDetail}>Close review detail</button><ReviewDetail key={`${portfolioId}:${detail.review_id}`} review={detail} targetContext={targetState(detail).label} portfolioId={portfolioId} snapshot={snapshot} csrfToken={csrfToken} onUnauthorized={onUnauthorized} detailRef={detailRef} feedbackAttempts={feedbackAttemptStore} /></>}
   </section>
 }

@@ -114,6 +114,18 @@ const authenticatedSession = { ok: true, status: 200, json: async () => ({ authe
 function authenticatedFetch(handler: (input: RequestInfo | URL, init?: RequestInit) => Response | Promise<Response>) {
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).includes('/api/v1/auth/session') ? Promise.resolve(authenticatedSession) : handler(input, init))
 }
+function appResponse(body: unknown, status = 200) {
+  return Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body } as Response)
+}
+
+function appReviewFor(reviewID: string, overrides: Record<string, unknown> = {}) {
+  return {
+    ...appReview,
+    review_id: reviewID,
+    scope: { type: 'holding' as const, holding_ids: ['lot-a'], instrument_ids: ['instrument-a'] },
+    ...overrides,
+  }
+}
 
 function appThesis(lotId = 'lot-a', overrides: Record<string, unknown> = {}) {
   return {
@@ -416,6 +428,25 @@ describe('Portfolio Dashboard', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View reviews for SAME lot lot-c' }))
   })
 
+  it('changes server-backed review status and lifecycle filters from the full authenticated App', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/reviews')
+      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [appReview], has_more: false }) } as Response)
+      : Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'complete' } })
+    fireEvent.change(screen.getByLabelText('Review lifecycle'), { target: { value: 'false' } })
+    await waitFor(() => {
+      const url = String(fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)?.[0])
+      expect(url).toContain('status=complete')
+      expect(url).toContain('outdated=false')
+      expect(url).not.toContain('cursor=')
+    })
+  })
+
   it('clears an old review lot filter when clean thesis navigation opens global Reviews', async () => {
     const filteredReview = { ...appReview, scope: { type: 'holding' as const, holding_ids: ['lot-a'], instrument_ids: ['instrument-a'] } }
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -437,6 +468,8 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByText(/Filtered to exact lot/)).toBeNull()
     const globalCall = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)
     expect(String(globalCall?.[0])).not.toContain('holding_id=')
+    fireEvent.click(screen.getByRole('button', { name: 'Back to holdings' }))
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Holdings' })))
   })
 
   it('does not replay a pending thesis tab exit after sign-out and session retry', async () => {
@@ -595,6 +628,37 @@ describe('Portfolio Dashboard', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
     await waitFor(() => expect(screen.getByPlaceholderText('Exact listing / coin ID')).toBeTruthy())
     expect(screen.queryByDisplayValue('owner-edited-id')).toBeNull()
+  })
+
+  it('clears a stale lot scope when global Reviews navigation is deferred by Market Data', async () => {
+    const marketDraftSetup = {
+      ...marketSetup,
+      instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', description: 'AAA mapping fixture', currency: 'USD', mappings: [] }],
+    }
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/reviews')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [appReview], has_more: false }) } as Response)
+      if (url.endsWith('/market-data/discover')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ portfolio_id: 'portfolio-default', etag: '"setup-1"', results: [] }) } as Response)
+      if (url.includes('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => marketDraftSetup } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View reviews for AAA lot lot-a' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View reviews for AAA lot lot-a' }))
+    await waitFor(() => expect(screen.getByText('Filtered to exact lot lot-a')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByPlaceholderText('Exact listing / coin ID')).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('Exact listing / coin ID'), { target: { value: 'owner-edited-id' } })
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('alertdialog', { name: /Unsaved Market Data mapping/i })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits and leave' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Reviews' })).toBeTruthy())
+    expect(screen.queryByText(/Filtered to exact lot/)).toBeNull()
+    const globalCall = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)
+    expect(String(globalCall?.[0])).not.toContain('holding_id=')
+    fireEvent.click(screen.getByRole('button', { name: 'Back to holdings' }))
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Holdings' })))
   })
 
   it('keeps the holdings table and actions in one compact surface', async () => {
@@ -3342,6 +3406,176 @@ describe('Portfolio Dashboard', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
     expect(screen.queryByRole('button', { name: 'View refresh details' })).toBeNull()
     expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+  })
+
+  it('keeps full-App feedback identity across filter replacement and retries the same authority attempt', async () => {
+    const feedback = { feedback_id: 'feedback-app', portfolio_id: 'portfolio-default', review_id: 'review-app', decision: 'agree', note: 'Keep same authority', occurred_at: '2026-01-02T12:00:00.000000000Z', submitted_by: { principal_id: 'local-owner', principal_type: 'browser_user', permissions: ['portfolio:read'] } }
+    let feedbackCalls = 0
+    let pendingFeedback: { signal?: AbortSignal; resolve: (response: Response) => void; init?: RequestInit } | undefined
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/reviews/') && url.includes('/feedback')) {
+        feedbackCalls += 1
+        if (feedbackCalls === 1) return new Promise<Response>((resolve) => { pendingFeedback = { signal: init?.signal as AbortSignal | undefined, resolve, init } })
+        return appResponse(feedback, 201)
+      }
+      if (url.endsWith('/review-app')) return appResponse(appReview)
+      if (url.includes('/reviews')) return url.includes('status=incomplete') ? appResponse({ items: [], has_more: false }) : appResponse({ items: [appReview], has_more: false })
+      if (url.includes('/overview')) return appResponse(completeOverview)
+      return appResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Reviews' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Record human feedback' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Optional note'), { target: { value: 'Keep same authority' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => expect(pendingFeedback).toBeTruthy())
+    const firstKey = new Headers(pendingFeedback?.init?.headers as HeadersInit).get('Idempotency-Key')
+    const firstBody = pendingFeedback?.init?.body
+    expect(firstKey).toMatch(/^feedback-/)
+    expect(firstBody).toBe(JSON.stringify({ decision: 'agree', note: 'Keep same authority' }))
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'incomplete' } })
+    await waitFor(() => expect(screen.getByText(/No reviews match/)).toBeTruthy())
+    expect(pendingFeedback?.signal?.aborted).toBe(true)
+    pendingFeedback!.resolve(await appResponse(feedback, 201))
+    await flushEffects()
+    expect(screen.queryByText(/Feedback recorded at/)).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'all' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect((screen.getByLabelText('Optional note') as HTMLTextAreaElement).value).toBe('Keep same authority'))
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => expect(screen.getByText(/Feedback recorded at/)).toBeTruthy())
+    const feedbackRequests = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews/') && String(input).includes('/feedback'))
+    expect(feedbackRequests).toHaveLength(2)
+    const secondHeaders = new Headers(feedbackRequests[1]?.[1]?.headers as HeadersInit)
+    expect(secondHeaders.get('Idempotency-Key')).toBe(firstKey)
+    expect(feedbackRequests[1]?.[1]?.body).toBe(firstBody)
+  })
+
+  it('aborts full-App feedback on sign-out and ignores a valid old receipt without resurrecting private state', async () => {
+    const feedback = { feedback_id: 'feedback-late', portfolio_id: 'portfolio-default', review_id: 'review-app', decision: 'agree', note: null, occurred_at: '2026-01-02T12:00:00.000000000Z', submitted_by: { principal_id: 'local-owner', principal_type: 'browser_user', permissions: ['portfolio:read'] } }
+    let pendingFeedback: { signal?: AbortSignal; resolve: (response: Response) => void } | undefined
+    let feedbackCalls = 0
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/reviews/') && url.includes('/feedback')) {
+        feedbackCalls += 1
+        return new Promise<Response>((resolve) => { pendingFeedback = { signal: init?.signal as AbortSignal | undefined, resolve } })
+      }
+      if (url.endsWith('/review-app')) return appResponse(appReview)
+      if (url.includes('/reviews')) return appResponse({ items: [appReview], has_more: false })
+      if (url.includes('/overview')) return appResponse(completeOverview)
+      if (url.includes('/auth/logout')) return appResponse({}, 200)
+      return appResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Reviews' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Record human feedback' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Record feedback' }))
+    await waitFor(() => expect(pendingFeedback).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(pendingFeedback?.signal?.aborted).toBe(true)
+    pendingFeedback!.resolve(await appResponse(feedback, 201))
+    await flushEffects()
+    expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy()
+    expect(screen.queryByText(/Feedback recorded at/)).toBeNull()
+    expect(feedbackCalls).toBe(1)
+  })
+
+  it('proves full-App list scope keeps the current filtered rows after a valid old page settles last', async () => {
+    const stale = appReviewFor('review-stale-list', { status: 'complete', recommendation: 'hold', rationale: 'Obsolete complete response', lifecycle: { historical_status: 'complete', current_snapshot_id: 'snap-1', outdated: false } })
+    const current = appReviewFor('review-current-list', { status: 'incomplete', recommendation: 'no_recommendation', rationale: 'Current incomplete response', evidence: [], sourced_facts: [], lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false } })
+    const requests: Array<{ signal?: AbortSignal; resolve: (response: Response) => void }> = []
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/reviews?')) return new Promise<Response>((resolve) => { requests.push({ signal: init?.signal as AbortSignal | undefined, resolve }) })
+      if (url.includes('/overview')) return appResponse(completeOverview)
+      return appResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(requests).toHaveLength(1))
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'incomplete' } })
+    expect(requests[0]?.signal?.aborted).toBe(true)
+    await waitFor(() => expect(requests).toHaveLength(2))
+    expect(requests[1]?.signal?.aborted).toBe(false)
+
+    await act(async () => {
+      requests[1]!.resolve(await appResponse({ items: [current], has_more: false }))
+      for (let index = 0; index < 30; index += 1) await Promise.resolve()
+    })
+    expect(screen.getByText('Current incomplete response')).toBeTruthy()
+    expect((screen.getByLabelText('Review status') as HTMLSelectElement).value).toBe('incomplete')
+    expect(screen.getByRole('button', { name: 'View review details' }).getAttribute('data-review-id')).toBe('review-current-list')
+
+    await act(async () => {
+      requests[0]!.resolve(await appResponse({ items: [stale], has_more: false }))
+      for (let index = 0; index < 30; index += 1) await Promise.resolve()
+    })
+    expect(screen.queryByText('Obsolete complete response')).toBeNull()
+    expect(screen.getByText('Current incomplete response')).toBeTruthy()
+    expect((screen.getByLabelText('Review status') as HTMLSelectElement).value).toBe('incomplete')
+    expect(screen.getByRole('button', { name: 'View review details' }).getAttribute('data-review-id')).toBe('review-current-list')
+    expect(fetchMock.mock.calls.some(([input, init]) => String(input).includes('/feedback') && init?.method === 'POST')).toBe(false)
+  })
+
+  it('proves full-App detail does not resurrect the valid original review after filter replacement', async () => {
+    const original = appReviewFor('review-original-detail', { status: 'incomplete', recommendation: 'no_recommendation', rationale: 'Original immutable detail rationale', model_opinion: 'Original detail opinion', evidence: [], sourced_facts: [], lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false } })
+    const filteredSibling = appReviewFor('review-filtered-sibling', { status: 'incomplete', recommendation: 'no_recommendation', rationale: 'Current filtered response', evidence: [], sourced_facts: [], lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false } })
+    let detailPending: { signal?: AbortSignal; resolve: (response: Response) => void } | undefined
+    let filteredListPending: { signal?: AbortSignal; resolve: (response: Response) => void } | undefined
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/review-original-detail')) return new Promise<Response>((resolve) => { detailPending = { signal: init?.signal as AbortSignal | undefined, resolve } })
+      if (url.includes('status=incomplete')) return new Promise<Response>((resolve) => { filteredListPending = { signal: init?.signal as AbortSignal | undefined, resolve } })
+      if (url.includes('/reviews?')) return appResponse({ items: [original], has_more: false })
+      if (url.includes('/overview')) return appResponse(completeOverview)
+      return appResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View review details' }))
+    await waitFor(() => expect(detailPending).toBeTruthy())
+
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'incomplete' } })
+    expect(detailPending?.signal?.aborted).toBe(true)
+    await waitFor(() => expect(filteredListPending).toBeTruthy())
+    expect(filteredListPending?.signal?.aborted).toBe(false)
+    await act(async () => {
+      filteredListPending!.resolve(await appResponse({ items: [original, filteredSibling], has_more: false }))
+      for (let index = 0; index < 30; index += 1) await Promise.resolve()
+    })
+    expect(screen.getByText('Current filtered response')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Record human feedback' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Close review detail' })).toBeNull()
+
+    await act(async () => {
+      detailPending!.resolve(await appResponse(original))
+      for (let index = 0; index < 30; index += 1) await Promise.resolve()
+    })
+    expect(screen.queryByRole('heading', { name: 'Record human feedback' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Close review detail' })).toBeNull()
+    expect(screen.getByText('Current filtered response')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: 'View review details' })).toHaveLength(2)
+    expect(fetchMock.mock.calls.some(([input, init]) => String(input).includes('/feedback') && init?.method === 'POST')).toBe(false)
   })
 
   it('withholds a nonempty zero reporting total on Overview', async () => {

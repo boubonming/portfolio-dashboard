@@ -174,6 +174,9 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .thesis-open-button { display: block; font-size: .8rem; margin-top: .65rem; padding: .45rem .6rem; white-space: nowrap; }
 .reviews-card, .review-detail { background: #1a2524; border: 1px solid #31514e; border-radius: 12px; margin-top: 1.5rem; min-width: 0; padding: 1.25rem; }
 .review-actions { align-items: center; display: flex; flex-wrap: wrap; gap: .65rem; min-width: 0; }
+.review-filters { align-items: center; display: flex; flex-wrap: wrap; gap: .55rem .75rem; margin: 1rem 0; }
+.review-filters label { color: #b8cbc8; font-size: .9rem; font-weight: 700; }
+.review-filters select { min-width: 12rem; }
 .filter-chip, .snapshot-badge { border: 1px solid #41615d; border-radius: 999px; color: #cfe5e1; display: inline-block; font-size: .8rem; padding: .35rem .65rem; }
 .snapshot-badge.current { background: #164d43; border-color: #52c7b8; color: #a8f0df; }
 .snapshot-badge.outdated { background: #5b421e; border-color: #92723c; color: #ffdc9a; }
@@ -186,6 +189,9 @@ h2 { font-size: 1.35rem; margin: .5rem 0 1rem; }
 .review-card p { overflow-wrap: anywhere; }
 .review-card-meta { align-items: center; color: #a9c1bd; display: flex; flex-wrap: wrap; gap: .5rem 1rem; margin: .8rem 0; }
 .review-detail { border-color: #52c7b8; margin-top: 1rem; outline: none; }
+.review-detail > .section-heading { align-items: flex-start; flex-wrap: wrap; }
+.review-detail > .section-heading > div { flex: 1 1 12rem; min-width: 0; }
+.review-detail > .section-heading > .state-pill { flex: 0 1 auto; max-width: 100%; overflow-wrap: anywhere; }
 .review-meta, .review-metrics { display: grid; gap: .75rem 1rem; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 1rem 0; }
 .review-meta dt, .review-metrics dt { color: #a9c1bd; font-size: .8rem; }
 .review-meta dd, .review-metrics dd { margin: .2rem 0 0; overflow-wrap: anywhere; }

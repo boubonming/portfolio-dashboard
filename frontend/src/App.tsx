@@ -1309,7 +1309,7 @@ export default function App() {
       setMarketNavigationRequest(nextView)
       return
     }
-    if (nextView === 'reviews') setReviewsHoldingId(undefined)
+    if (nextView === 'reviews') { setReviewsHoldingId(undefined); reviewsReturnLotIdRef.current = null }
     setMarketNavigationRequest(undefined)
     setView(nextView)
   }, [marketWorkflow.dirty, marketWorkflow.pending, marketWorkflow.uncertain, view])
@@ -1318,14 +1318,17 @@ export default function App() {
   const discardMarketAndNavigate = useCallback(() => {
     const target = marketNavigationRequest
     setMarketNavigationRequest(undefined)
-    if (target) setView(target)
+    if (target) {
+      if (target === 'reviews') { setReviewsHoldingId(undefined); reviewsReturnLotIdRef.current = null }
+      setView(target)
+    }
   }, [marketNavigationRequest])
 
   const completeThesisNavigation = useCallback((target: string) => {
     if (!['overview', 'holdings', 'market', 'activity', 'reviews', 'settings'].includes(target)) return
     setThesisNavigationRequest(undefined)
     setThesisHolding(null)
-    if (target === 'reviews') setReviewsHoldingId(undefined)
+    if (target === 'reviews') { setReviewsHoldingId(undefined); reviewsReturnLotIdRef.current = null }
     setView(target as View)
   }, [])
 
@@ -1338,6 +1341,13 @@ export default function App() {
       const fallback = document.getElementById('holdings-title') || document.getElementById('portfolio-content')
       ;(target || fallback)?.focus()
     }, 0)
+  }, [])
+
+  const showAllReviews = useCallback(() => {
+    setReviewsHoldingId(undefined)
+    reviewsReturnLotIdRef.current = null
+    setView('reviews')
+    window.setTimeout(() => document.getElementById('reviews-title')?.focus(), 0)
   }, [])
 
   const visibleHoldings = useMemo(() => {
@@ -1522,7 +1532,7 @@ export default function App() {
       </Paper>}
       {view === 'market' && <MarketDataPanel portfolioID={data?.portfolio.id || activityPortfolioID} reportingCurrency={currency} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} onWorkflowStateChange={setMarketWorkflow} />}
       {view === 'settings' && data && <Box component="section" className="settings-page" aria-labelledby="settings-title" sx={{ mt: 3 }}><Typography component="h1" id="settings-title" variant="h4" sx={{ mb: 2 }}>Settings</Typography><SettingsPanel portfolioID={data.portfolio.id} csrfToken={csrfToken.current} onUnauthorized={handleThesisUnauthorized} onReload={() => load()} /></Box>}
-      {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} feedbackAttempts={feedbackAttemptsRef.current} onUnauthorized={handleThesisUnauthorized} onBackToHoldings={closeReviews} />}
+      {view === 'reviews' && data && <Reviews portfolioId={data.portfolio.id} holdings={data.holdings} snapshot={data.snapshot} csrfToken={csrfToken.current} holdingId={reviewsHoldingId} feedbackAttempts={feedbackAttemptsRef.current} onUnauthorized={handleThesisUnauthorized} onBackToHoldings={closeReviews} onShowAllReviews={showAllReviews} />}
       </>}
     </Box>
   )
