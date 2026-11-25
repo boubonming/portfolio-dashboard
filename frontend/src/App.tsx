@@ -1318,7 +1318,10 @@ export default function App() {
   const discardMarketAndNavigate = useCallback(() => {
     const target = marketNavigationRequest
     setMarketNavigationRequest(undefined)
-    if (target) setView(target)
+    if (target) {
+      if (target === 'reviews') { setReviewsHoldingId(undefined); reviewsReturnLotIdRef.current = null }
+      setView(target)
+    }
   }, [marketNavigationRequest])
 
   const completeThesisNavigation = useCallback((target: string) => {

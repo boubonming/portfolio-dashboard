@@ -618,6 +618,37 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByDisplayValue('owner-edited-id')).toBeNull()
   })
 
+  it('clears a stale lot scope when global Reviews navigation is deferred by Market Data', async () => {
+    const marketDraftSetup = {
+      ...marketSetup,
+      instruments: [{ instrument_id: 'instrument-a', symbol: 'AAA', description: 'AAA mapping fixture', currency: 'USD', mappings: [] }],
+    }
+    const fetchMock = authenticatedFetch((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/reviews')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [appReview], has_more: false }) } as Response)
+      if (url.endsWith('/market-data/discover')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ portfolio_id: 'portfolio-default', etag: '"setup-1"', results: [] }) } as Response)
+      if (url.includes('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => marketDraftSetup } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View reviews for AAA lot lot-a' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View reviews for AAA lot lot-a' }))
+    await waitFor(() => expect(screen.getByText('Filtered to exact lot lot-a')).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Market data' }))
+    await waitFor(() => expect(screen.getByPlaceholderText('Exact listing / coin ID')).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('Exact listing / coin ID'), { target: { value: 'owner-edited-id' } })
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('alertdialog', { name: /Unsaved Market Data mapping/i })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits and leave' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Reviews' })).toBeTruthy())
+    expect(screen.queryByText(/Filtered to exact lot/)).toBeNull()
+    const globalCall = fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)
+    expect(String(globalCall?.[0])).not.toContain('holding_id=')
+    fireEvent.click(screen.getByRole('button', { name: 'Back to holdings' }))
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Holdings' })))
+  })
+
   it('keeps the holdings table and actions in one compact surface', async () => {
     vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, json: async () => completeOverview } as Response)))
     render(<App />)
