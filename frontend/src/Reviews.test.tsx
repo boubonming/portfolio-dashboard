@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import Reviews, { validateReview, validateReviewPage, type FeedbackAttemptStore, type Review } from './Reviews'
 import type { Holding } from './App'
@@ -22,6 +22,11 @@ const review: Review = {
 const emptyResponse = (body: unknown, status = 200) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body } as Response)
 const cursorOne = 'cursor-1234567890'
 const cursorTwo = 'cursor-0987654321'
+async function drainCallbacks() {
+  await act(async () => {
+    for (let index = 0; index < 30; index += 1) await Promise.resolve()
+  })
+}
 function reviewFor(reviewId: string, submittedAt = timestamp, overrides: Partial<Review> = {}): Review {
   return { ...review, review_id: reviewId, generated_at: submittedAt, submitted_at: submittedAt, ...overrides }
 }
@@ -584,12 +589,13 @@ describe('Phase D review contract validation', () => {
     expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy()
 
     requests[0]!.resolve(await emptyResponse({ items: [stale], has_more: false }))
-    await waitFor(() => expect(screen.queryByText('Stale list response')).toBeNull())
+    await drainCallbacks()
+    expect(screen.queryByText('Stale list response')).toBeNull()
     expect(screen.getByText('Current incomplete response')).toBeTruthy()
   })
 
   it('aborts a pending detail request on filter replacement and keeps current controls after the old detail settles last', async () => {
-    const staleDetail = reviewFor('review-stale-detail', timestamp, { rationale: 'Stale detail response' })
+    const selectedReview = { ...review, status: 'incomplete' as const, recommendation: 'no_recommendation' as const, rationale: 'Original immutable detail rationale', lifecycle: { historical_status: 'incomplete' as const, current_snapshot_id: 'snap-1', outdated: false } }
     const current = reviewFor('review-current-detail', timestamp, {
       status: 'incomplete', recommendation: 'no_recommendation', rationale: 'Current filtered response',
       lifecycle: { historical_status: 'incomplete', current_snapshot_id: 'snap-1', outdated: false },
@@ -600,8 +606,8 @@ describe('Phase D review contract validation', () => {
       const url = String(input)
       if (url.endsWith('/review-1')) return new Promise<Response>((resolve) => { detailResolve = resolve; detailSignal = init?.signal as AbortSignal | undefined })
       return url.includes('status=incomplete')
-        ? emptyResponse({ items: [current], has_more: false })
-        : emptyResponse({ items: [review], has_more: false })
+        ? emptyResponse({ items: [selectedReview, current], has_more: false })
+        : emptyResponse({ items: [selectedReview], has_more: false })
     })
     vi.stubGlobal('fetch', fetchMock)
     render(<Reviews portfolioId="portfolio-default" holdings={holdings} snapshot={{ snapshot_id: 'snap-1', calculation_version: 'calc-v1' }} onUnauthorized={vi.fn()} />)
@@ -614,9 +620,11 @@ describe('Phase D review contract validation', () => {
     expect(detailSignal?.aborted).toBe(true)
     expect(screen.queryByRole('heading', { name: 'Record human feedback' })).toBeNull()
 
-    detailResolve!(await emptyResponse(staleDetail))
-    await waitFor(() => expect(screen.queryByText('Stale detail response')).toBeNull())
-    expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy()
+    detailResolve!(await emptyResponse(selectedReview))
+    await drainCallbacks()
+    expect(screen.queryByRole('heading', { name: 'Record human feedback' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Close review detail' })).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'View review details' })).toHaveLength(2)
     expect(screen.getByText('Current filtered response')).toBeTruthy()
   })
 })
