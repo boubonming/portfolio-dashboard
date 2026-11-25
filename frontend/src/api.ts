@@ -166,7 +166,11 @@ function currencyCode(value: unknown, field: string, label: string): string {
 
 function canonicalTime(value: unknown, field: string, label: string): string {
   const result = stringField(value, field, label, 40)
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$/.test(result) || Number.isNaN(Date.parse(result))) throw new APIError(200, `Invalid ${label} response: ${field}.`)
+  const match = result.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/)
+  if (!match || Number.isNaN(Date.parse(result))) throw new APIError(200, `Invalid ${label} response: ${field}.`)
+  const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3])
+  const hour = Number(match[4]); const minute = Number(match[5]); const second = Number(match[6])
+  if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate() || hour > 23 || minute > 59 || second > 59) throw new APIError(200, `Invalid ${label} response: ${field}.`)
   return result
 }
 
@@ -448,6 +452,13 @@ function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDat
   if (result.refresh.providers.some((provider) => provider.quote_observations.some((observation) => observation.source !== provider.provider) || provider.fx_observations.some((observation) => observation.source !== provider.provider))) throw new APIError(200, 'Invalid market refresh response: observation provider identity.')
   if (new Set(quoteWitnesses.map((observation) => observation.id)).size !== quoteWitnesses.length || new Set(fxWitnesses.map((observation) => observation.id)).size !== fxWitnesses.length || quoteWitnesses.some((observation) => !allObservationIDs.includes(observation.id)) || fxWitnesses.some((observation) => !allObservationIDs.includes(observation.id)) || new Set([...quoteWitnesses.map((observation) => observation.id), ...fxWitnesses.map((observation) => observation.id)]).size !== quoteWitnesses.length + fxWitnesses.length) throw new APIError(200, 'Invalid market refresh response: observation witness identity.')
   if (result.snapshot.quote_observations.some((observation) => !result.snapshot.quote_ids.includes(observation.id)) || result.snapshot.fx_observations.some((observation) => !result.snapshot.fx_ids.includes(observation.id)) || new Set([...result.snapshot.quote_observations.map((observation) => observation.id), ...result.snapshot.fx_observations.map((observation) => observation.id)]).size !== result.snapshot.quote_observations.length + result.snapshot.fx_observations.length) throw new APIError(200, 'Invalid market refresh response: snapshot witness identity.')
+  const quoteByID = new Map(quoteWitnesses.map((observation) => [observation.id, observation]))
+  const fxByID = new Map(fxWitnesses.map((observation) => [observation.id, observation]))
+  const sameQuote = (left: QuoteObservation, right: QuoteObservation) => left.id === right.id && left.instrument_id === right.instrument_id && left.symbol === right.symbol && left.currency === right.currency && left.source === right.source
+  const sameFX = (left: FXObservation, right: FXObservation) => left.id === right.id && left.base_currency === right.base_currency && left.quote_currency === right.quote_currency && left.source === right.source
+  if (result.refresh.quote_observations.some((observation) => { const witness = quoteByID.get(observation.id); return !witness || !sameQuote(observation, witness) }) || result.refresh.fx_observations.some((observation) => { const witness = fxByID.get(observation.id); return !witness || !sameFX(observation, witness) })) throw new APIError(200, 'Invalid market refresh response: aggregate observation witness mismatch.')
+  if (result.snapshot.quote_observations.some((observation) => { const witness = quoteByID.get(observation.id); return !witness || !sameQuote(observation, witness) }) || result.snapshot.fx_observations.some((observation) => { const witness = fxByID.get(observation.id); return !witness || !sameFX(observation, witness) })) throw new APIError(200, 'Invalid market refresh response: snapshot observation witness mismatch.')
+  if (result.snapshot.quote_ids.some((id) => !quoteByID.has(id)) || result.snapshot.fx_ids.some((id) => !fxByID.has(id)) || new Set(result.snapshot.quote_observations.map((observation) => observation.id)).size !== result.snapshot.quote_ids.length || new Set(result.snapshot.fx_observations.map((observation) => observation.id)).size !== result.snapshot.fx_ids.length || result.snapshot.quote_observations.some((observation) => !result.snapshot.quote_ids.includes(observation.id)) || result.snapshot.fx_observations.some((observation) => !result.snapshot.fx_ids.includes(observation.id))) throw new APIError(200, 'Invalid market refresh response: snapshot observation identity.')
   if (result.refresh.status === 'complete' && result.refresh.providers.some((provider) => provider.status !== 'complete')) throw new APIError(200, 'Invalid market refresh response: refresh status.')
   if (result.refresh.status === 'incomplete' && result.refresh.providers.every((provider) => provider.status === 'complete')) throw new APIError(200, 'Invalid market refresh response: refresh status.')
   if (result.complete && (quoteWitnesses.length + fxWitnesses.length !== allObservationIDs.length || refreshQuoteIDs.length !== quoteWitnesses.length || refreshFXIDs.length !== fxWitnesses.length || result.snapshot.quote_observations.length !== result.snapshot.quote_ids.length || result.snapshot.fx_observations.length !== result.snapshot.fx_ids.length)) throw new APIError(200, 'Invalid market refresh response: incomplete observation witnesses.')
@@ -471,13 +482,35 @@ function validateRefreshSemantics(result: MarketRefreshResult, setup?: MarketDat
     }
     const missingInstrumentLabels = new Set(setup.instruments.map((instrument) => `${instrument.symbol} (${instrument.currency})`))
     if (new Set(result.missing_instruments).size !== result.missing_instruments.length || result.missing_instruments.some((instrument) => !missingInstrumentLabels.has(instrument))) throw new APIError(200, 'Invalid market refresh response: unknown missing instrument.')
-    for (const dependency of [...result.snapshot.missing_dependencies, ...result.snapshot.stale_dependencies, ...result.snapshot.future_dependencies, ...result.snapshot.invalid_dependencies]) {
-      const normalized = dependency.replace(/^(?:missing|stale|invalid)\s+/i, '')
+    const quoteWitnessByID = new Map(quoteWitnesses.map((observation) => [observation.id, observation]))
+    const fxWitnessByID = new Map(fxWitnesses.map((observation) => [observation.id, observation]))
+    const dependenciesByKind: Array<[string[], 'missing' | 'observed']> = [
+      [result.snapshot.missing_dependencies, 'missing'],
+      [result.snapshot.stale_dependencies, 'observed'],
+      [result.snapshot.future_dependencies, 'observed'],
+      [result.snapshot.invalid_dependencies, 'observed'],
+    ]
+    for (const [dependencies, identityKind] of dependenciesByKind) for (const dependency of dependencies) {
+      const normalized = dependency.replace(/^(?:missing|stale|future|invalid)\s+/i, '')
       const quote = normalized.match(/^quote:([A-Za-z0-9._~-]+)$/)
-      const fx = normalized.match(/^fx:([A-Z]{3})\/([A-Z]{3})$/)
-      if (quote && !instrumentIDs.has(quote[1])) throw new APIError(200, 'Invalid market refresh response: unknown dependency identity.')
-      if (fx && (!expectedFXCurrencies.has(fx[1]) || fx[2] !== result.snapshot.reporting_currency)) throw new APIError(200, 'Invalid market refresh response: unknown dependency currency.')
-      if (!quote && !fx && !/^(?:lot|cost):[A-Za-z0-9._~-]+(?::[A-Za-z0-9._~-]+)?$/.test(normalized)) throw new APIError(200, 'Invalid market refresh response: unknown dependency identity.')
+      const fx = normalized.match(/^fx:([A-Za-z0-9._~-]+)(?:\/([A-Z]{3}))?$/)
+      if (quote) {
+        if (identityKind === 'missing') {
+          if (!instrumentIDs.has(quote[1])) throw new APIError(200, 'Invalid market refresh response: unknown missing instrument dependency.')
+        } else {
+          const witness = quoteWitnessByID.get(quote[1])
+          if (!witness || !instrumentIDs.has(witness.instrument_id)) throw new APIError(200, 'Invalid market refresh response: unknown quote observation dependency.')
+        }
+      } else if (fx) {
+        if (identityKind === 'missing') {
+          if (!fx[2] || !expectedFXCurrencies.has(fx[1]) || fx[2] !== result.snapshot.reporting_currency) throw new APIError(200, 'Invalid market refresh response: unknown missing FX dependency.')
+        } else {
+          const witness = fxWitnessByID.get(fx[1])
+          if (!witness || !expectedFXCurrencies.has(witness.base_currency) || witness.quote_currency !== result.snapshot.reporting_currency) throw new APIError(200, 'Invalid market refresh response: unknown FX observation dependency.')
+        }
+      } else if (!/^(?:lot|cost):[A-Za-z0-9._~-]+(?::[A-Za-z0-9._~-]+)?$/.test(normalized)) {
+        throw new APIError(200, 'Invalid market refresh response: unknown dependency identity.')
+      }
     }
     if (result.complete && result.missing_instruments.length !== 0) throw new APIError(200, 'Invalid market refresh response: complete result has missing instruments.')
     if (result.complete && result.snapshot.quote_ids.length !== setup.instruments.length) throw new APIError(200, 'Invalid market refresh response: incomplete quote dependencies.')

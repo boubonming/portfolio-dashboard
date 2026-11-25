@@ -32,7 +32,7 @@ import {
   TrendingFlat,
   TrendingUp,
 } from '@mui/icons-material'
-import { apiFetch, APIError, getMarketDataSetup, jsonResponse, refreshMarketData, type MarketDataSetup } from './api'
+import { apiFetch, APIError, getMarketDataSetup, jsonResponse, refreshMarketData, type MarketDataSetup, type MarketRefreshResult } from './api'
 import ThesisEditor from './ThesisEditor'
 import Reviews, { type FeedbackAttemptStore } from './Reviews'
 import HoldingMutations, { validatePortfolioETag } from './HoldingMutations'
@@ -69,11 +69,11 @@ export type Holding = {
 
 export type AllocationCoverage = {
   total_lots: number
-  valued_lots: number
-  missing_dependencies: number
-  stale_dependencies: number
-  invalid_dependencies: number
-  future_dependencies?: number
+  valued_lots: number | undefined
+  missing_dependencies: number | undefined
+  stale_dependencies: number | undefined
+  invalid_dependencies: number | undefined
+  future_dependencies?: number | undefined
 }
 
 export type InstrumentAllocation = {
@@ -144,6 +144,185 @@ export type ActivityPage = {
 type SortKey = 'symbol' | 'quantity' | 'currency' | 'cost_basis' | 'latest_price' | 'latest_value' | 'unrealised_pnl' | 'reporting_value' | 'freshness'
 type SortDirection = 'ascending' | 'descending'
 type View = 'overview' | 'holdings' | 'market' | 'activity' | 'reviews' | 'settings'
+
+type RefreshAttempt = {
+  portfolioID: string
+  reportingCurrency: string
+  requestKey: string
+  setup: MarketDataSetup
+}
+
+type RefreshDetails = {
+  phase: 'confirmed' | 'uncertain'
+  portfolioID: string
+  reportingCurrency: string
+  requestKey: string
+  setup: MarketDataSetup
+  result?: MarketRefreshResult
+  readState: 'not_attempted' | 'loading' | 'ready' | 'error'
+}
+
+function providerDisplayName(provider: string) {
+  const names: Record<string, string> = {
+    alpha_vantage: 'Alpha Vantage',
+    coingecko: 'CoinGecko',
+    finnhub: 'Finnhub',
+    open_exchange_rates: 'Open Exchange Rates',
+  }
+  return names[provider] || 'Configured provider'
+}
+
+function refreshDependencyLabel(dependency: string, setup: MarketDataSetup, result?: MarketRefreshResult) {
+  const normalized = dependency.replace(/^(?:missing|stale|invalid|future)\s+/i, '')
+  const quote = normalized.match(/^quote:([A-Za-z0-9._~-]+)$/)
+  if (quote) {
+    const witness = result && [...result.refresh.quote_observations, ...result.snapshot.quote_observations].find((observation) => observation.id === quote[1])
+    const instrument = setup.instruments.find((candidate) => candidate.instrument_id === (witness?.instrument_id || quote[1]))
+    return instrument ? `${instrument.symbol} (${instrument.currency}) quote` : 'Unknown instrument dependency'
+  }
+  const fx = normalized.match(/^fx:([A-Za-z0-9._~-]+)(?:\/([A-Z]{3}))?$/)
+  if (fx) {
+    const witness = result && [...result.refresh.fx_observations, ...result.snapshot.fx_observations].find((observation) => observation.id === fx[1])
+    return witness ? `FX ${witness.base_currency} → ${witness.quote_currency}` : fx[2] ? `FX ${fx[1]} → ${fx[2]}` : 'Unknown FX dependency'
+  }
+  if (/^(?:lot|cost):[A-Za-z0-9._~-]+(?::[A-Za-z0-9._~-]+)?$/.test(normalized)) return 'Holding valuation dependency'
+  return 'Unknown dependency'
+}
+
+function safeRefreshFailure(reason: unknown) {
+  if (reason instanceof APIError) {
+    if (reason.status === 400) return 'Refresh request was not accepted. Check the reporting currency and mappings.'
+    if (reason.status === 403) return 'Refresh is not available for this portfolio.'
+    if (reason.status === 404) return 'The portfolio was not found. Check Holdings before trying again.'
+    if (reason.status === 409) return 'Another refresh is in progress or this refresh conflicts with an earlier attempt. Check Holdings and Activity before trying again.'
+    if (reason.status === 200) return 'Invalid market refresh response. The refresh result was not confirmed.'
+  }
+  return 'Provider request failed. The refresh result was not confirmed.'
+}
+
+function coverageCount(value: number | undefined) {
+  return value === undefined ? 'Unknown' : String(value)
+}
+
+const overviewDecimal = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/
+const overviewDate = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/
+
+function validOverviewDate(value: unknown) {
+  if (typeof value !== 'string') return false
+  const match = value.match(overviewDate)
+  if (!match || Number.isNaN(Date.parse(value))) return false
+  const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3])
+  return month >= 1 && month <= 12 && day >= 1 && day <= new Date(Date.UTC(year, month, 0)).getUTCDate() && Number(match[4]) <= 23 && Number(match[5]) <= 59 && Number(match[6]) <= 59
+}
+
+function validOverviewDecimal(value: unknown, allowNegative = false) {
+  return typeof value === 'string' && (allowNegative ? overviewDecimal.test(value) : /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value))
+}
+
+function validOverviewStringArray(value: unknown) {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.length > 0)
+}
+
+function validOverview(value: unknown): value is PortfolioOverview {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const overview = value as Partial<PortfolioOverview> & Record<string, unknown>
+  if (!overview.portfolio || typeof overview.portfolio !== 'object' || Array.isArray(overview.portfolio)) return false
+  const portfolio = overview.portfolio as Partial<PortfolioOverview['portfolio']>
+  if (!validPortfolioID(portfolio.id) || typeof portfolio.name !== 'string' || portfolio.name.length === 0 || typeof portfolio.default_reporting_currency !== 'string' || !/^[A-Z]{3}$/.test(portfolio.default_reporting_currency)) return false
+  if (typeof overview.reporting_currency !== 'string' || !overview.snapshot || typeof overview.snapshot !== 'object' || Array.isArray(overview.snapshot) || !Array.isArray(overview.holdings)) return false
+  if (!/^[A-Z]{3}$/.test(overview.reporting_currency)) return false
+  const snapshot = overview.snapshot as Partial<PortfolioOverview['snapshot']>
+  if (typeof snapshot.state !== 'string' || !['complete', 'incomplete', 'no_snapshot', 'stale'].includes(snapshot.state) || typeof snapshot.complete !== 'boolean' || !Array.isArray(snapshot.subtotals)) return false
+  if (snapshot.state === 'complete' && !snapshot.complete || snapshot.state === 'no_snapshot' && snapshot.complete) return false
+  if (snapshot.reporting_total !== undefined && !validOverviewDecimal(snapshot.reporting_total)) return false
+
+  for (const field of ['snapshot_id', 'calculation_version'] as const) if (snapshot[field] !== undefined && (typeof snapshot[field] !== 'string' || snapshot[field].length === 0)) return false
+  for (const field of ['created_at', 'as_of'] as const) if (snapshot[field] !== undefined && !validOverviewDate(snapshot[field])) return false
+  for (const field of ['missing_dependencies', 'stale_dependencies', 'future_dependencies', 'invalid_dependencies'] as const) {
+    if (snapshot[field] !== undefined && !validOverviewStringArray(snapshot[field])) return false
+  }
+  if (snapshot.subtotals.some((raw) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return true
+    const subtotal = raw as Record<string, unknown>
+    return typeof subtotal.currency !== 'string' || !/^[A-Z]{3}$/.test(subtotal.currency) || !validOverviewDecimal(subtotal.market_value) || (subtotal.cost_basis !== undefined && !validOverviewDecimal(subtotal.cost_basis)) || (subtotal.unrealised_pnl !== undefined && !validOverviewDecimal(subtotal.unrealised_pnl, true))
+  })) return false
+  if (overview.allocation !== undefined) {
+    if (!overview.allocation || typeof overview.allocation !== 'object' || Array.isArray(overview.allocation)) return false
+    const allocation = overview.allocation as Record<string, unknown>
+    if (!['complete', 'partial', 'unavailable'].includes(String(allocation.state)) || !allocation.coverage || typeof allocation.coverage !== 'object' || Array.isArray(allocation.coverage)) return false
+    const coverage = allocation.coverage as Record<string, unknown>
+    for (const field of ['total_lots', 'valued_lots', 'missing_dependencies', 'stale_dependencies', 'future_dependencies', 'invalid_dependencies']) if (coverage[field] !== undefined && (!Number.isSafeInteger(coverage[field]) || Number(coverage[field]) < 0)) return false
+    for (const field of ['by_instrument', 'by_source_currency'] as const) if (allocation[field] !== undefined && !Array.isArray(allocation[field])) return false
+    if (Array.isArray(allocation.by_instrument) && allocation.by_instrument.some((raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return true
+      const item = raw as Record<string, unknown>
+      return typeof item.symbol !== 'string' || item.symbol.length === 0 || (item.instrument_id !== undefined && !validPortfolioID(item.instrument_id)) || (item.source_currency !== undefined && !/^[A-Z]{3}$/.test(String(item.source_currency))) || !validOverviewDecimal(item.value) || !validOverviewDecimal(item.percentage)
+    })) return false
+    if (Array.isArray(allocation.by_source_currency) && allocation.by_source_currency.some((raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return true
+      const item = raw as Record<string, unknown>
+      return typeof item.currency !== 'string' || !/^[A-Z]{3}$/.test(item.currency) || !validOverviewDecimal(item.value) || !validOverviewDecimal(item.percentage)
+    })) return false
+  }
+  if (overview.holdings.some((raw) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return true
+    const holding = raw as Record<string, unknown>
+    const requiredStrings = ['lot_id', 'symbol', 'quantity', 'currency']
+    if (requiredStrings.some((field) => typeof holding[field] !== 'string' || String(holding[field]).length === 0) || !validOverviewDecimal(holding.quantity) || !/^[A-Z]{3}$/.test(String(holding.currency))) return true
+    if (!holding.freshness || typeof holding.freshness !== 'object' || Array.isArray(holding.freshness)) return true
+    const freshness = holding.freshness as Record<string, unknown>
+    if (!['fresh', 'stale', 'missing', 'future', 'invalid'].includes(String(freshness.status)) || (freshness.market_at !== undefined && !validOverviewDate(freshness.market_at)) || (freshness.age !== undefined && typeof freshness.age !== 'string')) return true
+    if (!Array.isArray(holding.data_quality) || !holding.data_quality.every((flag) => typeof flag === 'string')) return true
+    if (typeof holding.missing_broker !== 'boolean' || typeof holding.missing_acquisition_date !== 'boolean') return true
+    for (const field of ['unit_cost', 'cost_basis', 'latest_value', 'reporting_value'] as const) if (holding[field] !== undefined && !validOverviewDecimal(holding[field])) return true
+    if (holding.latest_price !== undefined && !validOverviewDecimal(holding.latest_price, true)) return true
+    if (holding.unrealised_pnl !== undefined && !validOverviewDecimal(holding.unrealised_pnl, true)) return true
+    for (const field of ['name', 'description', 'quote_source', 'broker', 'acquisition_date'] as const) if (holding[field] !== undefined && typeof holding[field] !== 'string') return true
+    return false
+  })) return false
+  return true
+}
+
+function RefreshDetailsPanel({ details, onRetryRead, onRetrySame, onOpenMarketData }: { details: RefreshDetails; onRetryRead: () => void; onRetrySame: () => void; onOpenMarketData: () => void }) {
+  const result = details.result
+  const setupMissing = details.setup.instruments.filter((instrument) => instrument.mappings.length === 0)
+  const dependencies = result ? [
+    ...(result.snapshot.missing_dependencies || []).map((dependency) => ({ kind: 'Missing', dependency })),
+    ...(result.snapshot.stale_dependencies || []).map((dependency) => ({ kind: 'Stale', dependency })),
+    ...(result.snapshot.future_dependencies || []).map((dependency) => ({ kind: 'Future-dated', dependency })),
+    ...(result.snapshot.invalid_dependencies || []).map((dependency) => ({ kind: 'Invalid', dependency })),
+  ] : []
+  return <section className="refresh-details" aria-labelledby="refresh-details-title">
+    <Typography component="h3" id="refresh-details-title" variant="h6">Refresh details</Typography>
+    {details.phase === 'uncertain' ? <>
+      <Typography component="p" className="notice warning" role="status">Refresh outcome not confirmed. Retry the same refresh; do not start another one yet.</Typography>
+      <Typography color="text.secondary">The original request identity is retained only in this authorized session. A retry uses the same reporting currency and request key; it does not start a second provider run.</Typography>
+      <Button type="button" onClick={onRetrySame}>Retry same refresh</Button>
+    </> : result ? <>
+      <Typography color="text.secondary">Snapshot as of {displayUTC(result.snapshot.as_of)} · Reporting in {result.snapshot.reporting_currency}</Typography>
+      <Typography role="status" className={`refresh-inline-status refresh-${result.complete ? 'complete' : 'incomplete'}`}>{details.readState === 'ready' ? (result.complete ? 'Complete valuation loaded.' : 'Usable per-lot values loaded; total and allocation remain withheld.') : details.readState === 'loading' ? 'Refresh confirmed; Holdings is still loading. Values are not yet available.' : 'Refresh confirmed; Holdings values are not currently loaded.'}</Typography>
+      {details.readState === 'error' && <Box className="notice error" role="alert"><Typography>Prices refreshed, but Holdings could not be reloaded. Do not repeat this refresh.</Typography><Button type="button" onClick={onRetryRead}>Retry loading Holdings</Button></Box>}
+      {setupMissing.length > 0 && <Box><Typography component="h4" variant="subtitle1">Mapping correction needed</Typography><Typography>These setup instruments have no confirmed mapping:</Typography><ul>{setupMissing.map((instrument) => <li key={instrument.instrument_id}>{instrument.symbol} ({instrument.currency})</li>)}</ul></Box>}
+      <Box><Typography component="h4" variant="subtitle1">Provider coverage</Typography><ul>{details.setup.providers.map((provider) => {
+        const outcome = result.refresh.providers.find((candidate) => candidate.provider === provider.name)
+        const configured = provider.configured ? 'Configured for access' : 'Not configured'
+        const coverage = outcome?.status === 'complete' && outcome.request_count > 0 && outcome.succeeded_count > 0 ? 'usable coverage confirmed' : outcome && outcome.request_count > 0 ? 'usable coverage incomplete' : 'no usable coverage attempted'
+        return <li key={provider.name}>{providerDisplayName(provider.name)}: {configured}; {coverage}</li>
+      })}</ul></Box>
+      {dependencies.length > 0 && <Box><Typography component="h4" variant="subtitle1">Dependencies needing attention</Typography><ul>{dependencies.map(({ kind, dependency }, index) => <li key={`${kind}-${dependency}-${index}`}>{kind}: {refreshDependencyLabel(dependency, details.setup, result)}</li>)}</ul></Box>}
+      {result.refresh.providers.some((provider) => provider.failed_count > 0 || provider.errors.length > 0) && <Typography color="text.secondary">One or more provider requests failed. Remote diagnostics are not shown here.</Typography>}
+      {(!result.complete || setupMissing.length > 0 || dependencies.length > 0) && <Button type="button" onClick={onOpenMarketData}>Open Market Data to correct mappings</Button>}
+    </> : null}
+  </section>
+}
+
+function OverviewActions({ onHoldings, onMarketData, onCurrency }: { onHoldings: () => void; onMarketData: () => void; onCurrency: () => void }) {
+  return <Stack className="overview-actions" direction={{ xs: 'column', sm: 'row' }} spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+    <Button type="button" onClick={onHoldings}>View holdings</Button>
+    <Button type="button" onClick={onMarketData}>Open Market Data</Button>
+    <Button type="button" onClick={onCurrency}>Change reporting currency in Holdings</Button>
+  </Stack>
+}
 
 function incrementDecimalDigits(value: string) {
   const digits = value.split('')
@@ -351,11 +530,11 @@ function CoveragePanel({ allocation, unavailable }: { allocation: Allocation; un
           <h2 id="allocation-coverage-title">Allocation percentages withheld</h2>
           <p>Allocation visuals are unavailable until every holding has a valid reporting value. Partial values are not presented as the whole portfolio.</p>
           <dl className="coverage-grid">
-            <div><dt>Valued lots</dt><dd>{coverage.valued_lots} / {coverage.total_lots}</dd></div>
-            <div><dt>Missing dependencies</dt><dd>{coverage.missing_dependencies}</dd></div>
-            <div><dt>Stale dependencies</dt><dd>{coverage.stale_dependencies}</dd></div>
-            <div><dt>Future dependencies</dt><dd>{coverage.future_dependencies || 0}</dd></div>
-            <div><dt>Invalid dependencies</dt><dd>{coverage.invalid_dependencies}</dd></div>
+            <div><dt>Valued lots</dt><dd>{coverage.valued_lots === undefined ? 'Unknown' : `${coverage.valued_lots} / ${coverage.total_lots}`}</dd></div>
+            <div><dt>Missing dependencies</dt><dd>{coverageCount(coverage.missing_dependencies)}</dd></div>
+            <div><dt>Stale dependencies</dt><dd>{coverageCount(coverage.stale_dependencies)}</dd></div>
+            <div><dt>Future-dated dependencies</dt><dd>{coverageCount(coverage.future_dependencies)}</dd></div>
+            <div><dt>Invalid dependencies</dt><dd>{coverageCount(coverage.invalid_dependencies)}</dd></div>
           </dl>
         </>
       )}
@@ -385,7 +564,7 @@ function AllocationBars({ title, items, label }: { title: string; items: Array<{
 function AllocationSection({ data }: { data: PortfolioOverview }) {
   const allocation: Allocation = data.allocation || {
     state: data.snapshot.state === 'no_snapshot' ? 'unavailable' : 'partial',
-    coverage: { total_lots: data.holdings.length, valued_lots: data.holdings.filter((holding) => holding.reporting_value !== undefined).length, missing_dependencies: 0, stale_dependencies: 0, invalid_dependencies: 0 },
+    coverage: { total_lots: data.holdings.length, valued_lots: undefined, missing_dependencies: undefined, stale_dependencies: undefined, invalid_dependencies: undefined, future_dependencies: undefined },
     by_instrument: [],
     by_source_currency: [],
   }
@@ -542,6 +721,8 @@ export default function App() {
   const [refreshState, setRefreshState] = useState<'idle' | 'loading' | 'complete' | 'incomplete' | 'error'>('idle')
   const [refreshError, setRefreshError] = useState('')
   const [refreshAnnouncement, setRefreshAnnouncement] = useState('')
+  const [refreshDetails, setRefreshDetails] = useState<RefreshDetails | null>(null)
+  const [refreshDetailsOpen, setRefreshDetailsOpen] = useState(false)
   const [authError, setAuthError] = useState('')
   const [memoryBoundaryNotice, setMemoryBoundaryNotice] = useState('')
   const [thesisNavigationRequest, setThesisNavigationRequest] = useState<{ target: View; token: number; sessionKey: number } | undefined>(undefined)
@@ -558,6 +739,12 @@ export default function App() {
   const activityControllerRef = useRef<AbortController | null>(null)
   const exportControllerRef = useRef<AbortController | null>(null)
   const refreshControllerRef = useRef<AbortController | null>(null)
+  const refreshAttemptRef = useRef<RefreshAttempt | null>(null)
+  const refreshDetailsRef = useRef<RefreshDetails | null>(null)
+  const refreshReadGenerationRef = useRef(0)
+  const activePortfolioIDRef = useRef<string | undefined>(undefined)
+  const activeCurrencyRef = useRef('MYR')
+  const currencySelectRef = useRef<HTMLSelectElement>(null)
   const activityLoadMoreRef = useRef<HTMLButtonElement>(null)
   const activityStatusRef = useRef<HTMLParagraphElement>(null)
   const thesisReturnRef = useRef<HTMLButtonElement>(null)
@@ -567,6 +754,8 @@ export default function App() {
   const filterRef = useRef<HTMLInputElement>(null)
   const activityLoadingMoreRef = useRef(false)
   const activityItemsRef = useRef<ActivityItem[]>([])
+  activePortfolioIDRef.current = currentPortfolioID(data) || undefined
+  activeCurrencyRef.current = currency
   const authGeneration = useRef(0)
   const loadGeneration = useRef(0)
   const activityGeneration = useRef(0)
@@ -576,6 +765,7 @@ export default function App() {
   const feedbackAttemptsRef = useRef<FeedbackAttemptStore>(new Map())
   const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mutationSessionGeneration = authGeneration.current
+  refreshDetailsRef.current = refreshDetails
 
   const clearPrivateState = useCallback(() => {
     authGeneration.current += 1
@@ -583,6 +773,7 @@ export default function App() {
     activityGeneration.current += 1
     exportGeneration.current += 1
     refreshGeneration.current += 1
+    refreshReadGenerationRef.current += 1
     authControllerRef.current?.abort()
     authControllerRef.current = null
     loadControllerRef.current?.abort()
@@ -593,6 +784,7 @@ export default function App() {
     exportControllerRef.current = null
     refreshControllerRef.current?.abort()
     refreshControllerRef.current = null
+    refreshAttemptRef.current = null
     refreshingRef.current = false
     if (expiryTimerRef.current) { clearTimeout(expiryTimerRef.current); expiryTimerRef.current = null }
     csrfToken.current = undefined
@@ -602,7 +794,7 @@ export default function App() {
     thesisNavigationTokenRef.current += 1
     setThesisNavigationRequest(undefined)
     setMarketNavigationRequest(undefined); setMarketWorkflow({ dirty: false, pending: false, uncertain: false })
-    setData(null); setOverviewETag(undefined); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setRefreshError(''); setRefreshAnnouncement(''); setRefreshState('idle'); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
+    setData(null); setOverviewETag(undefined); setThesisHolding(null); setActivity(null); setReviewsHoldingId(undefined); setError(''); setExportError(''); setExportAnnouncement(''); setExportState('idle'); setRefreshError(''); setRefreshAnnouncement(''); setRefreshState('idle'); setRefreshDetails(null); setRefreshDetailsOpen(false); setActivityError(''); setActivityAppendError(''); setActivityAnnouncement(''); setActivityLoadingMore(false); setState('loading'); setActivityState('loading')
   }, [])
 
   const scheduleExpiry = useCallback((expiresAt: string, generation: number, controller: AbortController) => {
@@ -624,6 +816,7 @@ export default function App() {
   const load = useCallback((rethrow = false): Promise<string | void> => {
     if (authState !== 'authenticated') return Promise.resolve(undefined)
     const authGenerationAtStart = authGeneration.current
+    const portfolioIDAtStart = activePortfolioIDRef.current
     const generation = ++loadGeneration.current
     loadControllerRef.current?.abort()
     const controller = new AbortController()
@@ -635,7 +828,8 @@ export default function App() {
       .then(async (response) => ({ overview: await jsonResponse<PortfolioOverview>(response), etag: response.headers?.get?.('ETag') || undefined }))
       .then(({ overview, etag }) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== loadGeneration.current) return
-        if (!currentPortfolioID(overview)) throw new Error('Invalid portfolio overview')
+        if (!validOverview(overview)) throw new APIError(200, 'Invalid portfolio overview')
+        if (!currentPortfolioID(overview) || (portfolioIDAtStart !== undefined && overview.portfolio.id !== portfolioIDAtStart) || overview.reporting_currency !== currency.toUpperCase()) throw new APIError(200, 'Invalid portfolio overview: stale portfolio scope.')
         setData(overview)
         setOverviewETag(validatePortfolioETag(etag, overview.portfolio.id) === null ? undefined : etag)
         setState('ready')
@@ -644,7 +838,7 @@ export default function App() {
       .catch((reason: unknown) => {
         if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== loadGeneration.current) return
         if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); if (rethrow) throw reason; return }
-        setError(reason instanceof Error ? reason.message : 'Unable to load the portfolio')
+        setError('Unable to load the portfolio. Try again.')
         setState('error')
         if (rethrow) throw reason
       })
@@ -655,8 +849,70 @@ export default function App() {
     return load(true).then((etag) => authGeneration.current === mutationSessionGeneration && authState === 'authenticated' ? etag : undefined)
   }, [authState, load, mutationSessionGeneration])
 
+  const runRefreshAttempt = useCallback(async (attempt: RefreshAttempt, suppliedController?: AbortController, suppliedGeneration?: number, suppliedAuthGeneration?: number) => {
+    if (authState !== 'authenticated' || (refreshingRef.current && !suppliedController)) return
+    const authGenerationAtStart = suppliedAuthGeneration ?? authGeneration.current
+    const generation = suppliedGeneration ?? ++refreshGeneration.current
+    const controller = suppliedController || new AbortController()
+    if (!suppliedController) {
+      refreshControllerRef.current?.abort()
+      refreshControllerRef.current = controller
+      refreshingRef.current = true
+    }
+    setRefreshState('loading')
+    setRefreshError('')
+    setRefreshAnnouncement('Refreshing prices and creating an immutable snapshot…')
+    try {
+      const result = await refreshMarketData(attempt.portfolioID, attempt.reportingCurrency, attempt.requestKey, csrfToken.current, controller.signal, attempt.setup)
+      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || activePortfolioIDRef.current !== attempt.portfolioID || activeCurrencyRef.current !== attempt.reportingCurrency) return
+      if (result.refresh.portfolio_id !== attempt.portfolioID || result.snapshot.portfolio_id !== attempt.portfolioID || result.snapshot.reporting_currency !== attempt.reportingCurrency.toUpperCase()) throw new APIError(200, 'Invalid market refresh response: stale portfolio scope.')
+      refreshAttemptRef.current = null
+      setRefreshDetails({ phase: 'confirmed', portfolioID: attempt.portfolioID, reportingCurrency: attempt.reportingCurrency, requestKey: attempt.requestKey, setup: attempt.setup, result, readState: 'loading' })
+      setRefreshState(result.complete ? 'complete' : 'incomplete')
+      setRefreshAnnouncement(result.complete ? 'Prices refreshed. Confirmation received; Holdings is loading.' : 'Prices refreshed. Confirmation received; valuation is incomplete and Holdings is loading; totals remain withheld.')
+      const readGeneration = loadGeneration.current + 1
+      try {
+        await load(true)
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || readGeneration !== loadGeneration.current || activePortfolioIDRef.current !== attempt.portfolioID || activeCurrencyRef.current !== attempt.reportingCurrency) return
+        setRefreshDetails((current) => current?.requestKey === attempt.requestKey ? { ...current, readState: 'ready' } : current)
+        setRefreshAnnouncement(result.complete ? 'Prices refreshed. Complete valuation loaded.' : 'Prices refreshed. Valuation is incomplete; usable per-lot values were loaded and totals remain withheld.')
+      } catch (reason) {
+        if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || readGeneration !== loadGeneration.current || activePortfolioIDRef.current !== attempt.portfolioID || activeCurrencyRef.current !== attempt.reportingCurrency) return
+        if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+        setRefreshDetails((current) => current?.requestKey === attempt.requestKey ? { ...current, readState: 'error' } : current)
+        setRefreshError('Prices refreshed, but Holdings could not be reloaded. Retry loading Holdings; do not repeat this refresh.')
+        setRefreshAnnouncement('Prices refreshed, but Holdings could not be reloaded. The refresh was not repeated.')
+      }
+    } catch (reason) {
+      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || activePortfolioIDRef.current !== attempt.portfolioID || activeCurrencyRef.current !== attempt.reportingCurrency) return
+      if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+      const definitive = reason instanceof APIError && [400, 403, 404, 409].includes(reason.status)
+      if (definitive) {
+        refreshAttemptRef.current = null
+        setRefreshDetails(null)
+        setRefreshDetailsOpen(false)
+        setRefreshState('error')
+        setRefreshError(safeRefreshFailure(reason))
+        setRefreshAnnouncement('Price refresh was not started or confirmed. No retryable provider attempt is retained.')
+      } else {
+        refreshAttemptRef.current = attempt
+        setRefreshDetails({ phase: 'uncertain', portfolioID: attempt.portfolioID, reportingCurrency: attempt.reportingCurrency, requestKey: attempt.requestKey, setup: attempt.setup, readState: 'not_attempted' })
+        setRefreshDetailsOpen(true)
+        setRefreshState('error')
+        setRefreshError(safeRefreshFailure(reason))
+        setRefreshAnnouncement('Refresh outcome not confirmed. Retry the same refresh before starting another one.')
+      }
+    } finally {
+      if (generation === refreshGeneration.current) refreshingRef.current = false
+      if (refreshControllerRef.current === controller) refreshControllerRef.current = null
+    }
+  }, [authState, clearPrivateState, load])
+
   const refreshPrices = useCallback(async () => {
-    if (authState !== 'authenticated' || refreshingRef.current) return
+    if (authState !== 'authenticated' || refreshingRef.current || refreshAttemptRef.current || (refreshDetails?.phase === 'confirmed' && refreshDetails.readState !== 'ready')) {
+      if (refreshDetails?.phase === 'confirmed' && refreshDetails.readState !== 'ready') setRefreshDetailsOpen(true)
+      return
+    }
     const portfolioID = currentPortfolioID(data)
     if (!portfolioID) {
       setRefreshState('error')
@@ -672,32 +928,58 @@ export default function App() {
     refreshingRef.current = true
     setRefreshState('loading')
     setRefreshError('')
-    setRefreshAnnouncement('Refreshing prices and creating an immutable snapshot…')
+    setRefreshAnnouncement('Loading validated market-data setup…')
     try {
-      const setup: MarketDataSetup = await getMarketDataSetup(portfolioID, controller.signal)
-      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || currentPortfolioID(data) !== portfolioID || currency !== data?.reporting_currency) return
-      if (setup.portfolio_id !== portfolioID) throw new APIError(200, 'Invalid market-data setup response: stale portfolio scope.')
-      const result = await refreshMarketData(portfolioID, currency, newRefreshRequestKey(), csrfToken.current, controller.signal, setup)
-      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || currentPortfolioID(data) !== portfolioID || currency !== data?.reporting_currency) return
-      if (result.refresh.portfolio_id !== portfolioID || result.snapshot.portfolio_id !== portfolioID || result.snapshot.reporting_currency !== currency.toUpperCase()) throw new APIError(200, 'Invalid market refresh response: stale portfolio scope.')
-      // Reload for incomplete responses too: source-currency lot valuations can
-      // be exact even when reporting-currency totals remain withheld.
-      await load(true)
-      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || currentPortfolioID(data) !== portfolioID || currency !== data?.reporting_currency) return
-      setRefreshState(result.complete ? 'complete' : 'incomplete')
-      setRefreshAnnouncement(result.complete ? 'Prices refreshed. Complete valuation loaded.' : 'Prices refreshed. Valuation is incomplete; usable per-lot values were loaded and totals remain withheld.')
-      if (result.missing_instruments.length) setRefreshError(`Missing exact mappings: ${result.missing_instruments.join(', ')}`)
+      const setup = await getMarketDataSetup(portfolioID, controller.signal)
+      if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current || activePortfolioIDRef.current !== portfolioID || activeCurrencyRef.current !== currency) return
+      const attempt = { portfolioID, reportingCurrency: currency, requestKey: newRefreshRequestKey(), setup }
+      refreshAttemptRef.current = attempt
+      await runRefreshAttempt(attempt, controller, generation, authGenerationAtStart)
     } catch (reason) {
       if (controller.signal.aborted || authGenerationAtStart !== authGeneration.current || generation !== refreshGeneration.current) return
       if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+      const setupFailure = reason instanceof APIError && reason.status === 200 && /stale portfolio scope/i.test(reason.message)
+        ? 'Market-data setup has a stale portfolio scope. No refresh was started.'
+        : reason instanceof APIError && reason.status === 403
+          ? 'Refresh is not available for this portfolio. No provider request was started.'
+          : 'Market-data setup could not be loaded. No refresh was started.'
       setRefreshState('error')
-      setRefreshError(reason instanceof Error ? reason.message : 'Unable to refresh prices')
-      setRefreshAnnouncement('Price refresh failed.')
+      setRefreshError(setupFailure)
+      setRefreshAnnouncement('Price refresh failed before the provider request started.')
+      refreshAttemptRef.current = null
+      setRefreshDetails(null)
+      setRefreshDetailsOpen(false)
     } finally {
-      if (generation === refreshGeneration.current) { refreshingRef.current = false; setRefreshState((current) => current === 'loading' ? 'error' : current) }
+      if (generation === refreshGeneration.current) refreshingRef.current = false
       if (refreshControllerRef.current === controller) refreshControllerRef.current = null
     }
-  }, [authState, clearPrivateState, currency, data, load])
+  }, [authState, clearPrivateState, currency, data, refreshDetails, runRefreshAttempt])
+
+  const retrySameRefresh = useCallback(() => {
+    const attempt = refreshAttemptRef.current
+    if (attempt && !refreshingRef.current && attempt.reportingCurrency === activeCurrencyRef.current) void runRefreshAttempt(attempt)
+  }, [runRefreshAttempt])
+
+  const retryRefreshRead = useCallback(async () => {
+    const details = refreshDetails
+    if (!details || details.phase !== 'confirmed' || details.readState === 'loading' || details.portfolioID !== activePortfolioIDRef.current || details.reportingCurrency !== activeCurrencyRef.current) return
+    const authGenerationAtStart = authGeneration.current
+    const readGeneration = ++refreshReadGenerationRef.current
+    setRefreshDetails({ ...details, readState: 'loading' })
+    setRefreshError('')
+    try {
+      await load(true)
+      if (authGenerationAtStart !== authGeneration.current || readGeneration !== refreshReadGenerationRef.current || details.portfolioID !== activePortfolioIDRef.current || details.reportingCurrency !== activeCurrencyRef.current) return
+      setRefreshDetails((current) => current?.requestKey === details.requestKey ? { ...current, readState: 'ready' } : current)
+      setRefreshError('')
+      setRefreshAnnouncement('Holdings loaded from the confirmed snapshot. No refresh was repeated.')
+    } catch (reason) {
+      if (authGenerationAtStart !== authGeneration.current || readGeneration !== refreshReadGenerationRef.current || details.portfolioID !== activePortfolioIDRef.current || details.reportingCurrency !== activeCurrencyRef.current) return
+      if (reason instanceof APIError && reason.status === 401) { clearPrivateState(); setAuthState('login'); return }
+      setRefreshDetails((current) => current?.requestKey === details.requestKey ? { ...current, readState: 'error' } : current)
+      setRefreshError('Holdings could not be reloaded. Retry the read; do not repeat this refresh.')
+    }
+  }, [clearPrivateState, load, refreshDetails])
 
   const downloadCSV = useCallback(() => {
     if (authState !== 'authenticated' || exportState === 'loading') return
@@ -760,16 +1042,72 @@ export default function App() {
   }, [currency, view])
 
   useEffect(() => {
-    if (refreshingRef.current) {
+    const attempt = refreshAttemptRef.current
+    const details = refreshDetailsRef.current
+    const interrupted = refreshingRef.current || refreshControllerRef.current !== null
+    if (interrupted) {
       refreshGeneration.current += 1
       refreshControllerRef.current?.abort()
       refreshControllerRef.current = null
       refreshingRef.current = false
+      if (attempt) {
+        setRefreshDetails({ phase: 'uncertain', portfolioID: attempt.portfolioID, reportingCurrency: attempt.reportingCurrency, requestKey: attempt.requestKey, setup: attempt.setup, readState: 'not_attempted' })
+        setRefreshDetailsOpen(true)
+        setRefreshState('error')
+        setRefreshError(`Reporting currency changed to ${currency}. Return to ${attempt.reportingCurrency} to retry the same refresh; no new refresh is allowed while its outcome is unresolved.`)
+        setRefreshAnnouncement('The unresolved refresh was stopped safely. Return to its original reporting currency to retry the same request.')
+      } else if (details?.phase === 'confirmed') {
+        if (details.readState === 'loading') refreshReadGenerationRef.current += 1
+        setRefreshDetails({ ...details, readState: details.readState === 'loading' ? 'error' : details.readState })
+        setRefreshDetailsOpen(true)
+        setRefreshState(details.result?.complete ? 'complete' : 'incomplete')
+        setRefreshError(`Confirmed refresh for ${details.reportingCurrency} is retained. Reporting currency changed to ${currency}; retry Holdings loading only after returning to ${details.reportingCurrency}. No refresh was repeated.`)
+        setRefreshAnnouncement('The confirmed refresh receipt was retained while the Holdings read was canceled safely.')
+      } else {
+        refreshAttemptRef.current = null
+        setRefreshDetails(null)
+        setRefreshDetailsOpen(false)
+        setRefreshState('error')
+        setRefreshError(`Reporting currency changed to ${currency} while market-data setup was loading. Setup was canceled before a provider request; no refresh was started.`)
+        setRefreshAnnouncement('The market-data setup request was canceled safely; no provider request was started.')
+      }
+      return
     }
+    if (attempt) {
+      setRefreshDetails({ phase: 'uncertain', portfolioID: attempt.portfolioID, reportingCurrency: attempt.reportingCurrency, requestKey: attempt.requestKey, setup: attempt.setup, readState: 'not_attempted' })
+      setRefreshDetailsOpen(true)
+      setRefreshState('error')
+      setRefreshError(`Reporting currency changed to ${currency}. Return to ${attempt.reportingCurrency} to retry the same refresh; no new refresh is allowed while its outcome is unresolved.`)
+      setRefreshAnnouncement('The unresolved refresh remains retained; no new refresh is allowed until its original currency is restored.')
+      return
+    }
+    if (details?.phase === 'confirmed' && details.readState === 'loading' && details.reportingCurrency !== currency) {
+      refreshReadGenerationRef.current += 1
+      loadGeneration.current += 1
+      loadControllerRef.current?.abort()
+      loadControllerRef.current = null
+      setRefreshDetails({ ...details, readState: 'error' })
+      setRefreshDetailsOpen(true)
+      setRefreshState(details.result?.complete ? 'complete' : 'incomplete')
+      setRefreshError(`Confirmed refresh for ${details.reportingCurrency} is retained. Reporting currency changed to ${currency}; retry Holdings loading only after returning to ${details.reportingCurrency}. No refresh was repeated.`)
+      setRefreshAnnouncement('The confirmed refresh receipt was retained while the Holdings read was canceled safely.')
+      return
+    }
+    if (details?.phase === 'confirmed') {
+      setRefreshDetails(details)
+      if (details.reportingCurrency !== currency && details.readState !== 'ready') {
+        setRefreshState(details.result?.complete ? 'complete' : 'incomplete')
+        setRefreshError(`Confirmed refresh for ${details.reportingCurrency} is retained. Reporting currency changed to ${currency}; retry Holdings loading only after returning to ${details.reportingCurrency}. No refresh was repeated.`)
+        setRefreshAnnouncement('The confirmed refresh receipt was retained while the Holdings read was canceled safely.')
+      }
+      return
+    }
+    setRefreshDetails(null)
+    setRefreshDetailsOpen(false)
     setRefreshState('idle')
     setRefreshError('')
     setRefreshAnnouncement('')
-  }, [currency, view])
+  }, [currency])
 
   useEffect(() => () => {
     exportGeneration.current += 1
@@ -1042,9 +1380,12 @@ export default function App() {
   )
 
   const reportingCurrency = data?.reporting_currency || currency
+  const refreshReadRecovery = refreshDetails?.phase === 'confirmed' && refreshDetails.readState === 'error'
+  const refreshReadPending = refreshDetails?.phase === 'confirmed' && refreshDetails.readState === 'loading'
+  const refreshReadScopeAllowed = refreshDetails?.reportingCurrency === currency
   const snapshotComplete = Boolean(data?.snapshot.complete && data.snapshot.state === 'complete')
   const snapshotCurrent = data?.snapshot.state !== 'stale'
-
+  const overviewTotalAvailable = Boolean(data && snapshotComplete && data.snapshot.reporting_total !== undefined && (data.holdings.length === 0 || compareDecimalStrings(data.snapshot.reporting_total, '0') !== 0))
   if (authState === 'login') return <Login onLogin={signIn} onRetrySessionCheck={checkSession} externalError={authError} memoryBoundaryNotice={memoryBoundaryNotice} />
   if (authState === 'checking') return <Box component="main" className="shell" aria-busy="true"><Paper className="notice" role="status" aria-live="polite" sx={{ mt: 3, p: 3 }}><Typography component="h1" variant="h4">Checking your session…</Typography><Typography>Loading portfolio securely.</Typography></Paper></Box>
 
@@ -1085,13 +1426,15 @@ export default function App() {
       {(view === 'overview' || view === 'holdings') && <>
       {view === 'holdings' && <Paper component="section" className="toolbar" aria-label="Portfolio controls" variant="outlined" sx={{ mt: 3, p: { xs: 1.5, sm: 2 }, borderColor: 'divider' }}>
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} useFlexGap sx={{ flexWrap: 'wrap', alignItems: { xs: 'stretch', md: 'center' } }}>
-          <FormControl size="small" sx={{ minWidth: 170 }}><InputLabel id="currency-label">Reporting currency</InputLabel><Select native labelId="currency-label" id="currency" inputProps={{ 'aria-label': 'Reporting currency' }} value={currency} label="Reporting currency" onChange={(event) => setCurrency(event.target.value)}><option value="MYR">MYR</option><option value="USD">USD</option><option value="SGD">SGD</option><option value="JPY">JPY</option></Select></FormControl>
+          <FormControl size="small" sx={{ minWidth: 170 }}><InputLabel id="currency-label">Reporting currency</InputLabel><Select native inputRef={currencySelectRef} labelId="currency-label" id="currency" inputProps={{ 'aria-label': 'Reporting currency' }} value={currency} label="Reporting currency" onChange={(event) => setCurrency(event.target.value)}><option value="MYR">MYR</option><option value="USD">USD</option><option value="SGD">SGD</option><option value="JPY">JPY</option></Select></FormControl>
           <TextField inputRef={filterRef} id="filter" label="Filter holdings" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Symbol, currency or flag" size="small" sx={{ minWidth: { md: 250 }, flex: 1 }} />
-          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}><Button type="button" onClick={downloadCSV} disabled={exportState === 'loading'} aria-busy={exportState === 'loading'} startIcon={<Download aria-hidden="true" />}>{exportState === 'loading' ? 'Downloading CSV…' : 'Download CSV'}</Button><Button type="button" onClick={refreshPrices} disabled={refreshState === 'loading'} aria-busy={refreshState === 'loading'} startIcon={<Refresh aria-hidden="true" />}>{refreshState === 'loading' ? 'Refreshing prices…' : 'Refresh prices'}</Button><Button type="button" onClick={() => setExactAmounts((current) => !current)} aria-pressed={exactAmounts}>{exactAmounts ? 'Use compact amounts' : 'Show exact amounts'}</Button></Stack>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}><Button type="button" onClick={downloadCSV} disabled={exportState === 'loading'} aria-busy={exportState === 'loading'} startIcon={<Download aria-hidden="true" />}>{exportState === 'loading' ? 'Downloading CSV…' : 'Download CSV'}</Button><Button type="button" onClick={refreshReadRecovery ? retryRefreshRead : refreshDetails?.phase === 'uncertain' ? retrySameRefresh : refreshPrices} disabled={refreshState === 'loading' || refreshReadPending || (refreshReadRecovery && !refreshReadScopeAllowed)} aria-busy={refreshState === 'loading' || refreshReadPending} startIcon={<Refresh aria-hidden="true" />}>{refreshState === 'loading' ? 'Refreshing prices…' : refreshReadPending ? 'Loading Holdings…' : refreshReadRecovery ? 'Retry loading Holdings' : refreshDetails?.phase === 'uncertain' ? 'Retry same refresh' : 'Refresh prices'}</Button><Button type="button" onClick={() => setExactAmounts((current) => !current)} aria-pressed={exactAmounts}>{exactAmounts ? 'Use compact amounts' : 'Show exact amounts'}</Button></Stack>
           <Typography className="amount-display-help" color="text.secondary">Compact amounts are rounded to two decimals. Price direction compares with recorded cost, not daily return.</Typography>
           {exportError && <Box className="notice error" role="alert">{exportError} <Button type="button" onClick={downloadCSV} size="small">Retry download</Button></Box>}
           {refreshAnnouncement && <Box component="span" className={`refresh-inline-status refresh-${refreshState}`} role="status" aria-live="polite">{refreshAnnouncement}</Box>}
           {refreshError && <Box component="span" className="notice error" role={refreshState === 'error' ? 'alert' : 'status'}>{refreshError}</Box>}
+          {refreshDetails && !refreshDetailsOpen && <Button type="button" onClick={() => setRefreshDetailsOpen(true)} aria-expanded="false">View refresh details</Button>}
+          {refreshDetails && refreshDetailsOpen && <><Button type="button" onClick={() => setRefreshDetailsOpen(false)} aria-expanded="true">Hide refresh details</Button><RefreshDetailsPanel details={refreshDetails} onRetryRead={retryRefreshRead} onRetrySame={retrySameRefresh} onOpenMarketData={() => requestViewChange('market')} /></>}
           <span className="visually-hidden" role="status" aria-live="polite">{exportAnnouncement}</span>
         </Stack>
       </Paper>}
@@ -1104,15 +1447,16 @@ export default function App() {
         <>
           {view === 'holdings' && <ValuationContext data={data} selectedCurrency={currency} />}
           {view === 'overview' && <Card component="section" className="overview" aria-labelledby="overview-title" variant="outlined" sx={{ mt: 3, borderColor: 'divider' }}><CardContent sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: '2fr 1fr 1fr' }, alignItems: 'center', p: { xs: 2, sm: 2.5 } }}>
-            <Box><Typography component="span" className="eyebrow">Overview</Typography><Typography component="h2" id="overview-title" variant="h4" sx={{ mt: .5 }}>{data.portfolio.name}</Typography><Typography color="text.secondary">Reporting in {data.reporting_currency}</Typography></Box>
-            <Chip className={`state-pill state-${data.snapshot.state}`} label={data.snapshot.state === 'complete' ? 'Complete valuation' : data.snapshot.state === 'incomplete' || data.snapshot.state === 'stale' ? 'Incomplete valuation' : 'No snapshot'} sx={{ justifySelf: { md: 'start' } }} />
-            {snapshotComplete && data.snapshot.reporting_total && <Box className="total"><Typography color="text.secondary">Reporting total</Typography><Typography component="strong" variant="h5">{data.snapshot.reporting_total} {data.reporting_currency}</Typography></Box>}
+            <Box><Typography component="span" className="eyebrow">Overview</Typography><Typography component="h2" id="overview-title" tabIndex={-1} variant="h4" sx={{ mt: .5 }}>{data.portfolio.name}</Typography><Typography color="text.secondary">Reporting in {data.reporting_currency}</Typography></Box>
+            <Chip className={`state-pill state-${data.snapshot.state}`} label={data.snapshot.state === 'complete' ? 'Complete valuation' : data.snapshot.state === 'incomplete' || data.snapshot.state === 'stale' ? 'Incomplete valuation' : data.snapshot.state === 'legacy' ? 'Legacy valuation' : 'No snapshot'} sx={{ justifySelf: { md: 'start' } }} />
+            {overviewTotalAvailable && <Box className="total"><Typography color="text.secondary">Reporting total</Typography><Typography component="strong" variant="h5">{data.snapshot.reporting_total} {data.reporting_currency}</Typography></Box>}
             <Box component="dl" className="snapshot-meta" sx={{ m: 0, pl: { md: 2 }, borderLeft: { md: 1 }, borderColor: 'divider' }}><Box><Typography component="dt" variant="caption" color="text.secondary">Snapshot as-of</Typography><Typography component="dd" sx={{ m: 0, mt: .25 }}>{displayDate(data.snapshot.as_of)}</Typography></Box><Box sx={{ mt: 1 }}><Typography component="dt" variant="caption" color="text.secondary">Version</Typography><Typography component="dd" sx={{ m: 0, mt: .25, overflowWrap: 'anywhere' }}>{data.snapshot.calculation_version || 'Not available'}</Typography></Box></Box>
           </CardContent></Card>}
 
-          {view === 'overview' && data.snapshot.state === 'no_snapshot' && <Paper className="notice" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">No immutable snapshot yet</Typography><Typography>A snapshot is a frozen point-in-time valuation calculated from the current holdings plus dated quotes and FX rates. It does not place trades or change holdings. Earnings, value and allocation are withheld until the required market inputs exist and a snapshot is created.</Typography></Paper>}
-          {view === 'overview' && data.snapshot.state === 'incomplete' && <Paper className="notice warning" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Valuation is incomplete</Typography><Typography>Reporting total is intentionally withheld. Missing, stale or invalid market dependencies must be resolved before this view can be complete.</Typography></Paper>}
-          {view === 'overview' && data.snapshot.state === 'stale' && <Paper className="notice warning" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Valuation is out of date</Typography><Typography>Holdings changed after this snapshot. Reporting total and P/L are intentionally withheld until a new valuation is available.</Typography></Paper>}
+          {view === 'overview' && data.snapshot.state === 'no_snapshot' && <Paper className="notice" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">No immutable snapshot yet</Typography><Typography>A snapshot is a frozen point-in-time valuation calculated from the current holdings plus dated quotes and FX rates. It does not place trades or change holdings. Earnings, value and allocation are withheld until the required market inputs exist and a snapshot is created.</Typography><OverviewActions onHoldings={() => { requestViewChange('holdings'); window.setTimeout(() => document.getElementById('holdings-title')?.focus(), 0) }} onMarketData={() => { requestViewChange('market'); window.setTimeout(() => document.getElementById('market-data-title')?.focus(), 0) }} onCurrency={() => { requestViewChange('holdings'); window.setTimeout(() => currencySelectRef.current?.focus(), 0) }} /></Paper>}
+          {view === 'overview' && (data.snapshot.state === 'incomplete' || data.snapshot.state === 'legacy') && <Paper className="notice warning" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">{data.snapshot.state === 'legacy' ? 'Valuation format needs review' : 'Valuation is incomplete'}</Typography><Typography>Reporting total is intentionally withheld. Missing dependencies: {data.snapshot.missing_dependencies === undefined ? 'Unknown' : data.snapshot.missing_dependencies.length}; stale dependencies: {data.snapshot.stale_dependencies === undefined ? 'Unknown' : data.snapshot.stale_dependencies.length}; future-dated dependencies: {data.snapshot.future_dependencies === undefined ? 'Unknown' : data.snapshot.future_dependencies.length}; invalid dependencies: {data.snapshot.invalid_dependencies === undefined ? 'Unknown' : data.snapshot.invalid_dependencies.length}.</Typography><Typography sx={{ mt: 1 }}>Future-dated inputs are not treated as zero. Resolve the indicated market-data setup or wait for a valid source time, then explicitly refresh prices.</Typography><OverviewActions onHoldings={() => { requestViewChange('holdings'); window.setTimeout(() => document.getElementById('holdings-title')?.focus(), 0) }} onMarketData={() => { requestViewChange('market'); window.setTimeout(() => document.getElementById('market-data-title')?.focus(), 0) }} onCurrency={() => { requestViewChange('holdings'); window.setTimeout(() => currencySelectRef.current?.focus(), 0) }} /></Paper>}
+          {view === 'overview' && data.snapshot.state === 'stale' && <Paper className="notice warning" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Valuation is out of date</Typography><Typography>Holdings changed after this snapshot. Reporting total and P/L are intentionally withheld until a new valuation is available.</Typography><OverviewActions onHoldings={() => { requestViewChange('holdings'); window.setTimeout(() => document.getElementById('holdings-title')?.focus(), 0) }} onMarketData={() => { requestViewChange('market'); window.setTimeout(() => document.getElementById('market-data-title')?.focus(), 0) }} onCurrency={() => { requestViewChange('holdings'); window.setTimeout(() => currencySelectRef.current?.focus(), 0) }} /></Paper>}
+          {view === 'overview' && data.snapshot.state === 'complete' && data.holdings.length > 0 && data.snapshot.reporting_total !== undefined && compareDecimalStrings(data.snapshot.reporting_total, '0') === 0 && <Paper className="notice warning" sx={{ mt: 3, p: 3 }}><Typography component="h2" variant="h5">Valuation total withheld</Typography><Typography>The snapshot has a nonempty portfolio but a zero reporting total. Allocation and total display are withheld rather than presenting zero as a complete portfolio result. Check the source holdings and market-data mappings.</Typography><OverviewActions onHoldings={() => { requestViewChange('holdings'); window.setTimeout(() => document.getElementById('holdings-title')?.focus(), 0) }} onMarketData={() => { requestViewChange('market'); window.setTimeout(() => document.getElementById('market-data-title')?.focus(), 0) }} onCurrency={() => { requestViewChange('holdings'); window.setTimeout(() => currencySelectRef.current?.focus(), 0) }} /></Paper>}
 
           {view === 'overview' && <AllocationSection data={data} />}
 

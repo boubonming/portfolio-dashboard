@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+// @ts-ignore Vitest runs this test in Node, whose built-in module is available at runtime.
+import { createServer } from 'node:http'
 import App, { compareDecimalStrings, formatDecimalForDisplay, formatMoneyForDisplay, isCSVContentType, safeCSVFilename, type PortfolioOverview } from './App'
 import * as api from './api'
 import { committedStyleRules, committedStyleSelectors, hasMatchingDeclaration, matchingStyleRules, installCommittedStyles } from './cssTestUtils'
@@ -1329,6 +1331,219 @@ describe('Portfolio Dashboard', () => {
     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview'))).toHaveLength(2)
   })
 
+  it('retains an uncertain refresh and retries the same canonical request', async () => {
+    const response = strictCompleteRefresh()
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.endsWith('/market-data') ? strictMarketSetup : completeOverview
+      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response)
+    })
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData')
+      .mockRejectedValueOnce(new Error('provider unavailable'))
+      .mockResolvedValueOnce(response)
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Refresh details' })).toBeTruthy())
+    const retryButton = within(screen.getByRole('region', { name: 'Refresh details' })).getByRole('button', { name: 'Retry same refresh' })
+    fireEvent.click(retryButton)
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledTimes(2)
+    expect(refreshSpy.mock.calls[1]?.[2]).toBe(refreshSpy.mock.calls[0]?.[2])
+    expect(refreshSpy.mock.calls[1]?.[5]).toEqual(strictMarketSetup)
+  })
+
+  it('retains a settled uncertain refresh across a currency change and blocks a new attempt', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const response = url.includes('currency=USD') ? { ...completeOverview, reporting_currency: 'USD' } : completeOverview
+      return Promise.resolve({ ok: true, status: 200, json: async () => url.endsWith('/market-data') ? marketSetup : response } as Response)
+    })
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData')
+      .mockRejectedValueOnce(new Error('provider unavailable'))
+      .mockResolvedValueOnce(strictCompleteRefresh() as unknown as Awaited<ReturnType<typeof api.refreshMarketData>>)
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Refresh details' })).toBeTruthy())
+    const firstKey = refreshSpy.mock.calls[0]?.[2]
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(screen.getByText(/return to MYR to retry the same refresh/i)).toBeTruthy())
+    fireEvent.click(screen.getAllByRole('button', { name: 'Retry same refresh' })[0])
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'MYR' } })
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Refresh details' })).toBeTruthy())
+    fireEvent.click(within(screen.getByRole('region', { name: 'Refresh details' })).getByRole('button', { name: 'Retry same refresh' }))
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledTimes(2)
+    expect(refreshSpy.mock.calls[1]?.[2]).toBe(firstKey)
+  })
+
+  it('restores GET-only recovery after a pending retry is canceled by currency scope change', async () => {
+    let overviewCalls = 0
+    let resolveRetryRead: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => strictMarketSetup } as Response)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 2) return Promise.reject(new Error('read unavailable'))
+        if (overviewCalls === 3) return new Promise<Response>((resolve) => { resolveRetryRead = resolve })
+        if (url.includes('currency=USD')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ ...completeOverview, reporting_currency: 'USD' }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue(strictCompleteRefresh())
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText('Prices refreshed, but Holdings could not be reloaded. Retry loading Holdings; do not repeat this refresh.')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'View refresh details' }))
+    fireEvent.click(within(screen.getByRole('region', { name: 'Refresh details' })).getByRole('button', { name: 'Retry loading Holdings' }))
+    await waitFor(() => expect(overviewCalls).toBe(3))
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes('currency=USD'))).toBe(true))
+    await waitFor(() => expect(screen.getByText(/Reporting values: USD/i)).toBeTruthy())
+    resolveRetryRead?.({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    await flushEffects()
+    expect(screen.getByText(/Reporting values: USD/i)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'MYR' } })
+    await waitFor(() => expect(overviewCalls).toBeGreaterThanOrEqual(5))
+    const retryButton = within(screen.getByRole('region', { name: 'Refresh details' })).getByRole('button', { name: 'Retry loading Holdings' })
+    expect((retryButton as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(retryButton)
+    await waitFor(() => expect(overviewCalls).toBeGreaterThanOrEqual(6))
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh prices' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(refreshSpy).toHaveBeenCalledOnce()
+  })
+
+  it('fails closed for malformed nested Overview data', async () => {
+    const malformed = { ...completeOverview, holdings: [{ ...completeOverview.holdings[0], freshness: null }] }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, json: async () => malformed } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Unable to load portfolio/i))
+    expect(screen.queryByRole('table', { name: 'Holdings' })).toBeNull()
+  })
+
+  it('rejects an Overview read from a foreign portfolio scope', async () => {
+    let overviewCalls = 0
+    const foreign = { ...completeOverview, portfolio: { ...completeOverview.portfolio, id: 'portfolio-foreign' } }
+    vi.stubGlobal('fetch', authenticatedFetch((input) => {
+      if (String(input).includes('/overview')) {
+        overviewCalls += 1
+        return Promise.resolve({ ok: true, status: 200, json: async () => overviewCalls === 1 ? completeOverview : foreign } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    }))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Unable to load portfolio/i))
+  })
+
+  it('does not claim confirmed Holdings values before the post-refresh GET settles', async () => {
+    let overviewCalls = 0
+    let resolveRefreshRead: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => strictMarketSetup } as Response)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 2) return new Promise<Response>((resolve) => { resolveRefreshRead = resolve })
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue(strictCompleteRefresh())
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(overviewCalls).toBe(2))
+    expect(screen.queryByText('Prices refreshed. Complete valuation loaded.')).toBeNull()
+    expect(screen.queryByText('Complete valuation loaded.')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'View refresh details' }))
+    const detailsRegion = screen.getByRole('region', { name: 'Refresh details' })
+    expect(within(detailsRegion).queryByText('Complete valuation loaded.')).toBeNull()
+    resolveRefreshRead?.({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledOnce()
+  })
+
+  it('retains a confirmed receipt when the Holdings read fails and retries GET only', async () => {
+    let overviewCalls = 0
+    let failRefreshRead = true
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => strictMarketSetup } as Response)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 2 && failRefreshRead) return Promise.reject(new Error('read unavailable'))
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue(strictCompleteRefresh())
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText('Prices refreshed, but Holdings could not be reloaded. Retry loading Holdings; do not repeat this refresh.')).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'Retry loading Holdings' })).toBeTruthy()
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'View refresh details' }))
+    const detailsRegion = screen.getByRole('region', { name: 'Refresh details' })
+    expect(within(detailsRegion).getByRole('button', { name: 'Retry loading Holdings' })).toBeTruthy()
+    expect(within(detailsRegion).queryByText('Complete valuation loaded.')).toBeNull()
+    expect(screen.queryByText('Complete valuation loaded.')).toBeNull()
+    failRefreshRead = false
+    fireEvent.click(within(detailsRegion).getByRole('button', { name: 'Retry loading Holdings' }))
+    await waitFor(() => expect(screen.getByText('Holdings loaded from the confirmed snapshot. No refresh was repeated.')).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledOnce()
+  })
+
+  it('does not downgrade a confirmed receipt when its Holdings read is canceled by currency change', async () => {
+    let overviewCalls = 0
+    let resolveRefreshRead: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => strictMarketSetup } as Response)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 2) return new Promise<Response>((resolve) => { resolveRefreshRead = resolve })
+        return Promise.resolve({ ok: true, status: 200, json: async () => url.includes('currency=USD') ? { ...completeOverview, reporting_currency: 'USD' } : completeOverview } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue(strictCompleteRefresh())
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(overviewCalls).toBe(2))
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(overviewCalls).toBe(3))
+    await waitFor(() => expect(screen.getByText(/Confirmed refresh for MYR is retained/i)).toBeTruthy())
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    resolveRefreshRead?.({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    await flushEffects()
+    expect(refreshSpy).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/Refresh outcome not confirmed/i)).toBeNull()
+  })
+
+  it('shows actionable recovery links for an Overview without a snapshot', async () => {
+    const noSnapshot: PortfolioOverview = { ...completeOverview, snapshot: { state: 'no_snapshot', complete: false, subtotals: [] } }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, json: async () => noSnapshot } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Overview' }))
+    expect(screen.getByRole('heading', { name: 'No immutable snapshot yet' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'View holdings' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open Market Data' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Change reporting currency in Holdings' })).toBeTruthy()
+  })
+
   it('does not refresh or reload when setup scope validation fails', async () => {
     const foreignSetup = { ...strictMarketSetup, portfolio_id: 'portfolio-foreign' }
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -1374,10 +1589,10 @@ describe('Portfolio Dashboard', () => {
     render(<App />)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('provider unavailable'))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Provider request failed. The refresh result was not confirmed.'))
     expect(screen.getByRole('table', { name: 'Holdings' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Refresh prices' })).toHaveProperty('disabled', false)
-    expect(screen.getByText('Price refresh failed.')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: 'Retry same refresh' }).some((button) => !(button as HTMLButtonElement).disabled)).toBe(true)
+    expect(screen.getByText('Refresh outcome not confirmed. Retry the same refresh before starting another one.')).toBeTruthy()
   })
 
   it('clears private state and returns to login after a refresh 401', async () => {
@@ -1391,9 +1606,9 @@ describe('Portfolio Dashboard', () => {
     expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
   })
 
-  it('invalidates a late refresh when switching views', async () => {
+  it('continues a refresh across ordinary view navigation and reloads Holdings', async () => {
     let resolveRefresh: ((value: Awaited<ReturnType<typeof api.refreshMarketData>>) => void) | undefined
-    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => String(input).endsWith('/market-data') ? marketSetup : completeOverview } as Response))
     vi.spyOn(api, 'refreshMarketData').mockImplementation(() => new Promise((resolve) => { resolveRefresh = resolve }))
     vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
     render(<App />)
@@ -1412,13 +1627,13 @@ describe('Portfolio Dashboard', () => {
     await flushEffects()
     fireEvent.click(screen.getByRole('tab', { name: 'Holdings' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
-    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore)
-    expect(screen.queryByText(/Prices refreshed/)).toBeNull()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/overview')).length).toBe(overviewCallsBefore + 1)
+    expect(screen.getByText(/Prices refreshed/)).toBeTruthy()
   })
 
   it('invalidates a late refresh when changing reporting currency', async () => {
     let resolveRefresh: ((value: Awaited<ReturnType<typeof api.refreshMarketData>>) => void) | undefined
-    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    const fetchMock = vi.fn((input: RequestInfo | URL) => Promise.resolve({ ok: true, status: 200, json: async () => String(input).endsWith('/market-data') ? marketSetup : completeOverview } as Response))
     vi.spyOn(api, 'refreshMarketData').mockImplementation(() => new Promise((resolve) => { resolveRefresh = resolve }))
     vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
     render(<App />)
@@ -1436,6 +1651,28 @@ describe('Portfolio Dashboard', () => {
     await flushEffects()
     expect(screen.queryByText(/Prices refreshed/)).toBeNull()
     expect(screen.queryByText(/Refreshing prices/)).toBeNull()
+  })
+
+  it('cancels setup safely when reporting currency changes before a provider request', async () => {
+    let resolveSetup: ((response: Response) => void) | undefined
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData')
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return new Promise<Response>((resolve) => { resolveSetup = resolve })
+      return Promise.resolve({ ok: true, status: 200, json: async () => url.includes('currency=USD') ? { ...completeOverview, reporting_currency: 'USD' } : completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/market-data'))).toBe(true))
+    fireEvent.change(screen.getByLabelText(/reporting currency/i), { target: { value: 'USD' } })
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/setup was canceled before a provider request/i))
+    expect(refreshSpy).not.toHaveBeenCalled()
+    resolveSetup?.({ ok: true, status: 200, json: async () => marketSetup } as Response)
+    await flushEffects()
+    expect(refreshSpy).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert').textContent).toMatch(/no refresh was started/i)
   })
 
   it('renders Unavailable for stale snapshots, no snapshots, and every affected freshness state', async () => {
@@ -3020,5 +3257,120 @@ describe('Portfolio Dashboard', () => {
       expect(screen.getByRole('tab', { name: destination }).getAttribute('aria-selected')).toBe('true')
       expect(fetchMock.mock.calls.some(([, init]) => ['POST', 'PUT', 'DELETE'].includes(String(init?.method || '').toUpperCase()))).toBe(false)
     }
+  })
+
+  it('exercises Refresh through the production setup, decoder, and App path', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => strictMarketSetup } as Response)
+      if (url.endsWith('/market-data/refresh')) return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => strictCompleteRefresh() } as Response)
+      return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/market-data/refresh'))).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'View refresh details' })).toBeTruthy()
+  })
+
+  it('exercises the real HTTP server, production decoder, and full App path', async () => {
+    const server = createServer((request: any, response: any) => {
+      const path = request.url?.split('?')[0] || ''
+      const body = path.endsWith('/auth/session') ? { authenticated: true, csrf_token: 'fixture-token', expires_at: expiresAt }
+        : path.endsWith('/market-data/refresh') ? strictCompleteRefresh()
+          : path.endsWith('/market-data') ? strictMarketSetup
+            : path.includes('/overview') ? completeOverview
+              : path.includes('/activity') ? { items: [], has_more: false }
+                : path.includes('/reviews') ? { items: [], has_more: false }
+                  : {}
+      response.statusCode = 200
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify(body))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('HTTP fixture did not bind a TCP port')
+    const baseURL = `http://127.0.0.1:${address.port}`
+    const nativeFetch = globalThis.fetch
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => nativeFetch(new URL(String(input), baseURL), init))
+    try {
+      render(<App />)
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+      await waitFor(() => expect(screen.getByText('Prices refreshed. Complete valuation loaded.')).toBeTruthy())
+      expect(screen.getByRole('button', { name: 'View refresh details' })).toBeTruthy()
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error: any) => error ? reject(error) : resolve()))
+    }
+  })
+
+  it('blocks duplicate refresh activation while setup is unresolved', async () => {
+    let setupCalls = 0
+    let resolveSetup: ((value: Response) => void) | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) {
+        setupCalls += 1
+        return new Promise<Response>((resolve) => { resolveSetup = resolve })
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    const refreshSpy = vi.spyOn(api, 'refreshMarketData').mockResolvedValue(strictCompleteRefresh())
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    const refresh = screen.getByRole('button', { name: 'Refresh prices' })
+    fireEvent.click(refresh)
+    fireEvent.click(refresh)
+    expect(setupCalls).toBe(1)
+    resolveSetup!({ ok: true, status: 200, json: async () => strictMarketSetup } as Response)
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalledOnce())
+  })
+
+  it('clears retained refresh details when setup loses authorization', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: false, status: 401, json: async () => ({}) } as Response)
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'View refresh details' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Personal Portfolio' })).toBeNull()
+  })
+
+  it('withholds a nonempty zero reporting total on Overview', async () => {
+    const zeroTotal: PortfolioOverview = { ...completeOverview, snapshot: { ...completeOverview.snapshot, reporting_total: '0' } }
+    vi.stubGlobal('fetch', authenticatedFetch(() => Promise.resolve({ ok: true, status: 200, json: async () => zeroTotal } as Response)))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Overview' }))
+    expect(screen.queryByText('0 MYR')).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Valuation total withheld' })).toBeTruthy()
+  })
+
+  it('rejects a malformed confirmed-read response without crashing or claiming recovery', async () => {
+    let overviewCalls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/market-data')) return Promise.resolve({ ok: true, status: 200, json: async () => strictMarketSetup } as Response)
+      if (url.includes('/overview')) {
+        overviewCalls += 1
+        if (overviewCalls === 2) return Promise.resolve({ ok: true, status: 200, json: async () => ({ portfolio: completeOverview.portfolio }) } as Response)
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response)
+    })
+    vi.spyOn(api, 'refreshMarketData').mockResolvedValue(strictCompleteRefresh())
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh prices' }))
+    await waitFor(() => expect(screen.getAllByText(/Prices refreshed, but Holdings could not be reloaded/).length).toBeGreaterThan(0))
+    expect(screen.getByRole('button', { name: 'View refresh details' })).toBeTruthy()
   })
 })

@@ -147,10 +147,20 @@ describe('semantic market refresh decoding', () => {
     await expect(decodeMarketResult(reversed)).rejects.toSatisfy((error: unknown) => error instanceof APIError && /ordering/.test(error.message))
   })
 
+  it('accepts the variable-precision UTC timestamps emitted by RFC3339Nano', async () => {
+    const value = coherentRefresh()
+    value.refresh.started_at = '2026-01-01T00:00:00Z'
+    value.refresh.ended_at = '2026-01-01T00:00:00.1Z'
+    value.snapshot.created_at = '2026-01-01T00:00:00.12Z'
+    value.snapshot.as_of = '2026-01-01T00:00:00.12Z'
+    value.snapshot.source_timestamps = ['2026-01-01T00:00:00.1Z', '2026-01-01T00:00:00.12Z']
+    await expect(decodeMarketResult(value)).resolves.toMatchObject({ complete: true })
+  })
+
   it('accepts setup-bound future quote and FX dependencies', async () => {
     const value = coherentRefresh()
     value.snapshot.future_count = 2
-    value.snapshot.future_dependencies = ['quote:instrument-a', 'fx:USD/MYR']
+    value.snapshot.future_dependencies = ['quote:quote-observation', 'fx:fx-observation']
     await expect(decodeMarketResult(value)).resolves.toMatchObject({ complete: true })
   })
 
@@ -177,6 +187,8 @@ describe('semantic market refresh decoding', () => {
     ['unbound quote observation', (value: ReturnType<typeof coherentRefresh>) => { value.snapshot.quote_ids = ['not-an-observation'] }],
     ['snapshot as-of after creation', (value: ReturnType<typeof coherentRefresh>) => { value.snapshot.as_of = '2026-01-01T00:00:03.000000000Z' }],
     ['incomplete original currency set', (value: ReturnType<typeof coherentRefresh>) => { value.snapshot.currencies = [] }],
+    ['mismatched aggregate quote witness', (value: ReturnType<typeof coherentRefresh>) => { value.refresh.quote_observations[0].symbol = 'FOREIGN' }],
+    ['mismatched snapshot FX witness', (value: ReturnType<typeof coherentRefresh>) => { value.snapshot.fx_observations[0].base_currency = 'EUR' }],
   ])('rejects %s', async (_name, mutate) => {
     const value = coherentRefresh()
     mutate(value)
