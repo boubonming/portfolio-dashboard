@@ -416,6 +416,25 @@ describe('Portfolio Dashboard', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View reviews for SAME lot lot-c' }))
   })
 
+  it('changes server-backed review status and lifecycle filters from the full authenticated App', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/reviews')
+      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [appReview], has_more: false }) } as Response)
+      : Promise.resolve({ ok: true, status: 200, json: async () => completeOverview } as Response))
+    vi.stubGlobal('fetch', authenticatedFetch(fetchMock))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Personal Portfolio' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('tab', { name: 'Reviews' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View review details' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Review status'), { target: { value: 'complete' } })
+    fireEvent.change(screen.getByLabelText('Review lifecycle'), { target: { value: 'false' } })
+    await waitFor(() => {
+      const url = String(fetchMock.mock.calls.filter(([input]) => String(input).includes('/reviews')).at(-1)?.[0])
+      expect(url).toContain('status=complete')
+      expect(url).toContain('outdated=false')
+      expect(url).not.toContain('cursor=')
+    })
+  })
+
   it('clears an old review lot filter when clean thesis navigation opens global Reviews', async () => {
     const filteredReview = { ...appReview, scope: { type: 'holding' as const, holding_ids: ['lot-a'], instrument_ids: ['instrument-a'] } }
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
